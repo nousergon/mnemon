@@ -1,6 +1,6 @@
 [![Bun](https://img.shields.io/badge/bun-1.3+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-37_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-50_passing-brightgreen.svg)]()
 [![CI](https://github.com/cipher813/mnemon/actions/workflows/ci.yml/badge.svg)](https://github.com/cipher813/mnemon/actions/workflows/ci.yml)
 
 # mnemon (μνήμων)
@@ -91,6 +91,9 @@ Or manually add to your MCP config:
 | `memory_status` | Vault health stats |
 | `memory_sweep` | Archive stale memories past their half-life |
 | `memory_rebuild` | Re-embed all documents (after model upgrade) |
+| `memory_check_contradictions` | Check a memory for conflicts with existing memories |
+| `profile_get` | Synthesized user profile from preferences + decisions |
+| `profile_update` | Add a preference to the user profile |
 
 ## Memory types
 
@@ -147,13 +150,27 @@ MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync pull
 
 ## Architecture
 
-**Phase 1 (current):** Local MCP server via stdio. SQLite + FTS5 for keyword search, in-process brute-force cosine for vector search. EmbeddingGemma-300M for embeddings via node-llama-cpp on Metal.
+**Phase 1:** Local MCP server via stdio. SQLite + FTS5 for keyword search, in-process brute-force cosine for vector search. EmbeddingGemma-300M for embeddings via node-llama-cpp on Metal.
 
-**Phase 2 (planned):** Claude Code hooks for automatic memory capture — context surfacing on every prompt, session extraction on exit, handoff generation. 90% of memory happens without agent intervention.
+**Phase 2:** Claude Code hooks for automatic memory capture — context surfacing on every prompt, session extraction on exit, handoff generation. 90% of memory happens without agent intervention.
 
-**Phase 3 (planned):** Query expansion, cross-encoder reranking, contradiction detection, confidence decay.
+**Phase 3:** Query expansion via local LLM, MMR diversity filtering, contradiction detection with confidence decay, user profile tools.
 
-**Phase 4 (current):** Remote Streamable HTTP server for Claude.ai web + iOS access. S3 vault sync between local and remote. Bearer token auth.
+**Phase 4:** Remote Streamable HTTP server for Claude.ai web + iOS access. S3 vault sync between local and remote. Bearer token auth.
+
+**Phase 5:** Test coverage (50 tests), type checking, documentation.
+
+## Claude Code hooks
+
+mnemon automatically captures memories via Claude Code hooks — no manual intervention needed:
+
+| Hook | Event | What it does |
+|------|-------|-------------|
+| Context surfacing | UserPromptSubmit (8s) | Searches vault, injects relevant memories as XML context |
+| Session extractor | Stop (30s) | Extracts observations from transcript via local 1.7B LLM |
+| Handoff generator | Stop (30s) | Generates session summary for continuity |
+
+Install with: `bun run src/index.ts setup hooks`
 
 ## Stack
 
