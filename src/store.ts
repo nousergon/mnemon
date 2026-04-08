@@ -1,16 +1,17 @@
 /**
- * Storage layer — SQLite + FTS5 + sqlite-vec.
+ * Storage layer — SQLite + FTS5 + in-process vector store.
  *
  * Content-addressable storage with full-text and vector search.
  * Single-file vault at ~/.mnemon/default.sqlite.
+ * Vectors stored in a companion .vec binary file (brute-force cosine search).
  */
 
 import { Database } from "bun:sqlite";
-import * as sqliteVec from "sqlite-vec";
 import { createHash } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { VecStore } from "./vecstore.ts";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -116,8 +117,7 @@ function defaultVaultPath(): string {
 
 export class Store {
   db: Database;
-  private vectorDim: number;
-  private vectorsEnabled: boolean;
+  vecStore: VecStore;
 
   constructor(dbPath?: string, vectorDim = 768) {
     const path = dbPath ?? defaultVaultPath();
@@ -128,20 +128,14 @@ export class Store {
     }
 
     this.db = new Database(path);
-    this.vectorDim = vectorDim;
-    this.vectorsEnabled = false;
 
     // WAL mode for concurrent reads
     this.db.run("PRAGMA journal_mode = WAL");
     this.db.run("PRAGMA busy_timeout = 15000");
 
-    // Try to load sqlite-vec extension (may fail if SQLite doesn't support extensions)
-    try {
-      sqliteVec.load(this.db);
-      this.vectorsEnabled = true;
-    } catch {
-      console.error("sqlite-vec not available — vector search disabled. BM25 search still works.");
-    }
+    // Vector store in companion file
+    const vecPath = path.replace(/\.sqlite$/, ".vec");
+    this.vecStore = new VecStore(vecPath, vectorDim);
 
     this._initSchema();
   }
@@ -177,23 +171,13 @@ export class Store {
       )
     `);
 
-    // FTS5 virtual table (external content not needed — we manage sync manually)
+    // FTS5 virtual table
     this.db.run(`
       CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
         title, body,
         tokenize='porter unicode61'
       )
     `);
-
-    // Vector table (only if sqlite-vec loaded)
-    if (this.vectorsEnabled) {
-      this.db.run(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS vectors USING vec0(
-          id TEXT PRIMARY KEY,
-          embedding float[${this.vectorDim}] distance_metric=cosine
-        )
-      `);
-    }
 
     // Relations graph
     this.db.run(`
@@ -296,12 +280,15 @@ export class Store {
    * Store a vector embedding for a document.
    */
   saveEmbedding(contentHash: string, seq: number, embedding: Float32Array): void {
-    if (!this.vectorsEnabled) return;
     const id = `${contentHash}_${seq}`;
-    this.db.run(
-      "INSERT OR REPLACE INTO vectors (id, embedding) VALUES (?, ?)",
-      [id, Buffer.from(embedding.buffer)]
-    );
+    this.vecStore.set(id, embedding);
+  }
+
+  /**
+   * Persist vector store to disk. Call after batch embedding operations.
+   */
+  flushVectors(): void {
+    this.vecStore.save();
   }
 
   /**
@@ -432,45 +419,38 @@ export class Store {
   }
 
   /**
-   * Vector similarity search via sqlite-vec.
+   * Vector similarity search via in-process brute-force cosine.
    */
   searchVector(embedding: Float32Array, limit = 20): SearchResult[] {
-    if (!this.vectorsEnabled) return [];
-    try {
-      const rows = this.db.query<any, [Buffer, number]>(`
-        SELECT
-          v.id AS vec_id,
-          v.distance,
-          d.id AS doc_id,
-          d.title,
-          c.doc AS content,
-          d.content_type,
-          d.memory_type,
-          d.confidence,
-          d.created_at
-        FROM vectors v
-        JOIN documents d ON d.hash = SUBSTR(v.id, 1, INSTR(v.id, '_') - 1)
-        JOIN content c ON d.hash = c.hash
-        WHERE v.embedding MATCH ?
-          AND d.invalidated_at IS NULL
-          AND k = ?
-        ORDER BY v.distance
-      `).all(Buffer.from(embedding.buffer), limit);
+    if (this.vecStore.size() === 0) return [];
 
-      return rows.map((r: any) => ({
-        doc_id: r.doc_id,
-        title: r.title,
-        content: r.content,
-        content_type: r.content_type,
-        memory_type: r.memory_type,
-        confidence: r.confidence,
-        created_at: r.created_at,
-        score: 1 - r.distance, // cosine distance → similarity
-        source: "vector" as const,
-      }));
-    } catch {
-      return [];
+    const vecResults = this.vecStore.search(embedding, limit * 2);
+
+    // Resolve vec IDs back to documents
+    const results: SearchResult[] = [];
+    for (const vr of vecResults) {
+      const contentHash = vr.id.split("_")[0]!;
+      const doc = this.db.query<any, [string]>(`
+        SELECT d.id AS doc_id, d.title, c.doc AS content, d.content_type,
+               d.memory_type, d.confidence, d.created_at
+        FROM documents d
+        JOIN content c ON d.hash = c.hash
+        WHERE d.hash = ? AND d.invalidated_at IS NULL
+        LIMIT 1
+      `).get(contentHash);
+
+      if (doc && !results.some((r) => r.doc_id === doc.doc_id)) {
+        results.push({
+          ...doc,
+          score: vr.similarity,
+          source: "vector" as const,
+        });
+      }
+
+      if (results.length >= limit) break;
     }
+
+    return results;
   }
 
   // ── Relations ────────────────────────────────────────────────────────────
@@ -520,12 +500,7 @@ export class Store {
       "SELECT content_type, COUNT(*) as count FROM documents WHERE invalidated_at IS NULL GROUP BY content_type ORDER BY count DESC"
     ).all();
 
-    let totalVectors = 0;
-    if (this.vectorsEnabled) {
-      totalVectors = this.db.query<{ count: number }, []>(
-        "SELECT COUNT(*) as count FROM vectors"
-      ).get()!.count;
-    }
+    const totalVectors = this.vecStore.size();
 
     const invalidated = this.db.query<{ count: number }, []>(
       "SELECT COUNT(*) as count FROM documents WHERE invalidated_at IS NOT NULL"
@@ -592,6 +567,7 @@ export class Store {
   }
 
   close(): void {
+    this.vecStore.save();
     this.db.close();
   }
 }

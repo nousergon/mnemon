@@ -91,7 +91,7 @@ export function fragmentize(title: string, content: string): Array<{ seq: number
  * Embed and store all fragments for a document.
  */
 export async function embedDocument(
-  store: { saveEmbedding: (hash: string, seq: number, emb: Float32Array) => void },
+  store: { saveEmbedding: (hash: string, seq: number, emb: Float32Array) => void; flushVectors: () => void },
   contentHash: string,
   title: string,
   content: string,
@@ -105,6 +105,7 @@ export async function embedDocument(
     count++;
   }
 
+  store.flushVectors();
   return count;
 }
 
