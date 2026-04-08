@@ -281,6 +281,104 @@ server.tool(
   },
 );
 
+// ── Profile Tools ───────────────────────────────────────────────────────────
+
+server.tool(
+  "profile_get",
+  "Get a synthesized user profile from stored preferences and decisions. Shows what mnemon knows about the user's habits, preferences, and key decisions.",
+  {},
+  async () => {
+    const preferences = store.timeline(50, "preference" as any);
+    const decisions = store.timeline(50, "decision" as any);
+
+    if (preferences.length === 0 && decisions.length === 0) {
+      return {
+        content: [{ type: "text" as const, text: "No profile data yet. Preferences and decisions will be collected automatically over time." }],
+      };
+    }
+
+    const sections: string[] = [];
+
+    if (preferences.length > 0) {
+      sections.push("## Preferences\n" +
+        preferences.map((p: any) => `- **${p.title}**: ${p.doc.slice(0, 200)}`).join("\n"));
+    }
+
+    if (decisions.length > 0) {
+      sections.push("## Key Decisions\n" +
+        decisions.map((d: any) => `- **${d.title}**: ${d.doc.slice(0, 200)}`).join("\n"));
+    }
+
+    return {
+      content: [{ type: "text" as const, text: sections.join("\n\n") }],
+    };
+  },
+);
+
+server.tool(
+  "profile_update",
+  "Manually add a fact to the user profile. Saved as a preference memory.",
+  {
+    title: z.string().describe("Short title for the preference"),
+    content: z.string().describe("Description of the preference or habit"),
+  },
+  async ({ title, content }) => {
+    const docId = store.save({
+      title,
+      content,
+      content_type: "preference",
+      source_client: "mcp-profile",
+    });
+
+    const doc = store.get(docId);
+    if (doc) {
+      embedDocument(store, doc.hash, title, content).catch(() => {});
+    }
+
+    return {
+      content: [{ type: "text" as const, text: `Profile updated — saved preference #${docId}: "${title}"` }],
+    };
+  },
+);
+
+// ── Contradiction Check Tool ────────────────────────────────────────────────
+
+server.tool(
+  "memory_check_contradictions",
+  "Check a memory for contradictions against existing memories. Uses vector similarity + LLM classification to find conflicts.",
+  {
+    id: z.number().describe("Document ID to check"),
+  },
+  async ({ id }) => {
+    const doc = store.get(id);
+    if (!doc) {
+      return {
+        content: [{ type: "text" as const, text: `Memory #${id} not found.` }],
+      };
+    }
+
+    const { checkContradictions } = await import("./contradiction.ts");
+    const result = await checkContradictions(store, doc.title, (doc as any).doc, id);
+
+    if (result.relationships.length === 0) {
+      return {
+        content: [{ type: "text" as const, text: `No contradictions found for memory #${id}.` }],
+      };
+    }
+
+    const lines = result.relationships
+      .map((r) => `- #${r.docId} "${r.title}" → **${r.relationship}**`)
+      .join("\n");
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: `Contradiction check for #${id} "${doc.title}":\n${lines}\n\n${result.decayed} memories had their confidence decayed.`,
+      }],
+    };
+  },
+);
+
 // ── Start Server ────────────────────────────────────────────────────────────
 
 async function main() {
