@@ -183,12 +183,15 @@ export async function search(
       ? rrfFuse(bm25Results, expansionResults)
       : bm25Results;
 
-    return mmrFilter(
-      allBm25
-        .map(compositeScore)
-        .sort((a, b) => b.composite_score - a.composite_score)
-        .slice(0, limit),
-    );
+    const scored = allBm25
+      .map(compositeScore)
+      .sort((a, b) => b.composite_score - a.composite_score);
+
+    const filtered = opts.contentType
+      ? scored.filter((r) => r.content_type === opts.contentType)
+      : scored;
+
+    return mmrFilter(filtered.slice(0, limit));
   }
 
   // Vector search
