@@ -87,8 +87,8 @@ async function main() {
 
     case "setup": {
       const target = args[1];
-      if (!target || !["claude-code", "cursor", "gemini"].includes(target)) {
-        console.error("Usage: mnemon setup <claude-code|cursor|gemini>");
+      if (!target || !["claude-code", "cursor", "gemini", "hooks"].includes(target)) {
+        console.error("Usage: mnemon setup <claude-code|cursor|gemini|hooks>");
         process.exit(1);
       }
       setupIntegration(target);
@@ -151,7 +151,65 @@ function setupIntegration(target: string) {
       console.log(JSON.stringify({ mnemon: mcpConfig }, null, 2));
       break;
     }
+
+    case "hooks": {
+      setupHooks();
+      break;
+    }
   }
+}
+
+function setupHooks() {
+  const settingsPath = join(homedir(), ".claude", "settings.json");
+  let settings: any = {};
+  if (existsSync(settingsPath)) {
+    settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+  }
+
+  if (!settings.hooks) settings.hooks = {};
+
+  const hooksDir = join(process.cwd(), "src", "hooks");
+
+  // UserPromptSubmit — context surfacing
+  settings.hooks.UserPromptSubmit = [
+    {
+      matcher: "",
+      hooks: [
+        {
+          type: "command",
+          command: `bun run ${join(hooksDir, "context-surfacing.ts")}`,
+          timeout: 8,
+        },
+      ],
+    },
+  ];
+
+  // Stop — session extractor + handoff generator
+  settings.hooks.Stop = [
+    {
+      matcher: "",
+      hooks: [
+        {
+          type: "command",
+          command: `bun run ${join(hooksDir, "session-extractor.ts")}`,
+          timeout: 30,
+        },
+        {
+          type: "command",
+          command: `bun run ${join(hooksDir, "handoff-generator.ts")}`,
+          timeout: 30,
+        },
+      ],
+    },
+  ];
+
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  console.log(`Claude Code hooks configured at ${settingsPath}`);
+  console.log("\nHooks installed:");
+  console.log("  UserPromptSubmit → context-surfacing (8s timeout)");
+  console.log("  Stop → session-extractor (30s timeout)");
+  console.log("  Stop → handoff-generator (30s timeout)");
+  console.log("\nRestart Claude Code to activate hooks.");
 }
 
 main().catch((err) => {
