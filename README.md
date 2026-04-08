@@ -64,26 +64,36 @@ REMOTE (EC2):
 # Install Bun (if needed)
 curl -fsSL https://bun.sh/install | bash
 
-# Clone and install
+# Install mnemon globally
+npm install -g mnemon
+
+# Configure your tools (pick one or more)
+mnemon setup claude-code   # Claude Code (~/.claude/settings.json)
+mnemon setup cursor        # Cursor (~/.cursor/mcp.json)
+mnemon setup gemini        # Gemini CLI (~/.gemini/settings.json)
+mnemon setup hooks         # Claude Code auto-memory hooks
+
+# Check vault health
+mnemon status
+```
+
+### Install from source
+
+```bash
 git clone https://github.com/cipher813/mnemon.git
 cd mnemon
 bun install
-
-# Run tests
 bun test
-
-# Start the MCP server (stdio, for local clients)
-bun run src/index.ts serve
 ```
 
 ## Configure local clients
 
 ```bash
 # Automated setup
-bun run src/index.ts setup claude-code   # Claude Code (~/.claude/settings.json)
-bun run src/index.ts setup cursor        # Cursor (~/.cursor/mcp.json)
-bun run src/index.ts setup gemini        # Gemini CLI (~/.gemini/settings.json)
-bun run src/index.ts setup hooks         # Claude Code auto-memory hooks
+mnemon setup claude-code   # Claude Code (~/.claude/settings.json)
+mnemon setup cursor        # Cursor (~/.cursor/mcp.json)
+mnemon setup gemini        # Gemini CLI (~/.gemini/settings.json)
+mnemon setup hooks         # Claude Code auto-memory hooks
 ```
 
 Or manually add to any MCP-compatible client's config:
@@ -201,13 +211,15 @@ Pinned memories are exempt from decay. Stale memories are soft-deleted by `memor
 ## CLI
 
 ```bash
-bun run src/index.ts serve              # MCP server (stdio)
-bun run src/index.ts serve-remote       # HTTP server (Streamable HTTP)
-bun run src/index.ts status             # Vault health stats
-bun run src/index.ts search <query>     # Search memories
-bun run src/index.ts save <title> <content>  # Save a memory
-bun run src/index.ts setup <target>     # Configure integration
-bun run src/index.ts sync <push|pull>   # S3 vault sync
+mnemon serve              # MCP server (stdio)
+mnemon serve-remote       # HTTP server (Streamable HTTP)
+mnemon status             # Vault health stats
+mnemon search <query>     # Search memories
+mnemon save <title> <content>  # Save a memory
+mnemon setup <target>     # Configure integration
+mnemon sync <push|pull>   # S3 vault sync
+mnemon --version          # Show version
+mnemon --help             # Show usage
 ```
 
 ## Stack

@@ -1,18 +1,41 @@
 {
-  "name": "mnemon",
+  "name": "mnemon-memory",
   "version": "0.1.0",
-  "description": "Universal long-term memory layer for AI agents via MCP",
+  "description": "Universal long-term memory layer for AI agents via MCP — hybrid BM25 + vector search, SQLite storage, Apple Silicon GPU acceleration",
   "module": "src/index.ts",
   "type": "module",
   "bin": {
     "mnemon": "./bin/mnemon"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "bun run src/index.ts",
     "serve": "bun run src/mcp.ts",
     "test": "bun test",
     "test:coverage": "bun test --coverage"
   },
+  "engines": {
+    "bun": ">=1.0"
+  },
+  "keywords": [
+    "mcp",
+    "memory",
+    "ai",
+    "agents",
+    "claude",
+    "cursor",
+    "gemini",
+    "llm",
+    "vector-search",
+    "sqlite",
+    "embedding",
+    "model-context-protocol"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "node-llama-cpp": "^3.18.1"

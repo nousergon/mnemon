@@ -12,14 +12,27 @@
 import { Store } from "./store.ts";
 import { search } from "./search.ts";
 import { embedDocument, VECTOR_DIM } from "./embedder.ts";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { existsSync, writeFileSync, readFileSync } from "node:fs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PKG_VERSION = "0.1.0";
 
 const args = process.argv.slice(2);
 const command = args[0];
 
 async function main() {
+  if (command === "--version" || command === "-v") {
+    console.log(`mnemon v${PKG_VERSION}`);
+    return;
+  }
+  if (command === "--help" || command === "-h") {
+    printUsage();
+    return;
+  }
+
   switch (command) {
     case "serve":
       // Import and run MCP server
@@ -123,23 +136,32 @@ async function main() {
     }
 
     default:
-      console.log(`mnemon v0.1.0 — Universal long-term memory for AI agents
+      printUsage();
+      break;
+  }
+}
+
+function printUsage() {
+  console.log(`mnemon v${PKG_VERSION} — Universal long-term memory for AI agents
 
 Usage:
   mnemon serve              Start MCP server (stdio transport)
-  mnemon serve-remote       Start HTTP server (Streamable HTTP for Claude.ai/iOS)
+  mnemon serve-remote       Start HTTP server (Streamable HTTP)
   mnemon status             Show vault health stats
   mnemon search <query>     Search memories
   mnemon save <title> <content>  Save a memory
   mnemon setup <target>     Configure integration (claude-code, cursor, gemini, hooks)
   mnemon sync <push|pull>   Sync vault to/from S3
+  mnemon --version          Show version
+  mnemon --help             Show this help
+
+Requires: bun >= 1.0 (https://bun.sh)
+Docs: https://github.com/cipher813/mnemon
 `);
-      break;
-  }
 }
 
 function setupIntegration(target: string) {
-  const mnemonPath = join(process.cwd(), "src", "mcp.ts");
+  const mnemonPath = join(__dirname, "mcp.ts");
   const mcpConfig = {
     command: "bun",
     args: ["run", mnemonPath],
@@ -197,7 +219,7 @@ function setupHooks() {
 
   if (!settings.hooks) settings.hooks = {};
 
-  const hooksDir = join(process.cwd(), "src", "hooks");
+  const hooksDir = join(__dirname, "hooks");
 
   // UserPromptSubmit — context surfacing
   settings.hooks.UserPromptSubmit = [
