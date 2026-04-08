@@ -224,7 +224,7 @@ export class Store {
     const hash = sha256(opts.content);
     const contentType = opts.content_type ?? "note";
     const memoryType = opts.memory_type ?? MEMORY_TYPE_MAP[contentType] ?? "semantic";
-    const confidence = opts.confidence ?? this._defaultConfidence(contentType);
+    const confidence = opts.confidence ?? this.defaultConfidence(contentType);
 
     // Upsert content (idempotent)
     this.db.run(
@@ -552,7 +552,7 @@ export class Store {
     return { archived: dryRun ? 0 : candidates.length, candidates };
   }
 
-  private _defaultConfidence(contentType: ContentType): number {
+  defaultConfidence(contentType: ContentType): number {
     const defaults: Record<ContentType, number> = {
       decision: 0.85,
       preference: 0.80,
