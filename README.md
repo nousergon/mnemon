@@ -8,31 +8,55 @@
 
 Universal long-term memory layer for AI agents. One memory vault, every tool.
 
-mnemon is an MCP server that gives Claude Code, Cursor, Gemini CLI, and Claude.ai access to a shared, persistent memory store with hybrid keyword + semantic search.
+mnemon is an MCP server that gives Claude Code, Claude Desktop, Cursor, Gemini CLI, and any MCP-compatible client access to a shared, persistent memory store with hybrid keyword + semantic search. A remote Streamable HTTP server enables access from web and mobile clients.
 
 ## How it works
 
 ```
 LOCAL (Mac — Metal GPU):
-  [Claude Code] --stdio--> [mnemon MCP] <--stdio-- [Cursor]
-  [Gemini CLI]  --stdio-->      |
-                          [SQLite + FTS5]
-                          [Vector store]
-                          [GGUF models on Metal]
-                                |
-                          S3 vault sync
-                                |
+  [Claude Code]    --stdio--> [mnemon MCP] <--stdio-- [Cursor]
+  [Claude Desktop] --stdio-->      |       <--stdio-- [Gemini CLI]
+                             [SQLite + FTS5]
+                             [Vector store]
+                             [GGUF models on Metal]
+                                   |
+                             S3 vault sync
+                                   |
 REMOTE (EC2):
-  [Claude.ai web] --HTTP--> [mnemon remote]
-  [Claude iOS]    --HTTP-->      |
-                           [SQLite + FTS5]
-                           [BM25-only search]
+  [Claude.ai web]  --HTTP--> [mnemon remote]
+  [Claude iOS]     --HTTP-->      |
+  [Gemini mobile]  --HTTP-->      |
+                            [SQLite + FTS5]
+                            [BM25-only search]
 ```
 
-- **Storage:** SQLite with FTS5 full-text search + companion vector store for semantic search
-- **Embedding:** EmbeddingGemma-300M (768d) via node-llama-cpp, runs on Apple Silicon Metal
-- **Search:** BM25 + vector + Reciprocal Rank Fusion + composite scoring (relevance/recency/confidence)
-- **Protocol:** MCP (Model Context Protocol) — works with any MCP-compatible client
+## Client compatibility
+
+| Client | Transport | Status |
+|--------|-----------|--------|
+| Claude Code | stdio + hooks | Working — auto context surfacing, session extraction, vault sync |
+| Claude Desktop | stdio MCP | Working — all 13 tools available |
+| Cursor | stdio MCP | Working — all 13 tools available |
+| Gemini CLI | stdio MCP | Working — all 13 tools available |
+| claude.ai web | Streamable HTTP | Ready — server deployed, waiting on client MCP support |
+| Claude iOS | Streamable HTTP | Ready — server deployed, waiting on client MCP support |
+| Gemini mobile | Streamable HTTP | Ready — server deployed, waiting on client MCP support |
+
+**Local clients** (stdio) get full hybrid search — BM25 + vector similarity with GPU-accelerated embeddings on Apple Silicon.
+
+**Remote clients** (HTTP) get BM25 keyword search with composite scoring — no GPU required on the server. Bearer token authentication.
+
+## Features
+
+- **Hybrid search:** BM25 full-text + vector similarity + Reciprocal Rank Fusion + composite scoring (relevance/recency/confidence)
+- **Automatic memory capture:** Claude Code hooks surface relevant context on every prompt, extract observations at session end, and generate handoff summaries for continuity
+- **Contradiction detection:** New memories are checked against existing ones; conflicting memories get confidence decay
+- **Query expansion:** Local GGUF model expands search queries for better recall
+- **MMR diversity:** Maximal Marginal Relevance prevents redundant search results
+- **Confidence decay:** Memories have type-based half-lives; stale memories are archived automatically
+- **User profiles:** Synthesized from stored preferences and decisions
+- **S3 vault sync:** Push/pull vault between local and remote, with automated sync on session end
+- **Bearer token auth:** Secure remote access without browser-based login flows
 
 ## Quick start
 
@@ -48,24 +72,21 @@ bun install
 # Run tests
 bun test
 
-# Start the MCP server
+# Start the MCP server (stdio, for local clients)
 bun run src/index.ts serve
 ```
 
-## Configure your tools
+## Configure local clients
 
 ```bash
-# Claude Code
-bun run src/index.ts setup claude-code
-
-# Cursor
-bun run src/index.ts setup cursor
-
-# Gemini CLI
-bun run src/index.ts setup gemini
+# Automated setup
+bun run src/index.ts setup claude-code   # Claude Code (~/.claude/settings.json)
+bun run src/index.ts setup cursor        # Cursor (~/.cursor/mcp.json)
+bun run src/index.ts setup gemini        # Gemini CLI (~/.gemini/settings.json)
+bun run src/index.ts setup hooks         # Claude Code auto-memory hooks
 ```
 
-Or manually add to your MCP config:
+Or manually add to any MCP-compatible client's config:
 
 ```json
 {
@@ -77,6 +98,70 @@ Or manually add to your MCP config:
   }
 }
 ```
+
+**Claude Desktop:** Add the above to `~/Library/Application Support/Claude/claude_desktop_config.json` under the `mcpServers` key.
+
+## Configure remote clients
+
+Deploy the remote server on any host (EC2, VPS, etc.):
+
+```bash
+MNEMON_TOKEN=your-secret-token PORT=8503 bun run src/index.ts serve-remote
+```
+
+The remote server exposes the same MCP tools over Streamable HTTP at `/mcp`, with a health check at `/health`. It runs BM25-only search (no GPU, no embedding model) for minimal resource usage.
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 8502 | Server port |
+| `MNEMON_TOKEN` | (empty) | Bearer token for auth (empty = no auth) |
+| `MNEMON_VAULT` | `~/.mnemon/default.sqlite` | Custom vault path |
+
+**Production deployment** (systemd):
+
+```ini
+[Unit]
+Description=Mnemon Remote MCP Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/path/to/bun run /path/to/mnemon/src/server.ts
+Environment=PORT=8503
+Environment=MNEMON_TOKEN=your-secret-token
+Restart=on-failure
+MemoryMax=150M
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Put an HTTPS reverse proxy (nginx, Caddy) in front for TLS termination. Remote MCP clients connect to `https://your-domain/mcp` with the bearer token.
+
+## Claude Code hooks
+
+Three hooks automate memory capture in Claude Code:
+
+| Hook | Event | Description |
+|------|-------|-------------|
+| Context surfacing | UserPromptSubmit | Searches vault for relevant memories and injects them as context |
+| Session extractor | Stop | Extracts observations, decisions, and preferences from the conversation |
+| Handoff generator | Stop | Creates a session summary for next-conversation continuity |
+
+Install with `bun run src/index.ts setup hooks` or add manually to `~/.claude/settings.json`.
+
+## S3 vault sync
+
+Sync your vault between local and remote instances via S3:
+
+```bash
+MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync push   # Local -> S3
+MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync pull   # S3 -> Local
+```
+
+For automated sync, add an S3 push to your Claude Code Stop hooks and a systemd timer on the remote server to pull periodically.
 
 ## MCP tools
 
@@ -116,57 +201,22 @@ Pinned memories are exempt from decay. Stale memories are soft-deleted by `memor
 ## CLI
 
 ```bash
-bun run src/index.ts serve              # Start MCP server (stdio)
-bun run src/index.ts serve-remote       # Start HTTP server (Streamable HTTP)
+bun run src/index.ts serve              # MCP server (stdio)
+bun run src/index.ts serve-remote       # HTTP server (Streamable HTTP)
 bun run src/index.ts status             # Vault health stats
 bun run src/index.ts search <query>     # Search memories
 bun run src/index.ts save <title> <content>  # Save a memory
-bun run src/index.ts setup <target>     # Configure (claude-code, cursor, gemini, hooks)
-bun run src/index.ts sync push          # Push vault to S3
-bun run src/index.ts sync pull          # Pull vault from S3
+bun run src/index.ts setup <target>     # Configure integration
+bun run src/index.ts sync <push|pull>   # S3 vault sync
 ```
-
-## Remote server (Claude.ai + iOS)
-
-```bash
-# Start remote server with auth
-MNEMON_TOKEN=your-secret-token PORT=8502 bun run src/index.ts serve-remote
-
-# Environment variables
-PORT=8502                    # Server port (default: 8502)
-MNEMON_TOKEN=                # Bearer token for auth (empty = no auth)
-MNEMON_VAULT=                # Custom vault path (default: ~/.mnemon/default.sqlite)
-```
-
-Then add as a custom connector on claude.ai: Settings > Connectors > Add Custom Connector with your server URL (`https://your-domain/mcp`).
-
-## S3 vault sync
-
-Sync your vault between local and remote via S3:
-
-```bash
-MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync push
-MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync pull
-```
-
-## Architecture
-
-**Phase 1:** Local MCP server via stdio. SQLite + FTS5 + in-process vector search. EmbeddingGemma-300M on Metal.
-
-**Phase 2:** Claude Code hooks for automatic memory capture — context surfacing, session extraction, handoff generation.
-
-**Phase 3:** Query expansion, MMR diversity filtering, contradiction detection, confidence decay, profile tools.
-
-**Phase 4:** Remote Streamable HTTP server for Claude.ai web + iOS. S3 vault sync. Bearer token auth.
-
-**Phase 5:** 75 tests, 88% coverage on testable surface, type checking, documentation.
 
 ## Stack
 
 - [Bun](https://bun.sh) — runtime (bun:sqlite, fast startup)
-- [MCP SDK](https://github.com/modelcontextprotocol/sdk) — Model Context Protocol server
-- [node-llama-cpp](https://github.com/withcatai/node-llama-cpp) — local GGUF model inference (Metal GPU)
+- [MCP SDK](https://github.com/modelcontextprotocol/sdk) — Model Context Protocol (stdio + Streamable HTTP)
+- [node-llama-cpp](https://github.com/withcatai/node-llama-cpp) — local GGUF model inference (Apple Silicon Metal)
 - [EmbeddingGemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF) — embedding model (314MB, 768d)
+- [QMD-1.7B](https://huggingface.co/ggml-org) — query expansion + observation extraction
 
 ## License
 
