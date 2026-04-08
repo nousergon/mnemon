@@ -95,15 +95,44 @@ async function main() {
       break;
     }
 
+    case "serve-remote":
+      await import("./server.ts");
+      break;
+
+    case "sync": {
+      const { push, pull } = await import("./sync.ts");
+      const action = args[1];
+      if (action === "push") {
+        const result = await push();
+        result.pushed.forEach((p) => console.log(p));
+        if (result.errors.length > 0) {
+          result.errors.forEach((e) => console.error(e));
+          process.exit(1);
+        }
+      } else if (action === "pull") {
+        const result = await pull();
+        result.pulled.forEach((p) => console.log(p));
+        if (result.errors.length > 0) {
+          result.errors.forEach((e) => console.error(e));
+          process.exit(1);
+        }
+      } else {
+        console.error("Usage: mnemon sync <push|pull>");
+      }
+      break;
+    }
+
     default:
       console.log(`mnemon v0.1.0 — Universal long-term memory for AI agents
 
 Usage:
-  mnemon serve          Start MCP server (stdio transport)
-  mnemon status         Show vault health stats
-  mnemon search <query> Search memories
+  mnemon serve              Start MCP server (stdio transport)
+  mnemon serve-remote       Start HTTP server (Streamable HTTP for Claude.ai/iOS)
+  mnemon status             Show vault health stats
+  mnemon search <query>     Search memories
   mnemon save <title> <content>  Save a memory
-  mnemon setup <target> Configure integration (claude-code, cursor, gemini)
+  mnemon setup <target>     Configure integration (claude-code, cursor, gemini, hooks)
+  mnemon sync <push|pull>   Sync vault to/from S3
 `);
       break;
   }
