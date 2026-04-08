@@ -7,6 +7,7 @@
 
 import {
   getLlama,
+  resolveModelFile,
   type Llama,
   type LlamaModel,
   type LlamaEmbeddingContext,
@@ -32,7 +33,8 @@ async function ensureModel(): Promise<LlamaEmbeddingContext> {
   if (!_initPromise) {
     _initPromise = (async () => {
       _llama = await getLlama();
-      _model = await _llama.loadModel({ modelPath: MODEL_URI });
+      const modelPath = await resolveModelFile(MODEL_URI);
+      _model = await _llama.loadModel({ modelPath });
       _ctx = await _model.createEmbeddingContext({
         contextSize: 2048,
       });
