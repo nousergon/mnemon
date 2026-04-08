@@ -1,6 +1,7 @@
 [![Bun](https://img.shields.io/badge/bun-1.3+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-37_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-62_passing-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/coverage-88%25_(testable)-green.svg)]()
 [![CI](https://github.com/cipher813/mnemon/actions/workflows/ci.yml/badge.svg)](https://github.com/cipher813/mnemon/actions/workflows/ci.yml)
 
 # mnemon (μνήμων)
@@ -91,6 +92,9 @@ Or manually add to your MCP config:
 | `memory_status` | Vault health stats |
 | `memory_sweep` | Archive stale memories past their half-life |
 | `memory_rebuild` | Re-embed all documents (after model upgrade) |
+| `memory_check_contradictions` | Check a memory for conflicts with existing memories |
+| `profile_get` | Synthesized user profile from preferences + decisions |
+| `profile_update` | Add a preference to the user profile |
 
 ## Memory types
 
@@ -147,13 +151,15 @@ MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync pull
 
 ## Architecture
 
-**Phase 1 (current):** Local MCP server via stdio. SQLite + FTS5 for keyword search, in-process brute-force cosine for vector search. EmbeddingGemma-300M for embeddings via node-llama-cpp on Metal.
+**Phase 1:** Local MCP server via stdio. SQLite + FTS5 + in-process vector search. EmbeddingGemma-300M on Metal.
 
-**Phase 2 (planned):** Claude Code hooks for automatic memory capture — context surfacing on every prompt, session extraction on exit, handoff generation. 90% of memory happens without agent intervention.
+**Phase 2:** Claude Code hooks for automatic memory capture — context surfacing, session extraction, handoff generation.
 
-**Phase 3 (planned):** Query expansion, cross-encoder reranking, contradiction detection, confidence decay.
+**Phase 3:** Query expansion, MMR diversity filtering, contradiction detection, confidence decay, profile tools.
 
-**Phase 4 (current):** Remote Streamable HTTP server for Claude.ai web + iOS access. S3 vault sync between local and remote. Bearer token auth.
+**Phase 4:** Remote Streamable HTTP server for Claude.ai web + iOS. S3 vault sync. Bearer token auth.
+
+**Phase 5:** 75 tests, 88% coverage on testable surface, type checking, documentation.
 
 ## Stack
 

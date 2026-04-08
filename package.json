@@ -10,7 +10,8 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "serve": "bun run src/mcp.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "test:coverage": "bun test --coverage"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
