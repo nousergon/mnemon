@@ -1,6 +1,6 @@
 [![Bun](https://img.shields.io/badge/bun-1.3+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-12_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-37_passing-brightgreen.svg)]()
 [![CI](https://github.com/cipher813/mnemon/actions/workflows/ci.yml/badge.svg)](https://github.com/cipher813/mnemon/actions/workflows/ci.yml)
 
 # mnemon (μνήμων)
@@ -12,11 +12,20 @@ mnemon is an MCP server that gives Claude Code, Cursor, Gemini CLI, and Claude.a
 ## How it works
 
 ```
-[Claude Code] --stdio--> [mnemon MCP] <--stdio-- [Cursor]
-[Gemini CLI]  --stdio-->      |
-                        [SQLite + FTS5]
-                        [Vector store]
-                        [GGUF models on Metal]
+LOCAL (Mac — Metal GPU):
+  [Claude Code] --stdio--> [mnemon MCP] <--stdio-- [Cursor]
+  [Gemini CLI]  --stdio-->      |
+                          [SQLite + FTS5]
+                          [Vector store]
+                          [GGUF models on Metal]
+                                |
+                          S3 vault sync
+                                |
+REMOTE (EC2):
+  [Claude.ai web] --HTTP--> [mnemon remote]
+  [Claude iOS]    --HTTP-->      |
+                           [SQLite + FTS5]
+                           [BM25-only search]
 ```
 
 - **Storage:** SQLite with FTS5 full-text search + companion vector store for semantic search
@@ -103,11 +112,37 @@ Pinned memories are exempt from decay. Stale memories are soft-deleted by `memor
 ## CLI
 
 ```bash
-bun run src/index.ts serve          # Start MCP server (stdio)
-bun run src/index.ts status         # Vault health stats
-bun run src/index.ts search <query> # Search memories
+bun run src/index.ts serve              # Start MCP server (stdio)
+bun run src/index.ts serve-remote       # Start HTTP server (Streamable HTTP)
+bun run src/index.ts status             # Vault health stats
+bun run src/index.ts search <query>     # Search memories
 bun run src/index.ts save <title> <content>  # Save a memory
-bun run src/index.ts setup <target> # Configure integration
+bun run src/index.ts setup <target>     # Configure (claude-code, cursor, gemini, hooks)
+bun run src/index.ts sync push          # Push vault to S3
+bun run src/index.ts sync pull          # Pull vault from S3
+```
+
+## Remote server (Claude.ai + iOS)
+
+```bash
+# Start remote server with auth
+MNEMON_TOKEN=your-secret-token PORT=8502 bun run src/index.ts serve-remote
+
+# Environment variables
+PORT=8502                    # Server port (default: 8502)
+MNEMON_TOKEN=                # Bearer token for auth (empty = no auth)
+MNEMON_VAULT=                # Custom vault path (default: ~/.mnemon/default.sqlite)
+```
+
+Then add as a custom connector on claude.ai: Settings > Connectors > Add Custom Connector with your server URL (`https://your-domain/mcp`).
+
+## S3 vault sync
+
+Sync your vault between local and remote via S3:
+
+```bash
+MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync push
+MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync pull
 ```
 
 ## Architecture
@@ -118,7 +153,7 @@ bun run src/index.ts setup <target> # Configure integration
 
 **Phase 3 (planned):** Query expansion, cross-encoder reranking, contradiction detection, confidence decay.
 
-**Phase 4 (planned):** Remote Streamable HTTP server on EC2 for Claude.ai web + iOS access. S3 vault sync between local and remote.
+**Phase 4 (current):** Remote Streamable HTTP server for Claude.ai web + iOS access. S3 vault sync between local and remote. Bearer token auth.
 
 ## Stack
 
