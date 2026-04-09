@@ -1,7 +1,8 @@
 """MCP server — exposes mnemon memory tools via stdio transport.
 
 Tools: memory_search, memory_get, memory_save, memory_pin, memory_forget,
-       memory_status, memory_sweep, memory_timeline, memory_related, memory_rebuild
+       memory_status, memory_sweep, memory_timeline, memory_related, memory_rebuild,
+       memory_check_contradictions, profile_get, profile_update
 """
 
 from __future__ import annotations
@@ -229,6 +230,93 @@ def memory_rebuild() -> str:
             failed += 1
 
     return f"Rebuild complete: {embedded} documents embedded, {failed} failed."
+
+
+# ── Profile Tools ───────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def profile_get() -> str:
+    """Get a synthesized user profile from stored preferences and decisions.
+
+    Shows what mnemon knows about the user's habits, preferences, and key decisions.
+    """
+    store = _get_store()
+    preferences = store.timeline(50, "preference")
+    decisions = store.timeline(50, "decision")
+
+    if not preferences and not decisions:
+        return (
+            "No profile data yet. Preferences and decisions will be "
+            "collected automatically over time."
+        )
+
+    sections: list[str] = []
+
+    if preferences:
+        lines = [f"- **{d.title}**: {d.content[:200]}" for d in preferences]
+        sections.append("## Preferences\n" + "\n".join(lines))
+
+    if decisions:
+        lines = [f"- **{d.title}**: {d.content[:200]}" for d in decisions]
+        sections.append("## Key Decisions\n" + "\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
+@mcp.tool()
+def profile_update(title: str, content: str) -> str:
+    """Manually add a fact to the user profile. Saved as a preference memory."""
+    store = _get_store()
+    doc_id = store.save(
+        title=title,
+        content=content,
+        content_type="preference",
+        source_client="mcp-profile",
+    )
+
+    try:
+        from .embedder import embed_document
+        doc = store.get(doc_id)
+        if doc:
+            embed_document(store, doc.hash, title, content)
+    except Exception:
+        pass
+
+    return f'Profile updated — saved preference #{doc_id}: "{title}"'
+
+
+# ── Contradiction Check Tool ────────────────────────────────────────────────
+
+
+@mcp.tool()
+def memory_check_contradictions(id: int) -> str:
+    """Check a memory for contradictions against existing memories.
+
+    Uses vector similarity + LLM classification to find conflicts.
+    Automatically decays confidence of superseded or contradicting memories.
+    """
+    store = _get_store()
+    doc = store.get(id)
+    if not doc:
+        return f"Memory #{id} not found."
+
+    from .contradiction import check_contradictions
+    result = check_contradictions(store, doc.title, doc.content, id)
+
+    if not result["relationships"]:
+        return f"No contradictions found for memory #{id}."
+
+    lines = [
+        f'- #{r["doc_id"]} "{r["title"]}" → **{r["relationship"]}**'
+        for r in result["relationships"]
+    ]
+
+    return (
+        f'Contradiction check for #{id} "{doc.title}":\n'
+        + "\n".join(lines)
+        + f'\n\n{result["decayed"]} memories had their confidence decayed.'
+    )
 
 
 def run_stdio() -> None:

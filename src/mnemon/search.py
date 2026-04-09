@@ -1,7 +1,9 @@
-"""Search pipeline — BM25 + vector + RRF fusion + composite scoring + MMR diversity filtering.
+"""Search pipeline — BM25 + vector + query expansion + RRF fusion +
+composite scoring + MMR diversity filtering.
 
 Hybrid search: BM25 full-text search fused with vector semantic search via
-Reciprocal Rank Fusion (RRF). Falls back to BM25-only when vectors unavailable.
+Reciprocal Rank Fusion (RRF). Optional LLM-based query expansion generates
+alternative search terms. Falls back to BM25-only when vectors unavailable.
 """
 
 from __future__ import annotations
@@ -135,18 +137,56 @@ def rrf_fuse(*result_sets: list[SearchResult]) -> list[SearchResult]:
     return [SearchResult(**{**s["result"].__dict__, "score": s["score"]}) for s in fused]
 
 
+def expand_query(query: str) -> list[str]:
+    """Expand a query into lexical/semantic variants using the local LLM.
+
+    Returns up to 3 alternative queries. Falls back to empty list if LLM unavailable.
+    """
+    try:
+        from .llm import generate
+        response = generate(
+            "Generate 3 alternative search queries for the given query. "
+            "Output one per line, no numbering or bullets. "
+            "Keep them short and diverse — include synonyms, related concepts, "
+            "and different phrasings.",
+            query,
+            max_tokens=200,
+        )
+        expansions = [
+            line.strip() for line in response.split("\n")
+            if 3 < len(line.strip()) < 200
+        ]
+        return expansions[:3]
+    except Exception:
+        return []
+
+
 def search(
     store: Store,
     query: str,
     limit: int = 10,
     content_type: str | None = None,
     use_vector: bool = True,
+    use_expansion: bool = False,
 ) -> list[ScoredResult]:
     """Main search entry point. Hybrid BM25 + vector search with composite scoring."""
     bm25_results = store.search_bm25(query, limit * 2)
 
+    # Skip expansion if BM25 already has a strong signal
+    strong_bm25 = (
+        len(bm25_results) > 0
+        and bm25_results[0].score >= 0.85
+        and (len(bm25_results) < 2 or bm25_results[0].score - bm25_results[1].score >= 0.15)
+    )
+
+    # Query expansion (optional, skip if strong BM25 match)
+    expansion_results: list[SearchResult] = []
+    if use_expansion and not strong_bm25:
+        for eq in expand_query(query):
+            expansion_results.extend(store.search_bm25(eq, limit))
+
     # Vector search (optional, fails gracefully)
-    vector_results = []
+    vector_results: list[SearchResult] = []
     if use_vector:
         try:
             from .embedder import embed
@@ -155,11 +195,14 @@ def search(
         except Exception:
             pass  # Fall back to BM25-only
 
-    # Fuse if we have multiple result sets
+    # Fuse all result sets
+    result_sets = [bm25_results]
     if vector_results:
-        fused = rrf_fuse(bm25_results, vector_results)
-    else:
-        fused = bm25_results
+        result_sets.append(vector_results)
+    if expansion_results:
+        result_sets.append(expansion_results)
+
+    fused = rrf_fuse(*result_sets) if len(result_sets) > 1 else bm25_results
 
     scored = sorted(
         (composite_score(r) for r in fused),
