@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-253_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
-[![PyPI](https://img.shields.io/pypi/v/mnemon.svg)](https://pypi.org/project/mnemon/)
+[![PyPI](https://img.shields.io/badge/PyPI-v0.2.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
 
 > Universal long-term memory layer for AI agents via [MCP](https://modelcontextprotocol.io).
 
@@ -29,13 +29,13 @@ mnemon gives AI agents persistent, searchable memory that survives across sessio
 ## Install
 
 ```bash
-pip install mnemon
+pip install mnemon-memory
 ```
 
 With optional LLM support (local 1.7B model for query expansion, contradiction detection, and smarter session extraction):
 
 ```bash
-pip install "mnemon[llm]"
+pip install "mnemon-memory[llm]"
 ```
 
 From source:
