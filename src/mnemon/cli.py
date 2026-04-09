@@ -6,6 +6,7 @@ Usage:
     mnemon status             Show vault health stats
     mnemon search <query>     Search memories
     mnemon save <title> <content>  Save a memory
+    mnemon setup <target>     Configure integration (claude-code, cursor, gemini, hooks)
     mnemon sync push          Push vault to S3
     mnemon sync pull          Pull vault from S3
     mnemon --version          Show version
@@ -123,6 +124,14 @@ def main() -> None:
             print("  MNEMON_VAULT_NAME  vault name (default: default)")
             sys.exit(1)
 
+    elif command == "setup":
+        target = args[1] if len(args) > 1 else ""
+        if not target:
+            print("Usage: mnemon setup <claude-code|cursor|gemini|hooks>", file=sys.stderr)
+            sys.exit(1)
+        from .setup import run_setup
+        print(run_setup(target))
+
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         _print_usage()
@@ -138,6 +147,7 @@ Usage:
   mnemon status             Show vault health stats
   mnemon search <query>     Search memories
   mnemon save <title> <c>   Save a memory
+  mnemon setup <target>     Configure integration (claude-code, cursor, gemini, hooks)
   mnemon sync push          Push vault to S3
   mnemon sync pull          Pull vault from S3
   mnemon --version          Show version
