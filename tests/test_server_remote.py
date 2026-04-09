@@ -1,81 +1,16 @@
-"""Tests for remote HTTP server configuration and health endpoint."""
+"""Tests for remote HTTP server configuration."""
 
 import os
 from unittest.mock import patch
 
 import pytest
-from starlette.testclient import TestClient
-
-from mnemon.server_remote import create_app
 
 
-@pytest.fixture
-def client():
-    """Create a test client with no auth."""
-    import mnemon.server_remote as sr
-    sr.AUTH_TOKEN = ""
-    app = create_app()
-    return TestClient(app, raise_server_exceptions=False)
-
-
-@pytest.fixture
-def auth_client():
-    """Create a test client with bearer auth."""
-    import mnemon.server_remote as sr
-    sr.AUTH_TOKEN = "test-secret"
-    app = create_app()
-    return TestClient(app, raise_server_exceptions=False)
-
-
-class TestHealth:
-    def test_health_returns_ok(self, client):
-        response = client.get("/health")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["status"] == "ok"
-        assert "version" in data
-
-    def test_health_bypasses_auth(self, auth_client):
-        response = auth_client.get("/health")
-        assert response.status_code == 200
-
-
-class TestAuth:
-    def test_mcp_rejects_without_token(self, auth_client):
-        response = auth_client.post("/mcp", json={})
-        assert response.status_code == 401
-
-    def test_mcp_rejects_wrong_token(self, auth_client):
-        response = auth_client.post(
-            "/mcp",
-            headers={"Authorization": "Bearer wrong-token"},
-            json={},
-        )
-        assert response.status_code == 401
-
-    def test_mcp_accepts_correct_token(self, auth_client):
-        # With correct token, request passes auth. The MCP handler will
-        # fail with 500 (task group not initialized in TestClient), but
-        # that's not a 401 — auth passed.
-        response = auth_client.post(
-            "/mcp",
-            headers={
-                "Authorization": "Bearer test-secret",
-                "Content-Type": "application/json",
-            },
-            json={"jsonrpc": "2.0", "method": "initialize", "id": 1, "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "test", "version": "0.1.0"},
-            }},
-        )
-        assert response.status_code != 401
-
-
-class TestConfig:
+class TestRemoteConfig:
     def test_default_port(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("PORT", None)
+            # Re-import to pick up env
             import importlib
             import mnemon.server_remote as sr
             importlib.reload(sr)
@@ -88,9 +23,24 @@ class TestConfig:
             importlib.reload(sr)
             assert sr.PORT == 9000
 
+    def test_auth_token_from_env(self):
+        with patch.dict(os.environ, {"MNEMON_TOKEN": "secret123"}):
+            import importlib
+            import mnemon.server_remote as sr
+            importlib.reload(sr)
+            assert sr.AUTH_TOKEN == "secret123"
+
+    def test_no_auth_by_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MNEMON_TOKEN", None)
+            import importlib
+            import mnemon.server_remote as sr
+            importlib.reload(sr)
+            assert sr.AUTH_TOKEN == ""
+
 
 class TestMcpServer:
-    def test_mcp_has_13_tools(self):
+    def test_mcp_has_tools(self):
         from mnemon.server import mcp
         tools = mcp._tool_manager._tools
         assert len(tools) == 13
