@@ -54,10 +54,14 @@ async def health(request: Request) -> JSONResponse:
 # ── Build App ──────────────────────────────────────────────────────────────
 
 def create_app() -> Starlette:
-    """Create the Starlette app with MCP mounted at /mcp."""
+    """Create the Starlette app with MCP at /mcp and health at /health.
+
+    FastMCP's streamable_http_app() is a Starlette app with an internal
+    route at /mcp, so we mount it at root (not at /mcp) to avoid
+    double-prefixing (/mcp/mcp).
+    """
     from .server import mcp
 
-    # FastMCP exposes an ASGI app via .sse_app() for HTTP transports
     mcp_app = mcp.streamable_http_app()
 
     middleware = []
@@ -67,7 +71,7 @@ def create_app() -> Starlette:
     app = Starlette(
         routes=[
             Route("/health", health),
-            Mount("/mcp", app=mcp_app),
+            Mount("/", app=mcp_app),
         ],
         middleware=middleware,
     )

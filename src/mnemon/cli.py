@@ -86,6 +86,20 @@ def main() -> None:
         print(f'Saved memory #{doc_id}: "{title}"')
         store.close()
 
+    elif command == "forget":
+        if len(args) < 2 or not args[1].isdigit():
+            print("Usage: mnemon forget <id>", file=sys.stderr)
+            sys.exit(1)
+        doc_id = int(args[1])
+        from .store import Store
+        store = Store()
+        if store.forget(doc_id):
+            print(f"Forgot memory #{doc_id}.")
+        else:
+            print(f"Memory #{doc_id} not found or already forgotten.", file=sys.stderr)
+            sys.exit(1)
+        store.close()
+
     elif command == "sync":
         subcommand = args[1] if len(args) > 1 else ""
         if subcommand == "push":
@@ -147,6 +161,7 @@ Usage:
   mnemon status             Show vault health stats
   mnemon search <query>     Search memories
   mnemon save <title> <c>   Save a memory
+  mnemon forget <id>        Soft-delete a memory
   mnemon setup <target>     Configure integration (claude-code, cursor, gemini, hooks)
   mnemon sync push          Push vault to S3
   mnemon sync pull          Pull vault from S3
