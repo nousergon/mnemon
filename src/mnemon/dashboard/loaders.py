@@ -89,22 +89,33 @@ def load_umap_coords(_vectors: np.ndarray, n_neighbors: int = 15) -> np.ndarray:
 
 
 def build_vector_doc_map(vec_ids: list[str]) -> dict[str, dict]:
-    """Map vector IDs to document metadata via content_hash."""
-    store = get_store()
+    """Map vector IDs to document metadata via content_hash.
+
+    Opens a separate SQLite connection to avoid cross-thread errors
+    (Streamlit runs pages in different threads than the cached Store).
+    """
+    import sqlite3
+    from mnemon.config import vault_path
+
     hash_to_vec_ids: dict[str, list[str]] = {}
     for vid in vec_ids:
         content_hash = vid.rsplit("_", 1)[0]
         hash_to_vec_ids.setdefault(content_hash, []).append(vid)
 
     result = {}
-    for content_hash, vids in hash_to_vec_ids.items():
-        row = store.db.execute(
-            "SELECT d.id, d.title, d.content_type, d.confidence, d.created_at "
-            "FROM documents d WHERE d.hash = ? AND d.invalidated_at IS NULL LIMIT 1",
-            (content_hash,),
-        ).fetchone()
-        if row:
-            doc_info = dict(row)
-            for vid in vids:
-                result[vid] = doc_info
+    db = sqlite3.connect(str(vault_path()), check_same_thread=False)
+    db.row_factory = sqlite3.Row
+    try:
+        for content_hash, vids in hash_to_vec_ids.items():
+            row = db.execute(
+                "SELECT d.id, d.title, d.content_type, d.confidence, d.created_at "
+                "FROM documents d WHERE d.hash = ? AND d.invalidated_at IS NULL LIMIT 1",
+                (content_hash,),
+            ).fetchone()
+            if row:
+                doc_info = dict(row)
+                for vid in vids:
+                    result[vid] = doc_info
+    finally:
+        db.close()
     return result
