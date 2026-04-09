@@ -7,7 +7,6 @@ st.set_page_config(page_title="Timeline — mnemon", layout="wide")
 st.title("Memory Timeline")
 
 from mnemon.dashboard.loaders import load_timeline
-from mnemon.dashboard.charts import CONTENT_TYPE_COLORS
 
 CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
 
@@ -31,9 +30,8 @@ if not filtered:
 st.caption(f"Showing {len(filtered)} memories")
 
 for doc in filtered:
-    color = CONTENT_TYPE_COLORS.get(doc["content_type"], "#999")
     pinned = " (pinned)" if doc.get("pinned") else ""
-    header = f"**{doc['title']}** — :{color}[{doc['content_type']}] — confidence: {doc['confidence']:.0%}{pinned}"
+    header = f"{doc['title']} — [{doc['content_type']}] — confidence: {doc['confidence']:.0%}{pinned}"
 
     with st.expander(header):
         st.caption(f"Created: {doc['created_at']} | ID: {doc['id']} | Accessed: {doc.get('access_count', 0)}x")

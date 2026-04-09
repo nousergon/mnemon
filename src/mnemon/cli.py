@@ -47,7 +47,7 @@ def main() -> None:
         app_path = Path(__file__).parent / "dashboard" / "app.py"
         port = args[1] if len(args) > 1 else "8503"
         try:
-            subprocess.run(["streamlit", "run", str(app_path), f"--server.port={port}", "--theme.base=dark"], check=True)
+            subprocess.run(["streamlit", "run", str(app_path), f"--server.port={port}", "--theme.base=dark", "--client.toolbarMode=minimal"], check=True)
         except FileNotFoundError:
             print("streamlit not found. Install with: pip install 'mnemon-memory[ui]'", file=sys.stderr)
             sys.exit(1)
