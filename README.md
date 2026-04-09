@@ -1,234 +1,86 @@
-[![Bun](https://img.shields.io/badge/bun-1.3+-blue.svg)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-62_passing-brightgreen.svg)]()
-[![Coverage](https://img.shields.io/badge/coverage-88%25_(testable)-green.svg)]()
-[![CI](https://github.com/cipher813/mnemon/actions/workflows/ci.yml/badge.svg)](https://github.com/cipher813/mnemon/actions/workflows/ci.yml)
+# mnemon
 
-# mnemon (μνήμων)
+Universal long-term memory layer for AI agents via MCP.
 
-Universal long-term memory layer for AI agents. One memory vault, every tool.
+## Overview
 
-mnemon is an MCP server that gives Claude Code, Claude Desktop, Cursor, Gemini CLI, and any MCP-compatible client access to a shared, persistent memory store with hybrid keyword + semantic search. A remote Streamable HTTP server enables access from web and mobile clients.
+mnemon provides persistent, searchable memory for AI agents across sessions. It uses SQLite with FTS5 for full-text search, composite scoring (relevance + recency + confidence), and the Model Context Protocol (MCP) for seamless integration with Claude Code, Cursor, and other MCP-compatible clients.
 
-## How it works
-
-```
-LOCAL (Mac — Metal GPU):
-  [Claude Code]    --stdio--> [mnemon MCP] <--stdio-- [Cursor]
-  [Claude Desktop] --stdio-->      |       <--stdio-- [Gemini CLI]
-                             [SQLite + FTS5]
-                             [Vector store]
-                             [GGUF models on Metal]
-                                   |
-                             S3 vault sync
-                                   |
-REMOTE (EC2):
-  [Claude.ai web]  --HTTP--> [mnemon remote]
-  [Claude iOS]     --HTTP-->      |
-  [Gemini mobile]  --HTTP-->      |
-                            [SQLite + FTS5]
-                            [BM25-only search]
-```
-
-## Client compatibility
-
-| Client | Transport | Status |
-|--------|-----------|--------|
-| Claude Code | stdio + hooks | Working — auto context surfacing, session extraction, vault sync |
-| Claude Desktop | stdio MCP | Working — all 13 tools available |
-| Cursor | stdio MCP | Working — all 13 tools available |
-| Gemini CLI | stdio MCP | Working — all 13 tools available |
-| claude.ai web | Streamable HTTP | Ready — server deployed, waiting on client MCP support |
-| Claude iOS | Streamable HTTP | Ready — server deployed, waiting on client MCP support |
-| Gemini mobile | Streamable HTTP | Ready — server deployed, waiting on client MCP support |
-
-**Local clients** (stdio) get full hybrid search — BM25 + vector similarity with GPU-accelerated embeddings on Apple Silicon.
-
-**Remote clients** (HTTP) get BM25 keyword search with composite scoring — no GPU required on the server. Bearer token authentication.
-
-## Features
-
-- **Hybrid search:** BM25 full-text + vector similarity + Reciprocal Rank Fusion + composite scoring (relevance/recency/confidence)
-- **Automatic memory capture:** Claude Code hooks surface relevant context on every prompt, extract observations at session end, and generate handoff summaries for continuity
-- **Contradiction detection:** New memories are checked against existing ones; conflicting memories get confidence decay
-- **Query expansion:** Local GGUF model expands search queries for better recall
-- **MMR diversity:** Maximal Marginal Relevance prevents redundant search results
-- **Confidence decay:** Memories have type-based half-lives; stale memories are archived automatically
-- **User profiles:** Synthesized from stored preferences and decisions
-- **S3 vault sync:** Push/pull vault between local and remote, with automated sync on session end
-- **Bearer token auth:** Secure remote access without browser-based login flows
-
-## Quick start
+## Install
 
 ```bash
-# Install Bun (if needed)
-curl -fsSL https://bun.sh/install | bash
-
-# Install mnemon globally
-npm install -g mnemon
-
-# Configure your tools (pick one or more)
-mnemon setup claude-code   # Claude Code (~/.claude/settings.json)
-mnemon setup cursor        # Cursor (~/.cursor/mcp.json)
-mnemon setup gemini        # Gemini CLI (~/.gemini/settings.json)
-mnemon setup hooks         # Claude Code auto-memory hooks
-
-# Check vault health
-mnemon status
+pip install mnemon
 ```
 
-### Install from source
+Or from source:
 
 ```bash
 git clone https://github.com/cipher813/mnemon.git
 cd mnemon
-bun install
-bun test
+pip install -e ".[dev]"
 ```
 
-## Configure local clients
+## Quick Start
 
 ```bash
-# Automated setup
-mnemon setup claude-code   # Claude Code (~/.claude/settings.json)
-mnemon setup cursor        # Cursor (~/.cursor/mcp.json)
-mnemon setup gemini        # Gemini CLI (~/.gemini/settings.json)
-mnemon setup hooks         # Claude Code auto-memory hooks
+# Start MCP server (stdio transport)
+mnemon serve
+
+# Check vault health
+mnemon status
+
+# Search memories
+mnemon search "deployment architecture"
+
+# Save a memory
+mnemon save "DB migration plan" "Migrate from PostgreSQL to DynamoDB in Q3"
 ```
 
-Or manually add to any MCP-compatible client's config:
-
-```json
-{
-  "mcpServers": {
-    "mnemon": {
-      "command": "bun",
-      "args": ["run", "/path/to/mnemon/src/mcp.ts"]
-    }
-  }
-}
-```
-
-**Claude Desktop:** Add the above to `~/Library/Application Support/Claude/claude_desktop_config.json` under the `mcpServers` key.
-
-## Configure remote clients
-
-Deploy the remote server on any host (EC2, VPS, etc.):
-
-```bash
-MNEMON_TOKEN=your-secret-token PORT=8503 bun run src/index.ts serve-remote
-```
-
-The remote server exposes the same MCP tools over Streamable HTTP at `/mcp`, with a health check at `/health`. It runs BM25-only search (no GPU, no embedding model) for minimal resource usage.
-
-**Environment variables:**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | 8502 | Server port |
-| `MNEMON_TOKEN` | (empty) | Bearer token for auth (empty = no auth) |
-| `MNEMON_VAULT` | `~/.mnemon/default.sqlite` | Custom vault path |
-
-**Production deployment** (systemd):
-
-```ini
-[Unit]
-Description=Mnemon Remote MCP Server
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/path/to/bun run /path/to/mnemon/src/server.ts
-Environment=PORT=8503
-Environment=MNEMON_TOKEN=your-secret-token
-Restart=on-failure
-MemoryMax=150M
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Put an HTTPS reverse proxy (nginx, Caddy) in front for TLS termination. Remote MCP clients connect to `https://your-domain/mcp` with the bearer token.
-
-## Claude Code hooks
-
-Three hooks automate memory capture in Claude Code:
-
-| Hook | Event | Description |
-|------|-------|-------------|
-| Context surfacing | UserPromptSubmit | Searches vault for relevant memories and injects them as context |
-| Session extractor | Stop | Extracts observations, decisions, and preferences from the conversation |
-| Handoff generator | Stop | Creates a session summary for next-conversation continuity |
-
-Install with `bun run src/index.ts setup hooks` or add manually to `~/.claude/settings.json`.
-
-## S3 vault sync
-
-Sync your vault between local and remote instances via S3:
-
-```bash
-MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync push   # Local -> S3
-MNEMON_S3_BUCKET=my-bucket bun run src/index.ts sync pull   # S3 -> Local
-```
-
-For automated sync, add an S3 push to your Claude Code Stop hooks and a systemd timer on the remote server to pull periodically.
-
-## MCP tools
+## MCP Tools
 
 | Tool | Description |
 |------|-------------|
-| `memory_search` | Hybrid BM25 + vector search with composite scoring |
-| `memory_get` | Get a specific memory by ID |
-| `memory_related` | Find related memories via relationship graph |
-| `memory_timeline` | Recent memories in chronological order |
-| `memory_save` | Save a new memory (decision, preference, observation, etc.) |
-| `memory_pin` | Pin an important memory to prevent archiving |
+| `memory_search` | BM25 full-text search with composite scoring |
+| `memory_get` | Fetch a specific memory by ID |
+| `memory_save` | Store a new memory with content type classification |
+| `memory_pin` | Pin a memory to prevent archival and boost confidence |
 | `memory_forget` | Soft-delete a memory |
 | `memory_status` | Vault health stats |
 | `memory_sweep` | Archive stale memories past their half-life |
-| `memory_rebuild` | Re-embed all documents (after model upgrade) |
-| `memory_check_contradictions` | Check a memory for conflicts with existing memories |
-| `profile_get` | Synthesized user profile from preferences + decisions |
-| `profile_update` | Add a preference to the user profile |
+| `memory_timeline` | Recent memories in reverse chronological order |
 
-## Memory types
+## Memory Types
 
-Memories are classified by content type, each with a decay half-life:
+Each memory has a content type that determines its default confidence and decay half-life:
 
-| Type | Half-life | Description |
-|------|-----------|-------------|
-| decision | Never | Architectural decisions, why X over Y |
-| preference | Never | User preferences, workflow habits |
-| antipattern | Never | Things that failed, mistakes to avoid |
-| observation | 90 days | Facts learned during work |
-| research | 90 days | Investigations, analysis |
-| project | 120 days | Project context, goals, status |
-| handoff | 30 days | Session summaries for continuity |
-| note | 60 days | General notes (default) |
+| Type | Default Confidence | Half-Life |
+|------|-------------------|-----------|
+| `decision` | 0.85 | Never |
+| `preference` | 0.80 | Never |
+| `antipattern` | 0.80 | Never |
+| `observation` | 0.70 | 90 days |
+| `research` | 0.70 | 90 days |
+| `project` | 0.65 | 120 days |
+| `handoff` | 0.60 | 30 days |
+| `note` | 0.50 | 60 days |
 
-Pinned memories are exempt from decay. Stale memories are soft-deleted by `memory_sweep`.
+## Architecture
 
-## CLI
+- **Storage:** SQLite + FTS5 with WAL mode for concurrent access
+- **Search:** BM25 full-text search with composite scoring (relevance x 0.5 + recency x 0.25 + confidence x 0.25)
+- **Deduplication:** Content-addressable storage via SHA-256 hashing
+- **Diversity:** MMR filtering to reduce redundant results
+- **Transport:** MCP stdio (local) and Streamable HTTP (remote)
+
+## Development
 
 ```bash
-mnemon serve              # MCP server (stdio)
-mnemon serve-remote       # HTTP server (Streamable HTTP)
-mnemon status             # Vault health stats
-mnemon search <query>     # Search memories
-mnemon save <title> <content>  # Save a memory
-mnemon setup <target>     # Configure integration
-mnemon sync <push|pull>   # S3 vault sync
-mnemon --version          # Show version
-mnemon --help             # Show usage
+# Run tests
+pytest
+
+# Run with verbose output
+pytest -v
 ```
-
-## Stack
-
-- [Bun](https://bun.sh) — runtime (bun:sqlite, fast startup)
-- [MCP SDK](https://github.com/modelcontextprotocol/sdk) — Model Context Protocol (stdio + Streamable HTTP)
-- [node-llama-cpp](https://github.com/withcatai/node-llama-cpp) — local GGUF model inference (Apple Silicon Metal)
-- [EmbeddingGemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF) — embedding model (314MB, 768d)
-- [QMD-1.7B](https://huggingface.co/ggml-org) — query expansion + observation extraction
 
 ## License
 

@@ -40,3 +40,14 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # GGUF models
 *.gguf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+*.vec
+.cursor/

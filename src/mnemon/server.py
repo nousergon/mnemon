@@ -1,0 +1,187 @@
+"""MCP server — exposes mnemon memory tools via stdio transport.
+
+Tools: memory_search, memory_get, memory_save, memory_pin, memory_forget,
+       memory_status, memory_sweep, memory_timeline
+"""
+
+from __future__ import annotations
+
+from mcp.server.fastmcp import FastMCP
+
+from .config import CONTENT_TYPE_VALUES
+from .search import search
+from .store import Store
+
+mcp = FastMCP("mnemon", version="0.1.0")
+
+# Lazy-initialized store (created on first tool call)
+_store: Store | None = None
+
+
+def _get_store() -> Store:
+    global _store
+    if _store is None:
+        _store = Store()
+    return _store
+
+
+# ── Retrieval Tools ──────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def memory_search(
+    query: str,
+    limit: int = 10,
+    content_type: str | None = None,
+) -> str:
+    """Search memories using BM25 full-text search with composite scoring.
+
+    This is the primary entry point for finding relevant memories.
+    Results are ranked by a composite of relevance, recency, and confidence.
+    """
+    store = _get_store()
+    results = search(store, query, limit=limit, content_type=content_type)
+
+    if not results:
+        return "No memories found matching your query."
+
+    lines = []
+    for i, r in enumerate(results, 1):
+        snippet = r.content[:300]
+        ellipsis = "..." if len(r.content) > 300 else ""
+        lines.append(
+            f"{i}. [{r.content_type}] **{r.title}** "
+            f"(score: {r.composite_score:.3f}, confidence: {r.confidence:.2f})\n"
+            f"   {snippet}{ellipsis}\n"
+            f"   _id: {r.doc_id} | created: {r.created_at}_"
+        )
+    return "\n\n".join(lines)
+
+
+@mcp.tool()
+def memory_get(id: int) -> str:
+    """Get a specific memory by its ID. Returns the full content."""
+    store = _get_store()
+    doc = store.get(id)
+    if not doc:
+        return f"Memory #{id} not found."
+
+    return (
+        f"# {doc.title}\n\n"
+        f"**Type:** {doc.content_type} | **Confidence:** {doc.confidence:.2f} | "
+        f"**Created:** {doc.created_at}\n\n"
+        f"{doc.content}"
+    )
+
+
+@mcp.tool()
+def memory_timeline(
+    limit: int = 20,
+    content_type: str | None = None,
+) -> str:
+    """Get recent memories in reverse chronological order."""
+    store = _get_store()
+    docs = store.timeline(limit, content_type)
+    if not docs:
+        return "No memories found."
+
+    lines = [
+        f"- **{d.title}** [{d.content_type}] (id: {d.id}, {d.created_at})"
+        for d in docs
+    ]
+    return "\n".join(lines)
+
+
+# ── Mutation Tools ───────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def memory_save(
+    title: str,
+    content: str,
+    content_type: str = "note",
+    collection: str = "default",
+    source_client: str | None = None,
+) -> str:
+    """Save a new memory.
+
+    Use this to explicitly store important information — decisions,
+    preferences, observations, project context, or session handoffs.
+    """
+    store = _get_store()
+    doc_id = store.save(
+        title=title,
+        content=content,
+        content_type=content_type,
+        collection=collection,
+        source_client=source_client,
+    )
+    return f'Saved memory #{doc_id}: "{title}" [{content_type}]'
+
+
+@mcp.tool()
+def memory_pin(id: int) -> str:
+    """Pin an important memory to boost its confidence and prevent archival."""
+    store = _get_store()
+    success = store.pin(id)
+    return f"Pinned memory #{id}." if success else f"Memory #{id} not found."
+
+
+@mcp.tool()
+def memory_forget(id: int) -> str:
+    """Soft-delete a memory. Marked as invalidated but not physically removed."""
+    store = _get_store()
+    success = store.forget(id)
+    return (
+        f"Forgot memory #{id}."
+        if success
+        else f"Memory #{id} not found or already forgotten."
+    )
+
+
+# ── Lifecycle Tools ──────────────────────────────────────────────────────────
+
+
+@mcp.tool()
+def memory_status() -> str:
+    """Get vault health stats — document counts by type, pinned/invalidated counts."""
+    store = _get_store()
+    stats = store.status()
+
+    by_type = "\n".join(
+        f"  {t['content_type']}: {t['count']}" for t in stats["by_type"]
+    )
+
+    return (
+        f"Vault: {stats['vault_path']}\n"
+        f"Total memories: {stats['total_documents']}\n"
+        f"Pinned: {stats['pinned']}\n"
+        f"Invalidated: {stats['invalidated']}\n\n"
+        f"By type:\n{by_type}"
+    )
+
+
+@mcp.tool()
+def memory_sweep(dry_run: bool = True) -> str:
+    """Archive stale memories that have exceeded their half-life.
+
+    Runs in dry-run mode by default — pass dry_run=False to actually archive.
+    """
+    store = _get_store()
+    result = store.sweep(dry_run)
+
+    if not result["candidates"]:
+        return "No stale memories to archive."
+
+    lines = [
+        f'- #{c.id} "{c.title}" [{c.content_type}] — {c.age_days} days old'
+        for c in result["candidates"]
+    ]
+
+    action = "Would archive" if dry_run else "Archived"
+    return f"{action} {len(result['candidates'])} memories:\n" + "\n".join(lines)
+
+
+def run_stdio() -> None:
+    """Start the MCP server on stdio transport."""
+    mcp.run(transport="stdio")
