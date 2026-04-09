@@ -26,9 +26,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+llm = [
+    "llama-cpp-python>=0.3",
+    "huggingface-hub>=0.20",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+]
+all = [
+    "mnemon[llm,dev]",
 ]
 
 [project.scripts]
