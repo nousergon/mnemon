@@ -13,7 +13,7 @@ from .config import CONTENT_TYPE_VALUES
 from .search import search
 from .store import Store
 
-mcp = FastMCP("mnemon", version="0.1.0")
+mcp = FastMCP("mnemon")
 
 # Lazy-initialized store (created on first tool call)
 _store: Store | None = None
