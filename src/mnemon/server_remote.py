@@ -14,74 +14,19 @@ from __future__ import annotations
 import os
 import sys
 
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route
-
 PORT = int(os.environ.get("PORT", "8502"))
 AUTH_TOKEN = os.environ.get("MNEMON_TOKEN", "")
 
 
-# ── Auth Middleware ─────────────────────────────────────────────────────────
-
-from starlette.middleware.base import BaseHTTPMiddleware
-
-
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    """Reject requests without a valid Bearer token (when MNEMON_TOKEN is set)."""
-
-    async def dispatch(self, request: Request, call_next):
-        # Skip auth for health check
-        if request.url.path == "/health":
-            return await call_next(request)
-
-        if AUTH_TOKEN:
-            auth_header = request.headers.get("authorization", "")
-            if auth_header != f"Bearer {AUTH_TOKEN}":
-                return Response("Unauthorized", status_code=401)
-
-        return await call_next(request)
-
-
-# ── Health Endpoint ─────────────────────────────────────────────────────────
-
-async def health(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok", "version": "0.1.0"})
-
-
-# ── Build App ──────────────────────────────────────────────────────────────
-
-def create_app() -> Starlette:
-    """Create the Starlette app with MCP mounted at /mcp."""
+def run_remote() -> None:
+    """Start the remote HTTP server using FastMCP's built-in Streamable HTTP transport."""
     from .server import mcp
 
-    # FastMCP exposes an ASGI app via .sse_app() for HTTP transports
-    mcp_app = mcp.streamable_http_app()
-
-    middleware = []
-    if AUTH_TOKEN:
-        middleware.append(Middleware(BearerAuthMiddleware))
-
-    app = Starlette(
-        routes=[
-            Route("/health", health),
-            Mount("/mcp", app=mcp_app),
-        ],
-        middleware=middleware,
-    )
-
-    return app
-
-
-def run_remote() -> None:
-    """Start the remote HTTP server."""
-    import uvicorn
+    # Set host/port for the Streamable HTTP transport
+    mcp.settings.host = "0.0.0.0"
+    mcp.settings.port = PORT
 
     print(f"mnemon remote server starting on http://0.0.0.0:{PORT}/mcp", file=sys.stderr)
     print(f"Auth: {'enabled (Bearer token)' if AUTH_TOKEN else 'disabled'}", file=sys.stderr)
-    print(f"Health: http://0.0.0.0:{PORT}/health", file=sys.stderr)
 
-    app = create_app()
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
+    mcp.run(transport="streamable-http")
