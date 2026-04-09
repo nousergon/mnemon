@@ -24,7 +24,11 @@ if len(vec_ids) < 5:
 
 # Sidebar controls
 max_neighbors = min(50, len(vec_ids) - 1)
-n_neighbors = st.sidebar.slider("UMAP n_neighbors", min_value=5, max_value=max_neighbors, value=min(15, max_neighbors), step=5, help="Higher = more global structure, lower = more local clusters")
+if max_neighbors > 5:
+    n_neighbors = st.sidebar.slider("UMAP n_neighbors", min_value=5, max_value=max_neighbors, value=min(15, max_neighbors), step=5, help="Higher = more global structure, lower = more local clusters")
+else:
+    n_neighbors = max_neighbors
+    st.sidebar.caption(f"UMAP n_neighbors: {n_neighbors} (auto — small vault)")
 visible_types = st.sidebar.multiselect("Visible types", CONTENT_TYPES, default=CONTENT_TYPES)
 show_edges = st.sidebar.checkbox("Show relation edges", value=True)
 
