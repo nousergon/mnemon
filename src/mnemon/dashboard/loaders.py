@@ -11,9 +11,17 @@ import streamlit as st
 
 @st.cache_resource
 def get_store():
-    """Singleton read-only Store connection."""
+    """Singleton read-only Store connection (cross-thread safe for Streamlit)."""
+    import sqlite3
     from mnemon.store import Store
-    return Store()
+    store = Store()
+    # Reopen with check_same_thread=False for Streamlit's multi-threaded pages
+    store.db.close()
+    store.db = sqlite3.connect(store.db_path, check_same_thread=False)
+    store.db.row_factory = sqlite3.Row
+    store.db.execute("PRAGMA journal_mode = WAL")
+    store.db.execute("PRAGMA busy_timeout = 15000")
+    return store
 
 
 @st.cache_data(ttl=300)
