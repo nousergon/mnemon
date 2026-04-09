@@ -1,8 +1,30 @@
 # mnemon
 
-Universal long-term memory layer for AI agents via [MCP](https://modelcontextprotocol.io).
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-253_passing-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
+[![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
+[![PyPI](https://img.shields.io/pypi/v/mnemon.svg)](https://pypi.org/project/mnemon/)
+
+> Universal long-term memory layer for AI agents via [MCP](https://modelcontextprotocol.io).
 
 mnemon gives AI agents persistent, searchable memory that survives across sessions. It stores memories in a local SQLite vault with hybrid BM25 + vector search, automatic confidence decay, contradiction detection, and the Model Context Protocol for seamless integration with Claude Code, Cursor, and other MCP clients.
+
+## Table of Contents
+
+- [Install](#install)
+- [Quick Start](#quick-start)
+- [MCP Tools](#mcp-tools)
+- [Memory Types](#memory-types)
+- [Claude Code Hooks](#claude-code-hooks)
+- [Remote Server](#remote-server)
+- [S3 Vault Sync](#s3-vault-sync)
+- [Architecture](#architecture)
+- [Configuration](#configuration)
+- [Development](#development)
+
+---
 
 ## Install
 
@@ -47,12 +69,12 @@ Once configured, mnemon works automatically:
 - **Session extraction**: decisions, preferences, and observations are saved at session end
 - **Handoff generation**: session summaries maintain continuity across sessions
 
-You can also interact with memories directly via MCP tools:
+You can also interact with memories directly via MCP tools or CLI:
 
 ```bash
-# CLI usage
 mnemon search "deployment architecture"
 mnemon save "DB migration plan" "Migrate from PostgreSQL to DynamoDB in Q3"
+mnemon forget 42
 mnemon status
 ```
 
@@ -128,14 +150,14 @@ For use with Claude.ai web or iOS (any Streamable HTTP MCP client):
 # Start remote server
 mnemon serve-remote
 
-# With authentication
+# With authentication (at proxy/infra level)
 MNEMON_TOKEN=your-secret-token mnemon serve-remote
 
 # Custom port
 PORT=9000 mnemon serve-remote
 ```
 
-The remote server exposes the same MCP tools as stdio mode at `http://localhost:8502/mcp`, with a health check at `/health`.
+The remote server exposes the same MCP tools as stdio mode via FastMCP's native Streamable HTTP transport at `http://localhost:8502/mcp`.
 
 ## S3 Vault Sync
 
@@ -169,7 +191,7 @@ Requires the AWS CLI (`aws`) on your PATH with valid credentials.
 - **Search**: Hybrid BM25 + vector (384d, bge-small-en-v1.5 via FastEmbed) fused with Reciprocal Rank Fusion
 - **Scoring**: Composite score = 0.5 * relevance + 0.25 * recency + 0.25 * confidence
 - **Diversity**: MMR filtering (Jaccard bigram similarity > 0.6 demoted by 50%)
-- **Intelligence** (optional): Local 1.7B LLM for query expansion, contradiction detection, session extraction
+- **Intelligence** (optional): Local 1.7B LLM (QMD-query-expansion) for query expansion, contradiction detection, session extraction — zero API cost
 - **Transport**: MCP stdio (local) and Streamable HTTP (remote)
 
 ## Configuration
@@ -187,11 +209,11 @@ Requires the AWS CLI (`aws`) on your PATH with valid credentials.
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
+# Run tests (253 tests)
 pytest
 
-# Run tests with verbose output
-pytest -v
+# Run tests with coverage
+pytest --cov=mnemon --cov-report=term-missing
 
 # Run a specific test file
 pytest tests/test_store.py -v
