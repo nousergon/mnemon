@@ -68,8 +68,12 @@ def load_related(doc_id: int, limit: int = 10) -> list[dict]:
 
 
 @st.cache_data(ttl=900)
-def load_vectors() -> tuple[list, np.ndarray] | None:
-    """Raw vectors from .npz file. Returns (ids, vectors) or None."""
+def load_vectors(dedup: bool = True) -> tuple[list, np.ndarray] | None:
+    """Raw vectors from .npz file. Returns (ids, vectors) or None.
+
+    When dedup=True, keep only seq=0 (full document) vectors to avoid
+    showing duplicate points per document on the graph.
+    """
     from mnemon.config import vault_path
     vec_path = str(vault_path()).replace(".sqlite", ".vec.npz")
     if not Path(vec_path).exists():
@@ -79,6 +83,13 @@ def load_vectors() -> tuple[list, np.ndarray] | None:
     vectors = data["vectors"].astype(np.float32)
     if len(ids) == 0:
         return None
+
+    if dedup:
+        keep = [i for i, vid in enumerate(ids) if vid.endswith("_0")]
+        if keep:
+            ids = [ids[i] for i in keep]
+            vectors = vectors[keep]
+
     return ids, vectors
 
 
