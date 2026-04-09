@@ -30,3 +30,11 @@ build/
 # Logs / caches
 *.log
 .cache/
+.coverage
+
+# Legacy TypeScript
+ts/
+node_modules/
+
+# Flow Doctor (testing artifact)
+flow_doctor.db
