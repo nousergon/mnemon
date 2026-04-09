@@ -8,8 +8,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from .loaders import load_status, load_timeline, load_sweep
-from .charts import make_type_distribution_chart, make_accumulation_chart
+from mnemon.dashboard.loaders import load_status, load_timeline, load_sweep
+from mnemon.dashboard.charts import make_type_distribution_chart, make_accumulation_chart
 
 
 def _render_metrics(status: dict) -> None:

@@ -12,7 +12,7 @@ import streamlit as st
 @st.cache_resource
 def get_store():
     """Singleton read-only Store connection."""
-    from ..store import Store
+    from mnemon.store import Store
     return Store()
 
 
@@ -32,7 +32,7 @@ def load_timeline(limit: int = 200, content_type: str | None = None) -> list[dic
 @st.cache_data(ttl=300)
 def load_search(query: str, limit: int = 20, content_type: str | None = None) -> list[dict]:
     """Hybrid search results as list of dicts."""
-    from ..search import search
+    from mnemon.search import search
     results = search(get_store(), query, limit=limit, content_type=content_type, use_vector=True)
     return [dataclasses.asdict(r) for r in results]
 
@@ -62,7 +62,7 @@ def load_related(doc_id: int, limit: int = 10) -> list[dict]:
 @st.cache_data(ttl=900)
 def load_vectors() -> tuple[list, np.ndarray] | None:
     """Raw vectors from .npz file. Returns (ids, vectors) or None."""
-    from ..config import vault_path
+    from mnemon.config import vault_path
     vec_path = str(vault_path()).replace(".sqlite", ".vec.npz")
     if not Path(vec_path).exists():
         return None
