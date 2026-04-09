@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mnemon"
-version = "0.1.0"
+version = "0.2.0"
 description = "Universal long-term memory layer for AI agents via MCP"
 readme = "README.md"
 license = "MIT"
@@ -12,12 +12,19 @@ requires-python = ">=3.10"
 authors = [
     { name = "Brian McMahon" },
 ]
-keywords = ["mcp", "memory", "ai", "agents", "llm"]
+urls.Homepage = "https://github.com/cipher813/mnemon"
+urls.Repository = "https://github.com/cipher813/mnemon"
+urls.Issues = "https://github.com/cipher813/mnemon/issues"
+keywords = ["mcp", "memory", "ai", "agents", "llm", "sqlite", "vector-search"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Intended Audience :: Developers",
 ]
 dependencies = [
     "mcp>=1.27",
