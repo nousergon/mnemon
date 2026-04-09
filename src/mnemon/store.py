@@ -1,7 +1,8 @@
-"""Storage layer — SQLite + FTS5 with content-addressable storage.
+"""Storage layer — SQLite + FTS5 + in-process vector store.
 
 Single-file vault at ~/.mnemon/default.sqlite.
 Content-addressable: same content = same SHA-256 hash = no duplicate storage.
+Vectors stored in a companion .npz file (brute-force cosine search).
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .config import (
     HALF_LIVES,
     MEMORY_TYPE_MAP,
@@ -22,6 +25,7 @@ from .config import (
     MemoryType,
     vault_path,
 )
+from .vecstore import VecStore
 
 
 @dataclass
@@ -100,7 +104,7 @@ def _row_to_document(row: sqlite3.Row) -> Document:
 
 
 class Store:
-    def __init__(self, db_path: str | Path | None = None):
+    def __init__(self, db_path: str | Path | None = None, vector_dim: int = 384):
         path = Path(db_path) if db_path else vault_path()
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -109,6 +113,10 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode = WAL")
         self.db.execute("PRAGMA busy_timeout = 15000")
+
+        # Vector store in companion file
+        vec_path = str(path).replace(".sqlite", ".vec")
+        self.vec_store = VecStore(vec_path, vector_dim)
 
         self._init_schema()
 
@@ -349,6 +357,55 @@ class Store:
         except sqlite3.OperationalError:
             return []
 
+    def save_embedding(self, content_hash: str, seq: int, embedding: np.ndarray) -> None:
+        """Store a vector embedding for a document fragment."""
+        vec_id = f"{content_hash}_{seq}"
+        self.vec_store.set(vec_id, embedding)
+
+    def flush_vectors(self) -> None:
+        """Persist vector store to disk."""
+        self.vec_store.save()
+
+    def search_vector(self, embedding: np.ndarray, limit: int = 20) -> list[SearchResult]:
+        """Vector similarity search via in-process brute-force cosine."""
+        if self.vec_store.size() == 0:
+            return []
+
+        vec_results = self.vec_store.search(embedding, limit * 2)
+        results: list[SearchResult] = []
+        seen_ids: set[int] = set()
+
+        for vr in vec_results:
+            content_hash = vr["id"].split("_")[0]
+            row = self.db.execute(
+                """SELECT d.id AS doc_id, d.title, c.doc AS content, d.content_type,
+                          d.memory_type, d.confidence, d.created_at
+                   FROM documents d
+                   JOIN content c ON d.hash = c.hash
+                   WHERE d.hash = ? AND d.invalidated_at IS NULL
+                   LIMIT 1""",
+                (content_hash,),
+            ).fetchone()
+
+            if row and row["doc_id"] not in seen_ids:
+                seen_ids.add(row["doc_id"])
+                results.append(SearchResult(
+                    doc_id=row["doc_id"],
+                    title=row["title"],
+                    content=row["content"],
+                    content_type=row["content_type"],
+                    memory_type=row["memory_type"],
+                    confidence=row["confidence"],
+                    created_at=row["created_at"],
+                    score=vr["similarity"],
+                    source="vector",
+                ))
+
+            if len(results) >= limit:
+                break
+
+        return results
+
     def get_related(self, doc_id: int, limit: int = 10) -> list[RelatedDocument]:
         """Find documents related to a given document via the graph."""
         rows = self.db.execute(
@@ -406,6 +463,7 @@ class Store:
         return {
             "total_documents": total,
             "by_type": [{"content_type": r["content_type"], "count": r["count"]} for r in by_type],
+            "total_vectors": self.vec_store.size(),
             "invalidated": invalidated,
             "pinned": pinned,
             "vault_path": self.db_path,
@@ -445,4 +503,5 @@ class Store:
         }
 
     def close(self) -> None:
+        self.vec_store.save()
         self.db.close()

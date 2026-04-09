@@ -1,7 +1,7 @@
-"""Search pipeline — BM25 + composite scoring + MMR diversity filtering.
+"""Search pipeline — BM25 + vector + RRF fusion + composite scoring + MMR diversity filtering.
 
-Phase 1: BM25-only search with composite scoring (relevance + recency + confidence).
-Vector search and query expansion will be added in Phase 2.
+Hybrid search: BM25 full-text search fused with vector semantic search via
+Reciprocal Rank Fusion (RRF). Falls back to BM25-only when vectors unavailable.
 """
 
 from __future__ import annotations
@@ -140,12 +140,29 @@ def search(
     query: str,
     limit: int = 10,
     content_type: str | None = None,
+    use_vector: bool = True,
 ) -> list[ScoredResult]:
-    """Main search entry point. BM25 search with composite scoring and MMR filtering."""
+    """Main search entry point. Hybrid BM25 + vector search with composite scoring."""
     bm25_results = store.search_bm25(query, limit * 2)
 
+    # Vector search (optional, fails gracefully)
+    vector_results = []
+    if use_vector:
+        try:
+            from .embedder import embed
+            query_embedding = embed(f"query: {query}")
+            vector_results = store.search_vector(query_embedding, limit * 2)
+        except Exception:
+            pass  # Fall back to BM25-only
+
+    # Fuse if we have multiple result sets
+    if vector_results:
+        fused = rrf_fuse(bm25_results, vector_results)
+    else:
+        fused = bm25_results
+
     scored = sorted(
-        (composite_score(r) for r in bm25_results),
+        (composite_score(r) for r in fused),
         key=lambda r: r.composite_score,
         reverse=True,
     )

@@ -1,7 +1,7 @@
 """MCP server — exposes mnemon memory tools via stdio transport.
 
 Tools: memory_search, memory_get, memory_save, memory_pin, memory_forget,
-       memory_status, memory_sweep, memory_timeline
+       memory_status, memory_sweep, memory_timeline, memory_related, memory_rebuild
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def memory_search(
     limit: int = 10,
     content_type: str | None = None,
 ) -> str:
-    """Search memories using BM25 full-text search with composite scoring.
+    """Search memories using hybrid BM25 + vector search with composite scoring.
 
     This is the primary entry point for finding relevant memories.
     Results are ranked by a composite of relevance, recency, and confidence.
@@ -116,6 +116,16 @@ def memory_save(
         collection=collection,
         source_client=source_client,
     )
+
+    # Embed asynchronously (non-blocking, failures are non-fatal)
+    try:
+        from .embedder import embed_document
+        doc = store.get(doc_id)
+        if doc:
+            embed_document(store, doc.hash, title, content)
+    except Exception:
+        pass
+
     return f'Saved memory #{doc_id}: "{title}" [{content_type}]'
 
 
@@ -155,6 +165,7 @@ def memory_status() -> str:
     return (
         f"Vault: {stats['vault_path']}\n"
         f"Total memories: {stats['total_documents']}\n"
+        f"Vectors: {stats['total_vectors']}\n"
         f"Pinned: {stats['pinned']}\n"
         f"Invalidated: {stats['invalidated']}\n\n"
         f"By type:\n{by_type}"
@@ -180,6 +191,44 @@ def memory_sweep(dry_run: bool = True) -> str:
 
     action = "Would archive" if dry_run else "Archived"
     return f"{action} {len(result['candidates'])} memories:\n" + "\n".join(lines)
+
+
+@mcp.tool()
+def memory_related(id: int, limit: int = 10) -> str:
+    """Find memories related to a given memory via the relationship graph."""
+    store = _get_store()
+    related = store.get_related(id, limit)
+    if not related:
+        return f"No related memories found for #{id}."
+
+    lines = [
+        f"- [{r.relation_type}] **{r.title}** (id: {r.id}, weight: {r.weight:.2f})"
+        for r in related
+    ]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_rebuild() -> str:
+    """Re-embed all documents. Use after upgrading the embedding model."""
+    store = _get_store()
+    docs = store.timeline(1000)
+    embedded = 0
+    failed = 0
+
+    try:
+        from .embedder import embed_document
+    except ImportError:
+        return "FastEmbed not installed. Run: pip install fastembed"
+
+    for doc in docs:
+        try:
+            embed_document(store, doc.hash, doc.title, doc.content)
+            embedded += 1
+        except Exception:
+            failed += 1
+
+    return f"Rebuild complete: {embedded} documents embedded, {failed} failed."
 
 
 def run_stdio() -> None:
