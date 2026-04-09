@@ -3,6 +3,7 @@
 Usage:
     mnemon serve              Start MCP server (stdio transport)
     mnemon serve-remote       Start HTTP server (Streamable HTTP)
+    mnemon dashboard [port]   Launch web dashboard (default port: 8503)
     mnemon status             Show vault health stats
     mnemon search <query>     Search memories
     mnemon save <title> <content>  Save a memory
@@ -39,6 +40,17 @@ def main() -> None:
     elif command == "serve-remote":
         from .server_remote import run_remote
         run_remote()
+
+    elif command == "dashboard":
+        import subprocess
+        from pathlib import Path
+        app_path = Path(__file__).parent / "dashboard" / "app.py"
+        port = args[1] if len(args) > 1 else "8503"
+        try:
+            subprocess.run(["streamlit", "run", str(app_path), f"--server.port={port}", "--theme.base=dark"], check=True)
+        except FileNotFoundError:
+            print("streamlit not found. Install with: pip install 'mnemon-memory[ui]'", file=sys.stderr)
+            sys.exit(1)
 
     elif command == "status":
         from .store import Store
@@ -158,6 +170,7 @@ def _print_usage() -> None:
 Usage:
   mnemon serve              Start MCP server (stdio transport)
   mnemon serve-remote       Start HTTP server (Streamable HTTP)
+  mnemon dashboard [port]   Launch web dashboard (default: 8503)
   mnemon status             Show vault health stats
   mnemon search <query>     Search memories
   mnemon save <title> <c>   Save a memory
