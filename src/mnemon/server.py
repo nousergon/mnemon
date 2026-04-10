@@ -118,14 +118,15 @@ def memory_save(
         source_client=source_client,
     )
 
-    # Embed asynchronously (non-blocking, failures are non-fatal)
+    # Embed (non-blocking, failures are non-fatal but logged)
     try:
         from .embedder import embed_document
         doc = store.get(doc_id)
         if doc:
             embed_document(store, doc.hash, title, content)
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print(f"mnemon: embedding failed for #{doc_id}: {e}", file=sys.stderr)
 
     return f'Saved memory #{doc_id}: "{title}" [{content_type}]'
 
@@ -280,8 +281,9 @@ def profile_update(title: str, content: str) -> str:
         doc = store.get(doc_id)
         if doc:
             embed_document(store, doc.hash, title, content)
-    except Exception:
-        pass
+    except Exception as e:
+        import sys
+        print(f"mnemon: embedding failed for #{doc_id}: {e}", file=sys.stderr)
 
     return f'Profile updated — saved preference #{doc_id}: "{title}"'
 
