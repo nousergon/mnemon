@@ -178,40 +178,44 @@ def make_graph_scatter(
     return fig
 
 
-def add_relation_edges(
+def add_proximity_edges(
     fig: go.Figure,
     coords_2d: np.ndarray,
+    vectors: np.ndarray,
     vec_ids: list[str],
     doc_map: dict[str, dict],
-    relations: dict[int, list[dict]],
+    threshold: float = 0.75,
 ) -> go.Figure:
-    """Overlay relation edges as semi-transparent lines."""
-    doc_id_to_idx: dict[int, int] = {}
-    for i, vid in enumerate(vec_ids):
-        info = doc_map.get(vid)
-        if info and info["id"] not in doc_id_to_idx:
-            doc_id_to_idx[info["id"]] = i
+    """Draw edges between memories with cosine similarity above threshold."""
+    n = len(vec_ids)
+    if n < 2:
+        return fig
+
+    # Compute pairwise cosine similarity matrix
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1, norms)
+    normalized = vectors / norms
+    sim_matrix = normalized @ normalized.T
 
     edge_x: list[float | None] = []
     edge_y: list[float | None] = []
+    edge_count = 0
 
-    for source_id, rels in relations.items():
-        if source_id not in doc_id_to_idx:
-            continue
-        src_idx = doc_id_to_idx[source_id]
-        for rel in rels:
-            target_id = rel.get("id")
-            if target_id not in doc_id_to_idx:
-                continue
-            tgt_idx = doc_id_to_idx[target_id]
-            edge_x.extend([float(coords_2d[src_idx, 0]), float(coords_2d[tgt_idx, 0]), None])
-            edge_y.extend([float(coords_2d[src_idx, 1]), float(coords_2d[tgt_idx, 1]), None])
+    for i in range(n):
+        for j in range(i + 1, n):
+            if sim_matrix[i, j] >= threshold:
+                # Skip edges between unmapped vectors
+                if vec_ids[i] not in doc_map or vec_ids[j] not in doc_map:
+                    continue
+                edge_x.extend([float(coords_2d[i, 0]), float(coords_2d[j, 0]), None])
+                edge_y.extend([float(coords_2d[i, 1]), float(coords_2d[j, 1]), None])
+                edge_count += 1
 
     if edge_x:
         fig.add_trace(go.Scatter(
             x=edge_x, y=edge_y,
             mode="lines",
-            name="relations",
+            name=f"similarity (>{threshold:.0%})",
             line=dict(color="rgba(150,150,150,0.3)", width=1),
             hoverinfo="skip",
         ))
