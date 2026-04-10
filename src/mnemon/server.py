@@ -7,13 +7,46 @@ Tools: memory_search, memory_get, memory_save, memory_pin, memory_forget,
 
 from __future__ import annotations
 
+import os
+
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .config import CONTENT_TYPE_VALUES
 from .search import search
 from .store import Store
 
-mcp = FastMCP("mnemon")
+
+def _build_transport_security() -> TransportSecuritySettings | None:
+    """Build TransportSecuritySettings from the MNEMON_ALLOWED_HOSTS env var.
+
+    FastMCP enables DNS rebinding protection by default with an empty
+    allowed_hosts list, which rejects every non-localhost request. When
+    running behind a reverse proxy or cloud host (Fly, Render, etc.), set
+    MNEMON_ALLOWED_HOSTS to a comma-separated list of allowed Host header
+    values, e.g.::
+
+        MNEMON_ALLOWED_HOSTS=mnemon-memory.fly.dev,*.fly.dev
+
+    Wildcards use fnmatch-style patterns (``*`` matches any characters).
+    Returns None if the env var is unset, preserving FastMCP's default
+    localhost-only behavior for local development.
+    """
+    raw = os.environ.get("MNEMON_ALLOWED_HOSTS", "").strip()
+    if not raw:
+        return None
+    hosts = [h.strip() for h in raw.split(",") if h.strip()]
+    # Origins default to https:// versions of each host (claude.ai connectors
+    # use HTTPS exclusively).
+    origins = [f"https://{h}" for h in hosts]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
+mcp = FastMCP("mnemon", transport_security=_build_transport_security())
 
 # Lazy-initialized store (created on first tool call)
 _store: Store | None = None

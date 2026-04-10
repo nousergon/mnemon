@@ -8,7 +8,9 @@ primary_region = "sjc"
   MNEMON_VAULT_DIR = "/data"
   MNEMON_PUBLIC_URL = "https://mnemon-memory.fly.dev"
   MNEMON_OAUTH_AUDIENCE = "https://mnemon-memory.fly.dev/mcp"
-  # MNEMON_OAUTH_ISSUER and MNEMON_OAUTH_JWKS_URL are set via `fly secrets set`
+  MNEMON_ALLOWED_HOSTS = "mnemon-memory.fly.dev"
+  # MNEMON_OAUTH_ISSUER, MNEMON_OAUTH_JWKS_URL, and MNEMON_OAUTH_USERINFO_URL
+  # are set via `fly secrets set`
 
 [http_service]
   internal_port = 8080
