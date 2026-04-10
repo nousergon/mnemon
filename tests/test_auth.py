@@ -391,3 +391,120 @@ def test_oauth_config_public_url_derived_from_audience():
         config.resource_metadata_url
         == "https://mnemon.example.com/.well-known/oauth-protected-resource"
     )
+
+
+# --- Userinfo fallback --------------------------------------------------
+
+
+@pytest.fixture
+def oauth_config_with_userinfo() -> OAuthConfig:
+    return OAuthConfig(
+        issuer="https://test-issuer.example.com/",
+        jwks_url="https://test-issuer.example.com/.well-known/jwks.json",
+        audience="https://mnemon-test.example.com/mcp",
+        public_url="https://mnemon-test.example.com",
+        userinfo_url="https://test-issuer.example.com/userinfo",
+    )
+
+
+@pytest.mark.asyncio
+async def test_userinfo_fallback_accepts_opaque_token(
+    oauth_config_with_userinfo, monkeypatch
+):
+    """When JWT decode fails and userinfo returns 200, token is accepted."""
+    import httpx
+
+    class _FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"sub": "auth0|user123", "email": "test@example.com"}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, headers=None):
+            assert "Authorization" in headers
+            assert headers["Authorization"].startswith("Bearer ")
+            return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    downstream_called: list[bool] = []
+    app = _stub_downstream_factory(downstream_called)
+    mw = OAuthMiddleware(app, oauth_config_with_userinfo)
+
+    status, _, body = await _call_middleware(
+        mw,
+        "/mcp",
+        headers=[(b"authorization", b"Bearer opaque-token-not-a-jwt")],
+    )
+
+    assert status == 200
+    assert json.loads(body) == {"ok": True}
+    assert downstream_called == [True]
+
+
+@pytest.mark.asyncio
+async def test_userinfo_fallback_rejects_when_userinfo_returns_401(
+    oauth_config_with_userinfo, monkeypatch
+):
+    import httpx
+
+    class _FakeResponse:
+        status_code = 401
+
+        def json(self):
+            return {"error": "invalid_token"}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, headers=None):
+            return _FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, oauth_config_with_userinfo)
+
+    status, _, body = await _call_middleware(
+        mw,
+        "/mcp",
+        headers=[(b"authorization", b"Bearer opaque-bad-token")],
+    )
+
+    assert status == 401
+    assert "userinfo rejected" in json.loads(body).get("error_description", "")
+
+
+@pytest.mark.asyncio
+async def test_no_userinfo_fallback_when_not_configured(oauth_config):
+    """When userinfo_url is unset, JWT failures produce immediate 401."""
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, oauth_config)  # no userinfo_url
+
+    status, _, body = await _call_middleware(
+        mw,
+        "/mcp",
+        headers=[(b"authorization", b"Bearer opaque-token")],
+    )
+
+    assert status == 401
+    # Description should only mention JWT failure, not userinfo
+    desc = json.loads(body).get("error_description", "")
+    assert "userinfo" not in desc

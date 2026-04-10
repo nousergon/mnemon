@@ -46,6 +46,7 @@ class OAuthConfig:
         jwks_url: str | None = None,
         audience: str | None = None,
         public_url: str | None = None,
+        userinfo_url: str | None = None,
     ) -> None:
         self.issuer = issuer
         self.jwks_url = jwks_url
@@ -54,6 +55,11 @@ class OAuthConfig:
         # resource_metadata URL in WWW-Authenticate headers. Falls back to
         # audience's scheme+host if unset.
         self.public_url = public_url
+        # userinfo_url is an optional fallback for token introspection when
+        # JWT validation fails. Needed because some OAuth providers (e.g.,
+        # Auth0) issue opaque tokens for OIDC-only flows instead of JWTs
+        # bound to the requested audience. If unset, no fallback is used.
+        self.userinfo_url = userinfo_url
 
     @classmethod
     def from_env(cls) -> OAuthConfig:
@@ -62,6 +68,7 @@ class OAuthConfig:
             jwks_url=os.environ.get("MNEMON_OAUTH_JWKS_URL") or None,
             audience=os.environ.get("MNEMON_OAUTH_AUDIENCE") or None,
             public_url=os.environ.get("MNEMON_PUBLIC_URL") or None,
+            userinfo_url=os.environ.get("MNEMON_OAUTH_USERINFO_URL") or None,
         )
 
     @property
@@ -109,6 +116,7 @@ class OAuthMiddleware:
         self.app = app
         self.config = config
         self._jwks_client: Any = None  # Lazy-init PyJWKClient
+        self._userinfo_cache: dict[str, float] = {}  # token hash -> expiry ts
 
     async def __call__(
         self, scope: ASGIScope, receive: ASGIReceive, send: ASGISend
@@ -146,18 +154,47 @@ class OAuthMiddleware:
             return
 
         token = auth_header[7:].decode("ascii", errors="replace").strip()
+
+        # Try JWT validation first (spec-compliant path).
+        jwt_error: _OAuthError | None = None
         try:
             self._validate_token(token)
         except _OAuthError as e:
-            logger.info("JWT validation failed: %s", e)
-            await self._send_401(send, error=e.code, description=e.description)
-            return
+            jwt_error = e
         except Exception as e:  # noqa: BLE001
             logger.exception("Unexpected error during JWT validation")
-            await self._send_401(
-                send, error="invalid_token", description=f"validation error: {e}"
+            jwt_error = _OAuthError(
+                "invalid_token", f"validation error: {e}"
             )
-            return
+
+        if jwt_error is not None:
+            # JWT validation failed. If a userinfo URL is configured, try
+            # opaque-token introspection as a fallback. This works around
+            # OAuth providers (notably Auth0) that issue opaque /userinfo
+            # tokens instead of audience-bound JWTs for OIDC-only flows.
+            if self.config.userinfo_url:
+                try:
+                    await self._validate_via_userinfo(token)
+                except _OAuthError as ue:
+                    logger.info(
+                        "Both JWT and userinfo validation failed: jwt=%s userinfo=%s",
+                        jwt_error,
+                        ue,
+                    )
+                    await self._send_401(
+                        send,
+                        error=ue.code,
+                        description=f"jwt: {jwt_error.description}; userinfo: {ue.description}",
+                    )
+                    return
+                # Userinfo fallback succeeded — fall through.
+                logger.info("Token validated via userinfo fallback (JWT failed)")
+            else:
+                logger.info("JWT validation failed: %s", jwt_error)
+                await self._send_401(
+                    send, error=jwt_error.code, description=jwt_error.description
+                )
+                return
 
         # Token valid — forward to downstream app.
         await self.app(scope, receive, send)
@@ -222,6 +259,91 @@ class OAuthMiddleware:
             ) from e
         except jwt.InvalidTokenError as e:
             raise _OAuthError("invalid_token", str(e)) from e
+
+    async def _validate_via_userinfo(self, token: str) -> dict[str, Any]:
+        """Fallback: validate an opaque token by calling the OAuth provider's
+        userinfo endpoint (OIDC Core section 5.3).
+
+        Used when JWT decode fails — typically because the provider issued
+        an opaque access token scoped to /userinfo rather than an audience-
+        bound JWT. If the userinfo endpoint returns 200 with a user profile,
+        the token is valid and we extract identity claims.
+
+        Uses a small in-memory cache keyed by token hash to avoid repeat
+        network calls within a short window. Returns the decoded userinfo
+        payload on success. Raises :class:`_OAuthError` on failure.
+
+        This is less strict than JWT audience validation — any token that
+        the provider's /userinfo endpoint accepts will be allowed through,
+        regardless of whether it was specifically issued for mnemon. That's
+        acceptable for Phase 1 / single-user deployments. Phase 2's self-
+        hosted AS will enforce proper audience binding.
+        """
+        import hashlib
+        import time
+
+        assert self.config.userinfo_url
+
+        # Simple TTL cache: token_hash -> expiry_ts (accept until).
+        now = time.time()
+        token_hash = hashlib.sha256(token.encode("ascii", errors="replace")).hexdigest()
+        cached_until = self._userinfo_cache.get(token_hash, 0)
+        if cached_until > now:
+            return {"sub": "cached"}
+
+        try:
+            import httpx
+        except ImportError as e:
+            raise _OAuthError(
+                "server_error", "httpx not installed (required for userinfo fallback)"
+            ) from e
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    self.config.userinfo_url,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        except httpx.TimeoutException as e:
+            raise _OAuthError(
+                "server_error", f"userinfo endpoint timeout: {e}"
+            ) from e
+        except httpx.HTTPError as e:
+            raise _OAuthError(
+                "server_error", f"userinfo endpoint error: {e}"
+            ) from e
+
+        if resp.status_code == 401 or resp.status_code == 403:
+            raise _OAuthError(
+                "invalid_token", "userinfo rejected token"
+            )
+        if resp.status_code != 200:
+            raise _OAuthError(
+                "invalid_token",
+                f"userinfo returned {resp.status_code}",
+            )
+
+        try:
+            profile = resp.json()
+        except ValueError as e:
+            raise _OAuthError(
+                "invalid_token", f"userinfo returned non-JSON: {e}"
+            ) from e
+
+        if not isinstance(profile, dict) or "sub" not in profile:
+            raise _OAuthError(
+                "invalid_token", "userinfo response missing 'sub' claim"
+            )
+
+        # Cache for 5 minutes to avoid hammering the provider.
+        self._userinfo_cache[token_hash] = now + 300
+        # Opportunistic cache eviction to prevent unbounded growth.
+        if len(self._userinfo_cache) > 256:
+            expired = [k for k, v in self._userinfo_cache.items() if v <= now]
+            for k in expired:
+                self._userinfo_cache.pop(k, None)
+
+        return profile
 
     async def _send_401(
         self,
