@@ -1,0 +1,15 @@
+.venv/
+.git/
+.pytest_cache/
+__pycache__/
+*.egg-info/
+dist/
+build/
+ts/
+node_modules/
+.coverage
+*.sqlite
+*.vec.npz
+*.gguf
+.DS_Store
+.claude/
