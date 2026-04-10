@@ -1,0 +1,22 @@
+app = "mnemon-memory"
+primary_region = "sea"
+
+[build]
+
+[env]
+  PORT = "8080"
+  MNEMON_VAULT_DIR = "/data"
+  MNEMON_PUBLIC_URL = "https://mnemon-memory.fly.dev"
+  MNEMON_OAUTH_AUDIENCE = "https://mnemon-memory.fly.dev/mcp"
+  # MNEMON_OAUTH_ISSUER and MNEMON_OAUTH_JWKS_URL are set via `fly secrets set`
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[mounts]
+  source = "mnemon_data"
+  destination = "/data"
