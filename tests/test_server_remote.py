@@ -23,20 +23,29 @@ class TestRemoteConfig:
             importlib.reload(sr)
             assert sr.PORT == 9000
 
-    def test_auth_token_from_env(self):
-        with patch.dict(os.environ, {"MNEMON_TOKEN": "secret123"}):
-            import importlib
-            import mnemon.server_remote as sr
-            importlib.reload(sr)
-            assert sr.AUTH_TOKEN == "secret123"
+    def test_oauth_config_enabled_from_env(self):
+        env = {
+            "MNEMON_OAUTH_ISSUER": "https://issuer.example.com/",
+            "MNEMON_OAUTH_JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
+            "MNEMON_OAUTH_AUDIENCE": "https://mnemon.example.com/mcp",
+        }
+        with patch.dict(os.environ, env):
+            from mnemon.auth import OAuthConfig
+            config = OAuthConfig.from_env()
+            assert config.enabled
+            assert config.issuer == "https://issuer.example.com/"
 
-    def test_no_auth_by_default(self):
+    def test_oauth_config_disabled_by_default(self):
         with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("MNEMON_TOKEN", None)
-            import importlib
-            import mnemon.server_remote as sr
-            importlib.reload(sr)
-            assert sr.AUTH_TOKEN == ""
+            for var in (
+                "MNEMON_OAUTH_ISSUER",
+                "MNEMON_OAUTH_JWKS_URL",
+                "MNEMON_OAUTH_AUDIENCE",
+            ):
+                os.environ.pop(var, None)
+            from mnemon.auth import OAuthConfig
+            config = OAuthConfig.from_env()
+            assert not config.enabled
 
 
 class TestMcpServer:

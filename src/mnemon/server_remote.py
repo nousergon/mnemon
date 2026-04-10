@@ -1,12 +1,35 @@
-"""Remote HTTP server — Streamable HTTP transport for MCP.
+"""Remote HTTP server — Streamable HTTP transport for MCP with OAuth 2.1.
 
-Exposes the same MCP tools as stdio mode, accessible from Claude.ai
-web and iOS via Streamable HTTP. Bearer token auth.
+Exposes the same MCP tools as stdio mode, accessible over public HTTPS to
+MCP clients that speak the Streamable HTTP transport (claude.ai web, Claude
+Desktop, Claude mobile apps via custom connectors, Claude Code via
+``claude mcp add --transport http``, Cursor via mcp.json, etc.).
 
-Usage:
-    mnemon serve-remote                          # port 8502, no auth
-    MNEMON_TOKEN=secret mnemon serve-remote      # with bearer token auth
-    PORT=9000 mnemon serve-remote                # custom port
+Authentication
+--------------
+When ``MNEMON_OAUTH_ISSUER``, ``MNEMON_OAUTH_JWKS_URL``, and
+``MNEMON_OAUTH_AUDIENCE`` are set, the server operates as an OAuth 2.1
+resource server per the MCP authorization spec (2025-06-18): it validates
+JWT bearer tokens from an external authorization server and serves RFC 9728
+Protected Resource Metadata for client discovery.
+
+When those env vars are unset, the server runs without auth (local
+development only — do NOT expose an unauthenticated server to the public
+internet).
+
+Usage
+-----
+Local, no auth::
+
+    mnemon serve-remote
+
+Cloud, with external AS (e.g., Auth0)::
+
+    export MNEMON_OAUTH_ISSUER=https://your-tenant.us.auth0.com/
+    export MNEMON_OAUTH_JWKS_URL=https://your-tenant.us.auth0.com/.well-known/jwks.json
+    export MNEMON_OAUTH_AUDIENCE=https://your-mnemon.fly.dev/mcp
+    export MNEMON_PUBLIC_URL=https://your-mnemon.fly.dev
+    mnemon serve-remote
 """
 
 from __future__ import annotations
@@ -14,19 +37,45 @@ from __future__ import annotations
 import os
 import sys
 
+from .auth import OAuthConfig, OAuthMiddleware
+
 PORT = int(os.environ.get("PORT", "8502"))
-AUTH_TOKEN = os.environ.get("MNEMON_TOKEN", "")
 
 
 def run_remote() -> None:
-    """Start the remote HTTP server using FastMCP's built-in Streamable HTTP transport."""
+    """Start the remote HTTP server wrapped in the OAuth middleware."""
     from .server import mcp
 
-    # Set host/port for the Streamable HTTP transport
-    mcp.settings.host = "0.0.0.0"
-    mcp.settings.port = PORT
+    config = OAuthConfig.from_env()
 
-    print(f"mnemon remote server starting on http://0.0.0.0:{PORT}/mcp", file=sys.stderr)
-    print(f"Auth: {'enabled (Bearer token)' if AUTH_TOKEN else 'disabled'}", file=sys.stderr)
+    print(
+        f"mnemon remote server starting on http://0.0.0.0:{PORT}/mcp",
+        file=sys.stderr,
+    )
+    if config.enabled:
+        print(
+            f"Auth: OAuth 2.1 resource server (issuer={config.issuer}, "
+            f"audience={config.audience})",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Auth: DISABLED — do not expose this server to the public internet. "
+            "Set MNEMON_OAUTH_ISSUER, MNEMON_OAUTH_JWKS_URL, and "
+            "MNEMON_OAUTH_AUDIENCE to enable OAuth.",
+            file=sys.stderr,
+        )
 
-    mcp.run(transport="streamable-http")
+    try:
+        import uvicorn
+    except ImportError:
+        print(
+            "ERROR: uvicorn not installed. Install with `pip install "
+            "mnemon-memory[server]`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    mcp_app = mcp.streamable_http_app()
+    wrapped = OAuthMiddleware(mcp_app, config)
+    uvicorn.run(wrapped, host="0.0.0.0", port=PORT, log_level="info")
