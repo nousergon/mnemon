@@ -47,7 +47,14 @@ import os
 from pathlib import Path
 from typing import Any
 
-DEFAULT_TIMEOUT_SEC = 2.0
+# 8 seconds gives us headroom for Fly cold starts — when auto_stop_machines
+# lets the VM sleep between sessions, the first request has to wake the
+# machine (1-3s), warm up uvicorn (~1s), and load the FastEmbed ONNX model
+# on the first memory_search call (2-4s). 2s (the plan's original value) was
+# too tight and caused silent timeouts that surfaced as empty-string errors.
+# Claude Code's own hook timeout is 8s in ~/.claude/settings.json, so this
+# matches — if the hook runs out of budget, it runs out of budget.
+DEFAULT_TIMEOUT_SEC = 8.0
 DEFAULT_CLIENT_LABEL = "claude-code"
 
 MNEMON_DIR = Path.home() / ".mnemon"

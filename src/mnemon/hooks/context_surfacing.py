@@ -69,7 +69,13 @@ def build_context(raw_text: str) -> str:
 
 def main() -> None:
     try:
-        from .framework import read_stdin, write_output, is_noise, is_duplicate
+        from .framework import (
+            is_duplicate,
+            is_noise,
+            mark_seen,
+            read_stdin,
+            write_output,
+        )
         from ._remote_client import RemoteClientConfigError, call_tool_sync
 
         hook_input = read_stdin()
@@ -89,7 +95,9 @@ def main() -> None:
         except RemoteClientConfigError as e:
             # Configuration problem — URL or token not resolvable. Report
             # once to stderr and continue with no context; there's no point
-            # retrying a misconfiguration inside a hook.
+            # retrying a misconfiguration inside a hook. Do NOT mark_seen —
+            # the user can fix the config and retry the same prompt
+            # immediately.
             print(
                 f"mnemon context-surfacing config error: {e}",
                 file=sys.stderr,
@@ -97,12 +105,20 @@ def main() -> None:
             return
         except Exception as e:
             # Network error, timeout, auth failure, or MCP protocol error.
-            # None of these should crash Claude Code — log and continue.
+            # Log to stderr and continue — never crash Claude Code. Do NOT
+            # mark_seen so the same prompt can retry after the transient
+            # failure clears (e.g., wifi reconnect).
             print(
-                f"mnemon context-surfacing remote error: {e}",
+                f"mnemon context-surfacing remote error: {type(e).__name__}: {e}",
                 file=sys.stderr,
             )
             return
+
+        # Remote call succeeded — record the prompt as seen so we don't
+        # re-search on an immediate identical resubmit. This is
+        # deliberately AFTER the call so failures above leave dedup state
+        # clean and retryable.
+        mark_seen(prompt)
 
         context = build_context(raw)
         if not context:

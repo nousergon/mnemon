@@ -28,11 +28,11 @@ def _dedup_path() -> Path:
     return Path.home() / ".mnemon" / "dedup.json"
 
 
-def is_duplicate(text: str) -> bool:
-    """Check if this text was seen within the dedup window."""
-    text_hash = hashlib.sha256(text.encode()).hexdigest()
-    now = __import__("time").time()
+def _load_and_prune_entries() -> tuple[list[dict], float]:
+    """Read dedup entries from disk, prune expired ones, return ``(entries, now)``."""
+    import time
 
+    now = time.time()
     dedup_file = _dedup_path()
     entries: list[dict] = []
     if dedup_file.exists():
@@ -40,19 +40,43 @@ def is_duplicate(text: str) -> bool:
             entries = json.loads(dedup_file.read_text())
         except Exception:
             entries = []
+    entries = [
+        e for e in entries if now - e.get("timestamp", 0) < DEDUP_WINDOW_SEC
+    ]
+    return entries, now
 
-    # Prune expired
-    entries = [e for e in entries if now - e["timestamp"] < DEDUP_WINDOW_SEC]
 
-    # Check duplicate
-    if any(e["hash"] == text_hash for e in entries):
-        return True
+def is_duplicate(text: str) -> bool:
+    """Check if ``text`` was seen within the dedup window.
 
-    # Add new entry
-    entries.append({"hash": text_hash, "timestamp": now})
+    **Read-only.** Does not persist the hash. Callers that want to record
+    a prompt as seen must call :func:`mark_seen` after successful
+    processing. Splitting the check from the write lets hooks avoid
+    locking out a prompt when the downstream call (e.g., a remote
+    ``memory_search``) fails partway through — failing midway leaves the
+    dedup state clean so an immediate retry works instead of silently
+    no-opping for 10 minutes.
+    """
+    text_hash = hashlib.sha256(text.encode()).hexdigest()
+    entries, _ = _load_and_prune_entries()
+    return any(e["hash"] == text_hash for e in entries)
+
+
+def mark_seen(text: str) -> None:
+    """Persist ``text`` in the dedup window.
+
+    Called by hooks after successful processing to suppress duplicate
+    work on the same prompt within :data:`DEDUP_WINDOW_SEC` seconds. If
+    another hook already marked this prompt, no new entry is appended —
+    the existing timestamp stays in place.
+    """
+    text_hash = hashlib.sha256(text.encode()).hexdigest()
+    entries, now = _load_and_prune_entries()
+    if not any(e["hash"] == text_hash for e in entries):
+        entries.append({"hash": text_hash, "timestamp": now})
+    dedup_file = _dedup_path()
     dedup_file.parent.mkdir(parents=True, exist_ok=True)
     dedup_file.write_text(json.dumps(entries))
-    return False
 
 
 def is_noise(prompt: str) -> bool:

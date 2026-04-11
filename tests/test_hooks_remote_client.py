@@ -137,10 +137,15 @@ class TestCallToolSync:
     """
 
     def test_returns_text_from_async(self, monkeypatch):
+        from mnemon.hooks._remote_client import DEFAULT_TIMEOUT_SEC
+
         async def _fake(tool_name, arguments, *, timeout, client_label):
             assert tool_name == "memory_search"
             assert arguments == {"query": "test", "limit": 5}
-            assert timeout == 2.0
+            # Default timeout comes from the module constant so the test
+            # doesn't hardcode a specific number — lets us tune the
+            # default without editing test code.
+            assert timeout == DEFAULT_TIMEOUT_SEC
             assert client_label == "claude-code"
             return "fake tool output"
 
