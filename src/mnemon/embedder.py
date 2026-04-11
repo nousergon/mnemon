@@ -1,11 +1,17 @@
 """Embedding pipeline — FastEmbed with bge-small-en-v1.5 (ONNX).
 
-384-dimensional embeddings via ONNX Runtime. ~13MB model, auto-downloaded.
+384-dimensional embeddings via ONNX Runtime. ~13MB model, auto-downloaded
+on first use unless ``FASTEMBED_CACHE_DIR`` is set to a directory that
+already contains the model files (the Fly Docker image bakes the model
+to ``/app/.cache/fastembed`` at build time so cold starts skip the
+HuggingFace Hub download — see ``Dockerfile``).
+
 No PyTorch dependency needed.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING
 
@@ -20,11 +26,21 @@ _model = None
 
 
 def _get_model():
-    """Lazy-load the embedding model (singleton)."""
+    """Lazy-load the embedding model (singleton).
+
+    Honours ``FASTEMBED_CACHE_DIR`` if set so the deployed image can
+    point at a baked-in model location and skip the HF download on
+    every cold start.
+    """
     global _model
     if _model is None:
         from fastembed import TextEmbedding
-        _model = TextEmbedding(model_name=_MODEL_NAME)
+
+        kwargs: dict = {"model_name": _MODEL_NAME}
+        cache_dir = os.environ.get("FASTEMBED_CACHE_DIR")
+        if cache_dir:
+            kwargs["cache_dir"] = cache_dir
+        _model = TextEmbedding(**kwargs)
     return _model
 
 

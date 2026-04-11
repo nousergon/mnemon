@@ -49,8 +49,34 @@ PORT = int(os.environ.get("PORT", "8502"))
 
 
 def run_remote() -> None:
-    """Start the remote HTTP server wrapped in the OAuth middleware."""
+    """Start the remote HTTP server wrapped in the OAuth middleware.
+
+    Eagerly initializes the embedding model before uvicorn binds the
+    port. This shifts the FastEmbed model load (~3 seconds with the
+    Docker-baked cache, ~10+ without) from the user's first
+    ``memory_search`` call to server startup, so the first hook
+    invocation after a Fly cold start succeeds within Claude Code's
+    8-second hook timeout. The server doesn't accept connections until
+    the embedder is ready, which means clients see a brief connection
+    delay during cold start instead of an in-flight tool-call timeout.
+    """
     from .server import mcp
+
+    # Eager embedder init — non-fatal if it fails (lazy load will retry
+    # on first actual search call).
+    try:
+        from .embedder import _get_model
+
+        print("Pre-loading embedding model...", file=sys.stderr)
+        _get_model()
+        print("Embedding model ready.", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"WARN: failed to pre-load embedding model "
+            f"({type(e).__name__}: {e}); first memory_search will pay "
+            "the load cost lazily",
+            file=sys.stderr,
+        )
 
     config = OAuthConfig.from_env()
 
