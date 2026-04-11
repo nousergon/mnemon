@@ -18,6 +18,7 @@ mounted FastMCP app.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -33,11 +34,25 @@ ASGIApp = Callable[[ASGIScope, ASGIReceive, ASGISend], Awaitable[None]]
 
 
 class OAuthConfig:
-    """OAuth resource-server configuration loaded from environment.
+    """Resource-server auth configuration loaded from environment.
 
-    All fields are optional. If ``issuer``, ``jwks_url``, and ``audience`` are
-    all set, the server operates in authenticated mode. Otherwise the server
-    runs without auth (intended for local development only).
+    All fields are optional. Two auth paths are supported and can be enabled
+    independently or together:
+
+    1. **OAuth 2.1 JWT / userinfo** — when ``issuer``, ``jwks_url``, and
+       ``audience`` are set, the server accepts JWT bearer tokens from the
+       configured authorization server. Intended for browser-capable MCP
+       clients (claude.ai web/mobile, Claude Desktop) that can complete a
+       DCR + PKCE flow.
+    2. **Local static bearer** — when ``local_token`` is set, the server
+       accepts a specific bearer token value directly, without any network
+       roundtrip to the authorization server. Intended for headless clients
+       that cannot complete a browser OAuth flow (Claude Code hooks, Cursor,
+       scripts).
+
+    If both are configured, the local token is checked first. If neither is
+    configured, the server runs without auth (intended for local development
+    only — do not expose an unauthenticated server to the public internet).
     """
 
     def __init__(
@@ -47,6 +62,7 @@ class OAuthConfig:
         audience: str | None = None,
         public_url: str | None = None,
         userinfo_url: str | None = None,
+        local_token: str | None = None,
     ) -> None:
         self.issuer = issuer
         self.jwks_url = jwks_url
@@ -56,10 +72,16 @@ class OAuthConfig:
         # audience's scheme+host if unset.
         self.public_url = public_url
         # userinfo_url is an optional fallback for token introspection when
-        # JWT validation fails. Needed because some OAuth providers (e.g.,
-        # Auth0) issue opaque tokens for OIDC-only flows instead of JWTs
-        # bound to the requested audience. If unset, no fallback is used.
+        # JWT validation fails. Needed because some OAuth providers issue
+        # opaque tokens for OIDC-only flows instead of JWTs bound to the
+        # requested audience. If unset, no fallback is used.
         self.userinfo_url = userinfo_url
+        # local_token is a static bearer accepted for headless clients that
+        # cannot complete a browser OAuth flow. When set, the middleware
+        # accepts requests whose bearer matches this value exactly (using a
+        # constant-time comparison) without any network roundtrip. This value
+        # must never be logged — only the ``X-Mnemon-Client`` header label is.
+        self.local_token = local_token
 
     @classmethod
     def from_env(cls) -> OAuthConfig:
@@ -69,6 +91,7 @@ class OAuthConfig:
             audience=os.environ.get("MNEMON_OAUTH_AUDIENCE") or None,
             public_url=os.environ.get("MNEMON_PUBLIC_URL") or None,
             userinfo_url=os.environ.get("MNEMON_OAUTH_USERINFO_URL") or None,
+            local_token=os.environ.get("MNEMON_LOCAL_TOKEN") or None,
         )
 
     @property
@@ -142,8 +165,10 @@ class OAuthMiddleware:
             await _send_json(send, 200, self._protected_resource_metadata())
             return
 
-        # Unauthenticated mode — pass through.
-        if not self.config.enabled:
+        # Unauthenticated mode — pass through only when NEITHER auth method
+        # is configured. If local_token is set but OAuth is not, we still
+        # enforce auth below.
+        if not self.config.enabled and not self.config.local_token:
             await self.app(scope, receive, send)
             return
 
@@ -154,6 +179,38 @@ class OAuthMiddleware:
             return
 
         token = auth_header[7:].decode("ascii", errors="replace").strip()
+
+        # Local-token fast path: static bearer validated directly against
+        # MNEMON_LOCAL_TOKEN with a constant-time comparison. Used by clients
+        # that cannot complete a browser OAuth flow (Claude Code hooks,
+        # Cursor, headless scripts). Skips JWT and userinfo entirely — no
+        # network hop, no external AS dependency. Checked first so local
+        # clients don't pay the network cost of a failed JWT validation.
+        if self.config.local_token and hmac.compare_digest(
+            token, self.config.local_token
+        ):
+            client_header = _get_header(scope, b"x-mnemon-client")
+            client_label = (
+                client_header.decode("ascii", errors="replace")
+                if client_header
+                else "unknown"
+            )
+            logger.info("Accepted local token from client=%s", client_label)
+            await self.app(scope, receive, send)
+            return
+
+        # If only local_token is configured (no OAuth), any non-matching
+        # token is invalid — do not fall through to JWT/userinfo because
+        # neither is configured and _validate_token would raise on missing
+        # jwks_url. This path also covers the self-hosted / Phase 2 world
+        # where the OAuth block may be absent entirely.
+        if not self.config.enabled:
+            await self._send_401(
+                send,
+                error="invalid_token",
+                description="bearer token did not match local token",
+            )
+            return
 
         # Try JWT validation first (spec-compliant path).
         jwt_error: _OAuthError | None = None
