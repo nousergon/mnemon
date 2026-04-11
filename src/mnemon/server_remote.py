@@ -13,7 +13,13 @@ resource server per the MCP authorization spec (2025-06-18): it validates
 JWT bearer tokens from an external authorization server and serves RFC 9728
 Protected Resource Metadata for client discovery.
 
-When those env vars are unset, the server runs without auth (local
+``MNEMON_LOCAL_TOKEN`` enables a secondary static-bearer auth path for
+headless clients (Claude Code hooks, Cursor, scripts) that cannot complete
+a browser OAuth flow. The value must match exactly — the middleware does
+a constant-time comparison and skips JWT/userinfo validation on match.
+Can be combined with OAuth or used alone.
+
+When none of these env vars are set, the server runs without auth (local
 development only — do NOT expose an unauthenticated server to the public
 internet).
 
@@ -58,11 +64,17 @@ def run_remote() -> None:
             f"audience={config.audience})",
             file=sys.stderr,
         )
-    else:
+    if config.local_token:
+        print(
+            "Auth: local static bearer token enabled (MNEMON_LOCAL_TOKEN set)",
+            file=sys.stderr,
+        )
+    if not config.enabled and not config.local_token:
         print(
             "Auth: DISABLED — do not expose this server to the public internet. "
             "Set MNEMON_OAUTH_ISSUER, MNEMON_OAUTH_JWKS_URL, and "
-            "MNEMON_OAUTH_AUDIENCE to enable OAuth.",
+            "MNEMON_OAUTH_AUDIENCE to enable OAuth, or MNEMON_LOCAL_TOKEN "
+            "to enable local static bearer auth.",
             file=sys.stderr,
         )
 

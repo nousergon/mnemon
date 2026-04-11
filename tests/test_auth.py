@@ -508,3 +508,242 @@ async def test_no_userinfo_fallback_when_not_configured(oauth_config):
     # Description should only mention JWT failure, not userinfo
     desc = json.loads(body).get("error_description", "")
     assert "userinfo" not in desc
+
+
+# --- Local static bearer token path ---------------------------------------
+#
+# These tests cover the MNEMON_LOCAL_TOKEN auth path used by headless
+# clients (Claude Code hooks, Cursor, scripts) that cannot complete a
+# browser OAuth flow. The local token is checked before JWT/userinfo and
+# bypasses both on match.
+
+
+LOCAL_TOKEN_VALUE = "test-local-token-abcdef123456"
+
+
+@pytest.fixture
+def oauth_config_with_local_token(oauth_config) -> OAuthConfig:
+    """OAuth config with BOTH OAuth and local_token set."""
+    return OAuthConfig(
+        issuer=oauth_config.issuer,
+        jwks_url=oauth_config.jwks_url,
+        audience=oauth_config.audience,
+        public_url=oauth_config.public_url,
+        local_token=LOCAL_TOKEN_VALUE,
+    )
+
+
+@pytest.fixture
+def local_token_only_config() -> OAuthConfig:
+    """Config with ONLY local_token set — OAuth disabled entirely.
+
+    This previews the Phase 2 world where Auth0 is gone. If any middleware
+    code path silently requires OAuth env vars, tests using this fixture
+    will fail loudly.
+    """
+    return OAuthConfig(local_token=LOCAL_TOKEN_VALUE)
+
+
+@pytest.mark.asyncio
+async def test_local_token_accepted(oauth_config_with_local_token):
+    """Correct local token bypasses JWT validation and reaches downstream."""
+    downstream_called: list[bool] = []
+    app = _stub_downstream_factory(downstream_called)
+    mw = OAuthMiddleware(app, oauth_config_with_local_token)
+
+    status, _, body = await _call_middleware(
+        mw,
+        "/mcp",
+        headers=[(b"authorization", f"Bearer {LOCAL_TOKEN_VALUE}".encode())],
+    )
+
+    assert status == 200
+    assert json.loads(body) == {"ok": True}
+    assert downstream_called == [True]
+    # JWT client must NOT have been initialized — the local-token path
+    # should have short-circuited before _validate_token ran.
+    assert mw._jwks_client is None
+
+
+@pytest.mark.asyncio
+async def test_local_token_wrong_value_returns_401_when_oauth_enabled(
+    oauth_config_with_local_token, rsa_keypair, mock_signing_key
+):
+    """When OAuth is also configured, a wrong token falls through to JWT
+    validation (which also fails here because the wrong value isn't a JWT).
+    The downstream response must be a 401 with a proper WWW-Authenticate
+    header — never a 200, never a silent pass-through."""
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, oauth_config_with_local_token)
+
+    status, headers, body = await _call_middleware(
+        mw,
+        "/mcp",
+        headers=[(b"authorization", b"Bearer definitely-not-the-local-token")],
+    )
+
+    assert status == 401
+    assert b"www-authenticate" in headers
+    assert b"Bearer" in headers[b"www-authenticate"]
+    assert json.loads(body)["error"] == "invalid_token"
+
+
+@pytest.mark.asyncio
+async def test_local_token_precedence_over_oauth(
+    oauth_config_with_local_token,
+):
+    """When both auth methods are enabled and the token matches the local
+    token, the JWT path must not run at all. Verified by inspecting that
+    ``_jwks_client`` was never lazily initialized.
+
+    This test deliberately does NOT use the ``mock_signing_key`` fixture —
+    if the middleware incorrectly falls into the JWT path, PyJWKClient
+    would attempt a real network fetch against the fake JWKS URL and the
+    test would fail loudly rather than silently pass.
+    """
+    downstream_called: list[bool] = []
+    app = _stub_downstream_factory(downstream_called)
+    mw = OAuthMiddleware(app, oauth_config_with_local_token)
+
+    status, _, _ = await _call_middleware(
+        mw,
+        "/mcp",
+        headers=[(b"authorization", f"Bearer {LOCAL_TOKEN_VALUE}".encode())],
+    )
+
+    assert status == 200
+    assert downstream_called == [True]
+    assert mw._jwks_client is None
+
+
+@pytest.mark.asyncio
+async def test_local_token_works_without_oauth_config(local_token_only_config):
+    """Local token auth must work with OAuth entirely unconfigured.
+
+    This is a guardrail test for the Phase 2 / self-hosted-AS future: when
+    ``MNEMON_OAUTH_*`` env vars are all unset, the middleware should still
+    enforce auth via the local token path. Any regression here means a
+    hidden Auth0/OAuth dependency has crept in.
+    """
+    downstream_called: list[bool] = []
+    app = _stub_downstream_factory(downstream_called)
+    mw = OAuthMiddleware(app, local_token_only_config)
+
+    # Correct token → accepted, downstream called.
+    status, _, body = await _call_middleware(
+        mw,
+        "/mcp",
+        headers=[(b"authorization", f"Bearer {LOCAL_TOKEN_VALUE}".encode())],
+    )
+    assert status == 200
+    assert json.loads(body) == {"ok": True}
+    assert downstream_called == [True]
+    assert mw._jwks_client is None
+
+
+@pytest.mark.asyncio
+async def test_local_token_only_rejects_wrong_token(local_token_only_config):
+    """With only local token configured, wrong tokens must return 401 —
+    not fall through to a JWT path that would raise on missing jwks_url."""
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, local_token_only_config)
+
+    status, headers, body = await _call_middleware(
+        mw,
+        "/mcp",
+        headers=[(b"authorization", b"Bearer wrong-token-value")],
+    )
+
+    assert status == 401
+    assert b"www-authenticate" in headers
+    assert json.loads(body)["error"] == "invalid_token"
+    # JWT path must NOT have been entered — no jwks_url to fetch.
+    assert mw._jwks_client is None
+
+
+@pytest.mark.asyncio
+async def test_local_token_only_missing_auth_header_returns_401(
+    local_token_only_config,
+):
+    """Missing Authorization header returns 401 even when only local token
+    is configured — auth is still required, just via a different path."""
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, local_token_only_config)
+
+    status, _, body = await _call_middleware(mw, "/mcp")
+
+    assert status == 401
+    assert json.loads(body)["error"] == "missing_token"
+
+
+@pytest.mark.asyncio
+async def test_local_token_logs_client_header(
+    oauth_config_with_local_token, caplog
+):
+    """The X-Mnemon-Client header value should appear in the accept log
+    line for attribution. The token value itself must NEVER be logged."""
+    import logging as _logging
+
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, oauth_config_with_local_token)
+
+    with caplog.at_level(_logging.INFO, logger="mnemon.auth"):
+        status, _, _ = await _call_middleware(
+            mw,
+            "/mcp",
+            headers=[
+                (b"authorization", f"Bearer {LOCAL_TOKEN_VALUE}".encode()),
+                (b"x-mnemon-client", b"claude-code"),
+            ],
+        )
+
+    assert status == 200
+    # Client label surfaced in logs.
+    assert any("claude-code" in record.message for record in caplog.records)
+    # Token value must not appear anywhere in log output.
+    for record in caplog.records:
+        assert LOCAL_TOKEN_VALUE not in record.message
+
+
+@pytest.mark.asyncio
+async def test_local_token_logs_unknown_when_header_missing(
+    oauth_config_with_local_token, caplog
+):
+    """When no X-Mnemon-Client header is sent, the accept log records
+    the client as 'unknown' rather than crashing or omitting the field."""
+    import logging as _logging
+
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, oauth_config_with_local_token)
+
+    with caplog.at_level(_logging.INFO, logger="mnemon.auth"):
+        status, _, _ = await _call_middleware(
+            mw,
+            "/mcp",
+            headers=[(b"authorization", f"Bearer {LOCAL_TOKEN_VALUE}".encode())],
+        )
+
+    assert status == 200
+    assert any("unknown" in record.message for record in caplog.records)
+
+
+# --- Config loading — local token path -----------------------------------
+
+
+def test_oauth_config_local_token_none_by_default(monkeypatch):
+    monkeypatch.delenv("MNEMON_LOCAL_TOKEN", raising=False)
+    config = OAuthConfig.from_env()
+    assert config.local_token is None
+
+
+def test_oauth_config_loads_local_token_from_env(monkeypatch):
+    monkeypatch.setenv("MNEMON_LOCAL_TOKEN", "env-loaded-token-value")
+    config = OAuthConfig.from_env()
+    assert config.local_token == "env-loaded-token-value"
+
+
+def test_oauth_config_empty_local_token_coerced_to_none(monkeypatch):
+    """Empty string env var is treated as unset (matches other env fields)."""
+    monkeypatch.setenv("MNEMON_LOCAL_TOKEN", "")
+    config = OAuthConfig.from_env()
+    assert config.local_token is None
