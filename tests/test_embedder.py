@@ -158,14 +158,37 @@ class TestEmbedDocument:
 
 
 class TestGetModel:
-    def test_lazy_loads_model(self):
+    def test_lazy_loads_model_without_cache_dir(self, monkeypatch):
+        """When FASTEMBED_CACHE_DIR is unset, the model is constructed
+        with only model_name — preserves FastEmbed's own default cache
+        location for development environments."""
+        monkeypatch.delenv("FASTEMBED_CACHE_DIR", raising=False)
         mock_model = MagicMock()
         mock_fastembed = MagicMock()
         mock_fastembed.TextEmbedding.return_value = mock_model
         with patch.dict("sys.modules", {"fastembed": mock_fastembed}):
             result = mnemon.embedder._get_model()
         assert result is mock_model
-        mock_fastembed.TextEmbedding.assert_called_once_with(model_name="BAAI/bge-small-en-v1.5")
+        mock_fastembed.TextEmbedding.assert_called_once_with(
+            model_name="BAAI/bge-small-en-v1.5"
+        )
+
+    def test_lazy_loads_model_with_cache_dir_env(self, monkeypatch):
+        """When FASTEMBED_CACHE_DIR is set, it is forwarded to
+        TextEmbedding so the deployed image can pin its model cache to
+        a known path baked into the Docker layer (no HF download per
+        cold start)."""
+        monkeypatch.setenv("FASTEMBED_CACHE_DIR", "/app/.cache/fastembed")
+        mock_model = MagicMock()
+        mock_fastembed = MagicMock()
+        mock_fastembed.TextEmbedding.return_value = mock_model
+        with patch.dict("sys.modules", {"fastembed": mock_fastembed}):
+            result = mnemon.embedder._get_model()
+        assert result is mock_model
+        mock_fastembed.TextEmbedding.assert_called_once_with(
+            model_name="BAAI/bge-small-en-v1.5",
+            cache_dir="/app/.cache/fastembed",
+        )
 
     def test_singleton_returns_same_instance(self):
         fake_model = MagicMock()

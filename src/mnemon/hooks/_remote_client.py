@@ -1,0 +1,187 @@
+"""Remote MCP client helper for mnemon hooks.
+
+Shared helper used by all three Claude Code hooks
+(``context_surfacing``, ``session_extractor``, ``handoff_generator``) to
+call mnemon tools on the Fly-hosted vault via Streamable HTTP instead of
+touching the local SQLite store directly. This is the client-side half of
+Phase 3 unification — the server-side half is the ``MNEMON_LOCAL_TOKEN``
+auth path in ``src/mnemon/auth.py``.
+
+Configuration
+-------------
+Both the remote URL and the local static bearer token are resolved from
+environment variables first, then from files under ``~/.mnemon/``. There
+is intentionally **no hardcoded default URL**: the helper must not silently
+point at any specific deployment, because a forked or shared config with
+an accidental default would send memory writes into someone else's vault.
+If neither source is set, the helper raises :class:`RemoteClientConfigError`
+with a message pointing at both options.
+
+Resolution order (first hit wins):
+
+1. ``MNEMON_REMOTE_URL`` env var / ``~/.mnemon/remote_url`` file
+2. ``MNEMON_LOCAL_TOKEN`` env var / ``~/.mnemon/local_token`` file
+
+The ``local_token`` file is expected to be 0600 (never world-readable);
+``remote_url`` has no special permissions since the URL itself isn't
+sensitive.
+
+Behavior
+--------
+Each call goes through the MCP Streamable HTTP client, which opens a
+short-lived session, runs the MCP ``initialize`` handshake, calls the
+requested tool, and closes the session. The entire call is wrapped in a
+single ``asyncio.wait_for`` with a 2-second default timeout so hooks never
+block Claude Code's UI beyond the hook's own 8-second allowance.
+
+All failures (network, timeout, auth, protocol errors) are surfaced to
+the caller as exceptions — the helper does not degrade silently. Hooks
+are responsible for catching and logging to stderr so that Claude Code
+itself is never crashed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+from typing import Any
+
+# 8 seconds gives us headroom for Fly cold starts — when auto_stop_machines
+# lets the VM sleep between sessions, the first request has to wake the
+# machine (1-3s), warm up uvicorn (~1s), and load the FastEmbed ONNX model
+# on the first memory_search call (2-4s). 2s (the plan's original value) was
+# too tight and caused silent timeouts that surfaced as empty-string errors.
+# Claude Code's own hook timeout is 8s in ~/.claude/settings.json, so this
+# matches — if the hook runs out of budget, it runs out of budget.
+DEFAULT_TIMEOUT_SEC = 8.0
+DEFAULT_CLIENT_LABEL = "claude-code"
+
+MNEMON_DIR = Path.home() / ".mnemon"
+LOCAL_TOKEN_FILE = MNEMON_DIR / "local_token"
+REMOTE_URL_FILE = MNEMON_DIR / "remote_url"
+
+
+class RemoteClientConfigError(Exception):
+    """Raised when the remote URL or local token cannot be resolved."""
+
+
+def get_remote_url() -> str:
+    """Resolve the mnemon remote URL.
+
+    Order: ``MNEMON_REMOTE_URL`` env var → ``~/.mnemon/remote_url`` file.
+    Raises :class:`RemoteClientConfigError` if neither is set.
+    """
+    env = os.environ.get("MNEMON_REMOTE_URL", "").strip()
+    if env:
+        return env
+    if REMOTE_URL_FILE.exists():
+        try:
+            content = REMOTE_URL_FILE.read_text().strip()
+            if content:
+                return content
+        except OSError:
+            pass
+    raise RemoteClientConfigError(
+        "mnemon remote URL not configured. "
+        "Set MNEMON_REMOTE_URL env var or write the URL to "
+        f"{REMOTE_URL_FILE}. Example: "
+        "https://<your-app>.fly.dev/mcp"
+    )
+
+
+def get_local_token() -> str:
+    """Resolve the mnemon local bearer token.
+
+    Order: ``MNEMON_LOCAL_TOKEN`` env var → ``~/.mnemon/local_token`` file.
+    Raises :class:`RemoteClientConfigError` if neither is set.
+    """
+    env = os.environ.get("MNEMON_LOCAL_TOKEN", "").strip()
+    if env:
+        return env
+    if LOCAL_TOKEN_FILE.exists():
+        try:
+            content = LOCAL_TOKEN_FILE.read_text().strip()
+            if content:
+                return content
+        except OSError:
+            pass
+    raise RemoteClientConfigError(
+        "mnemon local token not configured. "
+        "Set MNEMON_LOCAL_TOKEN env var or write the token value to "
+        f"{LOCAL_TOKEN_FILE} (chmod 600)."
+    )
+
+
+async def _call_tool_async(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    timeout: float,
+    client_label: str,
+) -> str:
+    """Open a Streamable HTTP session, call a tool, return its text output.
+
+    Split out from :func:`call_tool_sync` so it can be patched directly in
+    tests without monkey-patching the MCP SDK's async context managers.
+    """
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    url = get_remote_url()
+    token = get_local_token()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "X-Mnemon-Client": client_label,
+    }
+
+    async def _run() -> str:
+        async with streamablehttp_client(url, headers=headers) as (
+            read,
+            write,
+            _close,
+        ):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, arguments)
+                # MCP tool results contain a list of content blocks. The
+                # first text block is the one we want for memory_search /
+                # memory_save / etc. — all current mnemon tools return
+                # a single string.
+                for content in getattr(result, "content", []):
+                    text = getattr(content, "text", None)
+                    if text is not None:
+                        return text
+                return ""
+
+    return await asyncio.wait_for(_run(), timeout=timeout)
+
+
+def call_tool_sync(
+    tool_name: str,
+    arguments: dict[str, Any],
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SEC,
+    client_label: str = DEFAULT_CLIENT_LABEL,
+) -> str:
+    """Synchronous wrapper for hook scripts.
+
+    Runs :func:`_call_tool_async` on a fresh event loop per call. Hooks
+    are short-lived processes that invoke the helper at most once per
+    run, so the per-call loop cost is negligible compared to the network
+    round-trip.
+
+    Raises:
+        RemoteClientConfigError: if URL or token can't be resolved.
+        asyncio.TimeoutError: if the call exceeds ``timeout`` seconds.
+        Other exceptions propagate from the MCP SDK / httpx for the caller
+        to log as it sees fit.
+    """
+    return asyncio.run(
+        _call_tool_async(
+            tool_name,
+            arguments,
+            timeout=timeout,
+            client_label=client_label,
+        )
+    )

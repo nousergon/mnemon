@@ -9,52 +9,91 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mnemon.hooks.framework import is_duplicate, read_stdin, read_transcript, write_output
+from mnemon.hooks.framework import (
+    is_duplicate,
+    mark_seen,
+    read_stdin,
+    read_transcript,
+    write_output,
+)
 
 
-# ── framework.py: is_duplicate ────────────────────────────────────────────────
+# ── framework.py: is_duplicate + mark_seen ────────────────────────────────────
+#
+# is_duplicate is read-only: it reports whether a prompt was previously
+# marked as seen but does not itself persist anything. mark_seen is the
+# write side. The split lets hooks postpone dedup marking until after
+# their downstream work succeeds — a failed remote call no longer locks
+# out a prompt for 10 minutes.
 
 
 class TestIsDuplicate:
     def test_first_call_is_not_duplicate(self, tmp_path):
+        """An empty dedup store always reports not-duplicate."""
         dedup_file = tmp_path / "dedup.json"
         with patch("mnemon.hooks.framework._dedup_path", return_value=dedup_file):
             assert is_duplicate("hello world") is False
 
-    def test_second_call_is_duplicate(self, tmp_path):
+    def test_is_duplicate_does_not_write(self, tmp_path):
+        """is_duplicate must be purely read-only — no persistence side
+        effects. Without this guarantee the dedup-after-success fix
+        regresses silently."""
         dedup_file = tmp_path / "dedup.json"
         with patch("mnemon.hooks.framework._dedup_path", return_value=dedup_file):
             is_duplicate("hello world")
+        assert not dedup_file.exists()
+
+    def test_mark_seen_then_is_duplicate_true(self, tmp_path):
+        """After mark_seen, the same text is reported as duplicate."""
+        dedup_file = tmp_path / "dedup.json"
+        with patch("mnemon.hooks.framework._dedup_path", return_value=dedup_file):
+            mark_seen("hello world")
             assert is_duplicate("hello world") is True
 
     def test_different_text_is_not_duplicate(self, tmp_path):
         dedup_file = tmp_path / "dedup.json"
         with patch("mnemon.hooks.framework._dedup_path", return_value=dedup_file):
-            is_duplicate("hello world")
+            mark_seen("hello world")
             assert is_duplicate("goodbye world") is False
 
     def test_expired_entry_is_not_duplicate(self, tmp_path):
         dedup_file = tmp_path / "dedup.json"
         with patch("mnemon.hooks.framework._dedup_path", return_value=dedup_file):
-            is_duplicate("hello world")
-            # Manually backdate the entry beyond the 600s window
+            mark_seen("hello world")
+            # Manually backdate the entry beyond the 600s window.
             entries = json.loads(dedup_file.read_text())
             entries[0]["timestamp"] = time.time() - 700
             dedup_file.write_text(json.dumps(entries))
             assert is_duplicate("hello world") is False
 
     def test_corrupt_dedup_file_handled(self, tmp_path):
+        """is_duplicate must tolerate a corrupt file — returning False
+        rather than crashing, so hooks don't hard-fail on a bad cache."""
         dedup_file = tmp_path / "dedup.json"
         dedup_file.parent.mkdir(parents=True, exist_ok=True)
         dedup_file.write_text("not valid json!!!")
         with patch("mnemon.hooks.framework._dedup_path", return_value=dedup_file):
             assert is_duplicate("hello world") is False
 
-    def test_creates_parent_directory(self, tmp_path):
+    def test_mark_seen_creates_parent_directory(self, tmp_path):
+        """mark_seen must create ~/.mnemon/ if it doesn't exist —
+        otherwise the first hook invocation on a fresh install would
+        fail to persist dedup state."""
         dedup_file = tmp_path / "subdir" / "dedup.json"
         with patch("mnemon.hooks.framework._dedup_path", return_value=dedup_file):
-            is_duplicate("hello world")
+            mark_seen("hello world")
             assert dedup_file.exists()
+
+    def test_mark_seen_idempotent(self, tmp_path):
+        """Calling mark_seen twice on the same text should not create
+        duplicate entries — keeps the dedup file from growing
+        unboundedly in edge cases."""
+        dedup_file = tmp_path / "dedup.json"
+        with patch("mnemon.hooks.framework._dedup_path", return_value=dedup_file):
+            mark_seen("hello world")
+            mark_seen("hello world")
+            entries = json.loads(dedup_file.read_text())
+            assert len(entries) == 1
 
 
 # ── framework.py: read_stdin ──────────────────────────────────────────────────
@@ -174,155 +213,291 @@ class TestReadTranscript:
 
 
 # ── context_surfacing.py: build_context ───────────────────────────────────────
-
-
-def _make_result(score, content_type="observation", title="Test", content="Test content"):
-    r = MagicMock()
-    r.composite_score = score
-    r.content_type = content_type
-    r.title = title
-    r.content = content
-    return r
+#
+# After Phase 3 unification, build_context takes the raw string output of
+# the remote memory_search tool and wraps it in mnemon-context tags — the
+# old HOT/WARM/COLD tiered logic moved to the server (which always returns
+# 300-char snippets per match). build_context is now a thin wrapper with
+# budget-enforcement as a safety net.
 
 
 class TestBuildContext:
-    def test_empty_results_returns_empty(self):
+    def test_empty_input_returns_empty(self):
         from mnemon.hooks.context_surfacing import build_context
 
-        assert build_context([]) == ""
+        assert build_context("") == ""
         assert build_context(None) == ""
 
-    def test_hot_result_includes_300_char_snippet(self):
+    def test_whitespace_only_returns_empty(self):
         from mnemon.hooks.context_surfacing import build_context
 
-        long_content = "A" * 500
-        r = _make_result(0.20, "decision", "Big Decision", long_content)
-        ctx = build_context([r])
-        assert "<mnemon-context>" in ctx
-        assert "[decision] Big Decision:" in ctx
-        assert "A" * 300 in ctx
-        assert "..." in ctx
+        assert build_context("   \n  \t  ") == ""
 
-    def test_hot_result_short_content_no_ellipsis(self):
-        from mnemon.hooks.context_surfacing import build_context
+    def test_no_results_sentinel_returns_empty(self):
+        """The server returns a specific sentinel when nothing matches —
+        we must not wrap it in mnemon-context tags and inject noise."""
+        from mnemon.hooks.context_surfacing import (
+            NO_RESULTS_SENTINEL,
+            build_context,
+        )
 
-        r = _make_result(0.20, "note", "Short", "Brief content")
-        ctx = build_context([r])
-        # Content is under 300 chars so no ellipsis
-        assert "Brief content" in ctx
-        # The entry should not end with "..."
-        lines = ctx.split("\n")
-        content_line = [l for l in lines if "Short" in l][0]
-        assert not content_line.endswith("...")
-
-    def test_warm_result_includes_150_char_snippet(self):
-        from mnemon.hooks.context_surfacing import build_context
-
-        long_content = "B" * 300
-        r = _make_result(0.12, "preference", "My Pref", long_content)
-        ctx = build_context([r])
-        assert "[preference] My Pref:" in ctx
-        assert "B" * 150 in ctx
-        # Should not include full 300 chars
-        assert "B" * 200 not in ctx
-
-    def test_cold_result_title_only(self):
-        from mnemon.hooks.context_surfacing import build_context
-
-        r = _make_result(0.05, "observation", "Cold Fact", "Lots of detail here")
-        ctx = build_context([r])
-        assert "[observation] Cold Fact" in ctx
-        assert "Lots of detail" not in ctx
-
-    def test_respects_char_budget(self):
-        from mnemon.hooks.context_surfacing import build_context, CHAR_BUDGET
-
-        results = [
-            _make_result(0.20, "note", f"Item {i}", "X" * 400)
-            for i in range(50)
-        ]
-        ctx = build_context(results)
-        # Total context should be within budget (plus the wrapper lines)
-        inner_lines = [l for l in ctx.split("\n") if l.startswith("[")]
-        inner_text = "\n".join(inner_lines)
-        assert len(inner_text) <= CHAR_BUDGET + 100
+        assert build_context(NO_RESULTS_SENTINEL) == ""
 
     def test_wraps_in_mnemon_context_tags(self):
         from mnemon.hooks.context_surfacing import build_context
 
-        r = _make_result(0.20, "note", "Title", "Content")
-        ctx = build_context([r])
+        raw = "1. [note] **Title** (score: 0.80)\n   content here"
+        ctx = build_context(raw)
         assert ctx.startswith("<mnemon-context>")
         assert ctx.endswith("</mnemon-context>")
         assert "Relevant memories from previous sessions:" in ctx
+        assert raw in ctx
 
-    def test_mixed_tiers(self):
+    def test_preserves_server_formatting_unchanged(self):
+        """The server's pre-formatted snippets should pass through
+        untouched — no regex re-parsing, no re-ranking."""
         from mnemon.hooks.context_surfacing import build_context
 
-        results = [
-            _make_result(0.20, "decision", "Hot", "Hot content here"),
-            _make_result(0.12, "preference", "Warm", "Warm content here"),
-            _make_result(0.05, "observation", "Cold", "Cold content here"),
-        ]
-        ctx = build_context(results)
-        assert "[decision] Hot: Hot content here" in ctx
-        assert "[preference] Warm: Warm content here..." in ctx
-        assert "[observation] Cold" in ctx
-        assert "Cold content here" not in ctx.split("[observation] Cold")[-1].split("\n")[0]
+        raw = (
+            "1. [decision] **Use PostgreSQL** (score: 0.950, confidence: 0.90)\n"
+            "   Chose PostgreSQL for JSON support.\n"
+            "   _id: 1 | created: 2026-04-08_\n"
+            "\n"
+            "2. [preference] **Tabs over spaces** (score: 0.320, confidence: 0.70)\n"
+            "   User prefers tabs.\n"
+            "   _id: 2 | created: 2026-04-07_"
+        )
+        ctx = build_context(raw)
+        # All score/confidence/id metadata preserved.
+        assert "score: 0.950" in ctx
+        assert "confidence: 0.70" in ctx
+        assert "_id: 1" in ctx
+        assert "_id: 2" in ctx
+
+    def test_truncates_at_char_budget(self):
+        from mnemon.hooks.context_surfacing import CHAR_BUDGET, build_context
+
+        raw = "X" * (CHAR_BUDGET * 2)
+        ctx = build_context(raw)
+        # Output includes the wrapper + truncation marker, but the inner
+        # payload is capped at CHAR_BUDGET chars.
+        assert "[truncated]" in ctx
+        # Sanity: total length bounded (wrapper adds <200 chars).
+        assert len(ctx) < CHAR_BUDGET + 300
+
+    def test_no_truncation_when_within_budget(self):
+        from mnemon.hooks.context_surfacing import build_context
+
+        raw = "1. [note] **Small** (score: 0.5)\n   Small content"
+        ctx = build_context(raw)
+        assert "[truncated]" not in ctx
 
 
 # ── context_surfacing.py: main ────────────────────────────────────────────────
 
 
 class TestContextSurfacingMain:
-    def test_full_pipeline(self):
+    def test_full_pipeline_calls_remote_and_emits_context(self):
         from mnemon.hooks.context_surfacing import main
 
-        mock_store = MagicMock()
-        mock_result = _make_result(0.20, "note", "Pipeline", "It works via Step Functions")
-        with patch("mnemon.hooks.framework.read_stdin", return_value={"prompt": "how does the pipeline work?"}), \
-             patch("mnemon.hooks.framework.is_noise", return_value=False), \
-             patch("mnemon.hooks.framework.is_duplicate", return_value=False), \
-             patch("mnemon.hooks.framework.write_output") as mock_write, \
-             patch("mnemon.store.Store", return_value=mock_store), \
-             patch("mnemon.search.search", return_value=[mock_result]):
+        raw_tool_output = (
+            "1. [note] **Pipeline** (score: 0.750, confidence: 0.80)\n"
+            "   It works via Step Functions\n"
+            "   _id: 42 | created: 2026-04-08_"
+        )
+        with patch(
+            "mnemon.hooks.framework.read_stdin",
+            return_value={"prompt": "how does the pipeline work?"},
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.is_duplicate", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.mark_seen"
+        ) as mock_mark_seen, patch(
+            "mnemon.hooks.framework.write_output"
+        ) as mock_write, patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=raw_tool_output,
+        ) as mock_call:
             main()
+
+        mock_call.assert_called_once()
+        call_args = mock_call.call_args
+        assert call_args[0][0] == "memory_search"
+        assert call_args[0][1] == {
+            "query": "how does the pipeline work?",
+            "limit": 8,
+        }
+        # Client label makes attribution possible in server-side logs.
+        assert call_args.kwargs.get("client_label") == "claude-code-context-surfacing"
+
+        # Successful remote call must mark the prompt as seen so an
+        # immediate resubmit within the dedup window is suppressed.
+        mock_mark_seen.assert_called_once_with("how does the pipeline work?")
+
         mock_write.assert_called_once()
         output = mock_write.call_args[0][0]
         assert "additionalContext" in output["hookSpecificOutput"]
-        assert "Pipeline" in output["hookSpecificOutput"]["additionalContext"]
+        injected = output["hookSpecificOutput"]["additionalContext"]
+        assert "Pipeline" in injected
+        assert "Step Functions" in injected
 
-    def test_skips_noise(self):
+    def test_skips_noise_without_calling_remote(self):
         from mnemon.hooks.context_surfacing import main
 
-        with patch("mnemon.hooks.framework.read_stdin", return_value={"prompt": "hi"}), \
-             patch("mnemon.hooks.framework.is_noise", return_value=True), \
-             patch("mnemon.hooks.framework.write_output") as mock_write:
+        with patch(
+            "mnemon.hooks.framework.read_stdin", return_value={"prompt": "hi"}
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=True
+        ), patch(
+            "mnemon.hooks.framework.write_output"
+        ) as mock_write, patch(
+            "mnemon.hooks._remote_client.call_tool_sync"
+        ) as mock_call:
             main()
         mock_write.assert_not_called()
+        mock_call.assert_not_called()
 
-    def test_skips_duplicate(self):
+    def test_skips_duplicate_without_calling_remote(self):
         from mnemon.hooks.context_surfacing import main
 
-        with patch("mnemon.hooks.framework.read_stdin", return_value={"prompt": "how does the pipeline work?"}), \
-             patch("mnemon.hooks.framework.is_noise", return_value=False), \
-             patch("mnemon.hooks.framework.is_duplicate", return_value=True), \
-             patch("mnemon.hooks.framework.write_output") as mock_write:
+        with patch(
+            "mnemon.hooks.framework.read_stdin",
+            return_value={"prompt": "how does the pipeline work?"},
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.is_duplicate", return_value=True
+        ), patch(
+            "mnemon.hooks.framework.write_output"
+        ) as mock_write, patch(
+            "mnemon.hooks._remote_client.call_tool_sync"
+        ) as mock_call:
             main()
         mock_write.assert_not_called()
+        mock_call.assert_not_called()
 
-    def test_no_results_no_output(self):
+    def test_no_results_still_marks_seen(self):
+        """Even when memory_search returns the no-results sentinel, we
+        mark the prompt as seen so an immediate identical resubmit does
+        not re-hit the network. The remote call succeeded — the prompt
+        just has no matches — and dedup is about suppressing redundant
+        work, not about gating on output."""
+        from mnemon.hooks.context_surfacing import (
+            NO_RESULTS_SENTINEL,
+            main,
+        )
+
+        with patch(
+            "mnemon.hooks.framework.read_stdin",
+            return_value={"prompt": "something obscure"},
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.is_duplicate", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.mark_seen"
+        ) as mock_mark_seen, patch(
+            "mnemon.hooks.framework.write_output"
+        ) as mock_write, patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=NO_RESULTS_SENTINEL,
+        ):
+            main()
+        mock_write.assert_not_called()
+        mock_mark_seen.assert_called_once_with("something obscure")
+
+    def test_remote_error_degrades_gracefully_and_does_not_mark_seen(
+        self, capsys
+    ):
+        """Network errors must not crash the hook — log to stderr, exit 0,
+        no output written. Critically, mark_seen must NOT fire on failure,
+        so the exact same prompt can be retried immediately once the
+        transient failure clears (wifi reconnect, Fly cold start wakes,
+        etc.). The exception type is included in the stderr line so
+        empty-str exceptions like asyncio.TimeoutError still produce a
+        debuggable trace."""
         from mnemon.hooks.context_surfacing import main
 
-        mock_store = MagicMock()
-        with patch("mnemon.hooks.framework.read_stdin", return_value={"prompt": "something obscure"}), \
-             patch("mnemon.hooks.framework.is_noise", return_value=False), \
-             patch("mnemon.hooks.framework.is_duplicate", return_value=False), \
-             patch("mnemon.hooks.framework.write_output") as mock_write, \
-             patch("mnemon.store.Store", return_value=mock_store), \
-             patch("mnemon.search.search", return_value=[]):
+        with patch(
+            "mnemon.hooks.framework.read_stdin",
+            return_value={"prompt": "real prompt"},
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.is_duplicate", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.mark_seen"
+        ) as mock_mark_seen, patch(
+            "mnemon.hooks.framework.write_output"
+        ) as mock_write, patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            side_effect=ConnectionError("connection refused"),
+        ):
             main()
         mock_write.assert_not_called()
+        mock_mark_seen.assert_not_called()
+        captured = capsys.readouterr()
+        assert "remote error" in captured.err
+        assert "ConnectionError" in captured.err
+        assert "connection refused" in captured.err
+
+    def test_empty_exception_still_surfaces_type(self, capsys):
+        """asyncio.TimeoutError has an empty str() which caused the
+        original 'remote error: ' empty message during smoke testing.
+        The rewritten error handler includes the exception class name so
+        even empty-message exceptions produce a debuggable log line."""
+        import asyncio
+
+        from mnemon.hooks.context_surfacing import main
+
+        with patch(
+            "mnemon.hooks.framework.read_stdin",
+            return_value={"prompt": "real prompt"},
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.is_duplicate", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.mark_seen"
+        ), patch(
+            "mnemon.hooks.framework.write_output"
+        ), patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            side_effect=asyncio.TimeoutError(),
+        ):
+            main()
+        captured = capsys.readouterr()
+        assert "TimeoutError" in captured.err
+
+    def test_config_error_degrades_gracefully(self, capsys):
+        """Missing URL/token should log a specific config error, exit 0,
+        and must NOT mark the prompt as seen — the user can fix the
+        config and retry immediately."""
+        from mnemon.hooks._remote_client import RemoteClientConfigError
+        from mnemon.hooks.context_surfacing import main
+
+        with patch(
+            "mnemon.hooks.framework.read_stdin",
+            return_value={"prompt": "real prompt"},
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.is_duplicate", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.mark_seen"
+        ) as mock_mark_seen, patch(
+            "mnemon.hooks.framework.write_output"
+        ) as mock_write, patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            side_effect=RemoteClientConfigError("no token"),
+        ):
+            main()
+        mock_write.assert_not_called()
+        mock_mark_seen.assert_not_called()
+        captured = capsys.readouterr()
+        assert "config error" in captured.err
 
 
 # ── session_extractor.py: extract_with_llm ───────────────────────────────────

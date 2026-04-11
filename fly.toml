@@ -22,3 +22,13 @@ primary_region = "sjc"
 [mounts]
   source = "mnemon_data"
   destination = "/data"
+
+# Memory must be at least 1GB because the first memory_search call loads
+# the FastEmbed bge-small-en-v1.5 ONNX model (~130MB resident) into RAM
+# on top of Python, uvicorn, FastMCP, and the vector store. The Fly
+# default (shared-cpu-1x:256mb) OOM-kills the mnemon process on first
+# search — confirmed during work item 4 smoke testing 2026-04-11.
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
