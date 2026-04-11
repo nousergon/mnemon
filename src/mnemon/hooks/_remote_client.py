@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -163,7 +164,7 @@ def call_tool_sync(
     *,
     timeout: float = DEFAULT_TIMEOUT_SEC,
     client_label: str = DEFAULT_CLIENT_LABEL,
-) -> str:
+) -> tuple[str, float]:
     """Synchronous wrapper for hook scripts.
 
     Runs :func:`_call_tool_async` on a fresh event loop per call. Hooks
@@ -171,13 +172,20 @@ def call_tool_sync(
     run, so the per-call loop cost is negligible compared to the network
     round-trip.
 
+    Returns:
+        A ``(result, elapsed_seconds)`` tuple. ``elapsed_seconds`` is the
+        wall-clock time for the full call, measured with
+        :func:`time.monotonic`. Callers can use it to surface latency
+        warnings when the round-trip exceeds a threshold.
+
     Raises:
         RemoteClientConfigError: if URL or token can't be resolved.
         asyncio.TimeoutError: if the call exceeds ``timeout`` seconds.
         Other exceptions propagate from the MCP SDK / httpx for the caller
         to log as it sees fit.
     """
-    return asyncio.run(
+    t0 = time.monotonic()
+    result = asyncio.run(
         _call_tool_async(
             tool_name,
             arguments,
@@ -185,3 +193,4 @@ def call_tool_sync(
             client_label=client_label,
         )
     )
+    return result, time.monotonic() - t0
