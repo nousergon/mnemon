@@ -1,30 +1,26 @@
-"""Self-hosted OAuth 2.1 Authorization Server — Phase 2 scaffolding.
+"""Self-hosted OAuth 2.1 Authorization Server.
 
 Removes mnemon's external-AS (Auth0) dependency so self-hosted deployments
 can run as a single process with no third-party auth vendor. This module
 is the AS-side counterpart to ``auth.py`` (which is the Resource Server).
 
-Current scope (PR #36 — scaffolding only)
------------------------------------------
-This PR lays the groundwork for the AS endpoints to follow in subsequent
-PRs. What ships here:
-
+What's implemented
+------------------
 - RSA keypair management: generated on first run, persisted to the Fly
   volume, loaded on subsequent starts. Private key never leaves the
   server; public key is published at ``/.well-known/jwks.json``.
-- ``/.well-known/oauth-authorization-server`` metadata (RFC 8414). Some
-  endpoint URLs point at routes that don't exist yet — clients will get
-  404s if they try to use them, which is fine while this is scaffolding.
-- ``/.well-known/jwks.json`` — the public key in JWKS format for any
-  future resource server (mnemon itself, in Phase 2) to verify tokens.
-- Feature flag ``MNEMON_AS_ENABLED``. Off by default so this PR is a
-  no-op on the live deployment; turn it on in a later PR when the
-  endpoints are implemented.
+- ``/.well-known/oauth-authorization-server`` metadata (RFC 8414).
+- ``/.well-known/jwks.json`` — the public key in JWKS format.
+- ``/oauth/authorize`` — HTML passphrase login form (GET) and code
+  issuance after successful login (POST). PKCE code_challenge stored
+  server-side for later verification.
+- ``/oauth/token`` — authorization_code and refresh_token grants. RS256
+  JWT access tokens, opaque refresh tokens with rotation.
+- Feature flag ``MNEMON_AS_ENABLED``. Off by default.
 
 Out of scope (future PRs)
 -------------------------
-- ``/authorize`` + ``/token`` endpoints + PKCE — PR #37
-- ``/register`` (DCR, RFC 7591) + refresh rotation — PR #38
+- ``/register`` (DCR, RFC 7591) — PR #38
 - Switch resource-server middleware to verify self-hosted tokens — PR #39
 - Remove Auth0 env vars from production config — PR #40
 
@@ -283,3 +279,471 @@ async def serve_as_metadata(config: AuthorizationServerConfig, send) -> None:
         await _send_json(send, 404, {"error": "authorization server not enabled"})
         return
     await _send_json(send, 200, authorization_server_metadata(config))
+
+
+# ── Authorization codes + refresh tokens (in-memory storage) ────────────────
+#
+# In-memory storage is deliberate: auth codes live for 10 minutes and
+# refresh tokens are bound to a single user. A server restart invalidates
+# all outstanding codes (forces a re-login — acceptable friction for a
+# personal-use AS) and refresh tokens (forces re-auth on next use —
+# same). If you need durability across restarts, swap these dicts for
+# SQLite-backed tables in the Fly volume; the interface stays the same.
+
+_AUTH_CODE_TTL_SEC = 600          # 10 min — RFC recommends ≤ 10 min
+_ACCESS_TOKEN_TTL_SEC = 3600      # 1 hour
+_REFRESH_TOKEN_TTL_SEC = 30 * 24 * 3600  # 30 days
+
+# auth_codes: code_value → {client_id, redirect_uri, code_challenge, scope,
+#                           subject, expires_at}
+_auth_codes: dict[str, dict[str, Any]] = {}
+
+# refresh_tokens: refresh_token_value → {subject, scope, client_id, expires_at}
+_refresh_tokens: dict[str, dict[str, Any]] = {}
+
+
+def _reset_state_for_tests() -> None:
+    """Clear module-level state. Test-only helper — prevents cross-test
+    leakage since auth codes and refresh tokens live in module globals."""
+    _auth_codes.clear()
+    _refresh_tokens.clear()
+
+
+def _now() -> int:
+    import time
+    return int(time.time())
+
+
+# ── PKCE ────────────────────────────────────────────────────────────────────
+
+
+def _verify_pkce_s256(code_verifier: str, code_challenge: str) -> bool:
+    """Return True if BASE64URL(SHA256(code_verifier)) == code_challenge.
+
+    Per RFC 7636. Constant-time comparison to avoid timing leaks.
+    """
+    import base64
+    import hashlib
+    import hmac
+
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    expected = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return hmac.compare_digest(expected, code_challenge)
+
+
+# ── Token minting ───────────────────────────────────────────────────────────
+
+
+def mint_access_token(
+    config: AuthorizationServerConfig,
+    *,
+    subject: str,
+    scope: str,
+    audience: str | None = None,
+    ttl_sec: int = _ACCESS_TOKEN_TTL_SEC,
+) -> str:
+    """Mint an RS256 JWT access token signed with the AS's private key.
+
+    The ``aud`` claim defaults to ``{issuer}/mcp`` — matching the Resource
+    Server's audience convention so the existing OAuthMiddleware JWKS
+    validation path will accept these tokens once PR #39 points it at
+    the AS's own JWKS.
+    """
+    import jwt
+
+    private_pem, _ = ensure_keypair(config.key_dir)
+    now = _now()
+    aud = audience or f"{config.issuer}/mcp"
+    payload = {
+        "iss": config.issuer,
+        "aud": aud,
+        "sub": subject,
+        "iat": now,
+        "exp": now + ttl_sec,
+        "scope": scope,
+        # jti makes each token unique even when minted in the same second
+        # (back-to-back refreshes) and enables future revocation by
+        # blocklisting specific jti values.
+        "jti": _new_random_token(16),
+    }
+    return jwt.encode(
+        payload, private_pem, algorithm=JWT_ALG, headers={"kid": KEY_ID}
+    )
+
+
+def _new_random_token(nbytes: int = 32) -> str:
+    import secrets
+    return secrets.token_urlsafe(nbytes)
+
+
+def _issue_token_pair(
+    config: AuthorizationServerConfig,
+    *,
+    subject: str,
+    scope: str,
+    client_id: str,
+) -> dict[str, Any]:
+    """Mint an access token + refresh token and persist the refresh token
+    so it can be exchanged later via the refresh_token grant."""
+    access_token = mint_access_token(config, subject=subject, scope=scope)
+    refresh_token = _new_random_token()
+    _refresh_tokens[refresh_token] = {
+        "subject": subject,
+        "scope": scope,
+        "client_id": client_id,
+        "expires_at": _now() + _REFRESH_TOKEN_TTL_SEC,
+    }
+    return {
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": _ACCESS_TOKEN_TTL_SEC,
+        "refresh_token": refresh_token,
+        "scope": scope,
+    }
+
+
+# ── Request helpers ─────────────────────────────────────────────────────────
+
+
+async def _read_body(receive) -> bytes:
+    """Read the full request body from an ASGI receive callable."""
+    body = b""
+    more_body = True
+    while more_body:
+        message = await receive()
+        if message["type"] == "http.request":
+            body += message.get("body", b"")
+            more_body = message.get("more_body", False)
+        else:
+            break
+    return body
+
+
+def _parse_query_or_form(raw: bytes) -> dict[str, str]:
+    """Parse URL-encoded form or query-string bytes to a dict. Last
+    value wins for repeated keys (matches stdlib parse_qs behavior)."""
+    from urllib.parse import parse_qs
+
+    parsed = parse_qs(raw.decode("utf-8", errors="replace"), keep_blank_values=True)
+    return {k: v[-1] for k, v in parsed.items()}
+
+
+def _scope_query(scope: dict[str, Any]) -> dict[str, str]:
+    qs = scope.get("query_string", b"")
+    return _parse_query_or_form(qs)
+
+
+# ── Login form ──────────────────────────────────────────────────────────────
+
+
+_LOGIN_FORM_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>mnemon — sign in</title>
+<style>
+body {{ font-family: -apple-system, sans-serif; max-width: 400px; margin: 5em auto; padding: 0 1em; }}
+h1 {{ font-size: 1.2em; }}
+.error {{ color: #b00020; margin: 1em 0; }}
+input[type=password] {{ width: 100%; padding: 0.5em; font-size: 1em; box-sizing: border-box; }}
+button {{ margin-top: 1em; padding: 0.5em 1em; font-size: 1em; }}
+.meta {{ color: #666; font-size: 0.9em; margin-top: 2em; }}
+</style>
+</head>
+<body>
+<h1>mnemon — sign in</h1>
+{error_html}
+<form method="post" action="/oauth/authorize">
+{hidden_inputs}
+<label for="passphrase">Passphrase</label>
+<input id="passphrase" type="password" name="passphrase" autofocus required>
+<button type="submit">Sign in</button>
+</form>
+<p class="meta">Signing in as client <code>{client_id}</code>.</p>
+</body>
+</html>
+"""
+
+
+def _render_login_form(params: dict[str, str], error: str | None = None) -> bytes:
+    """Render the passphrase login page with the original authorize params
+    as hidden inputs so POST can round-trip them.
+
+    All values HTML-escaped — these are untrusted client inputs (state,
+    redirect_uri) and even one unescaped field would be an XSS vector."""
+    import html
+
+    hidden = "\n".join(
+        f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v)}">'
+        for k, v in params.items()
+    )
+    error_html = (
+        f'<p class="error">{html.escape(error)}</p>' if error else ""
+    )
+    client_id = html.escape(params.get("client_id", "(unknown)"))
+    body = _LOGIN_FORM_HTML.format(
+        hidden_inputs=hidden,
+        error_html=error_html,
+        client_id=client_id,
+    ).encode("utf-8")
+    return body
+
+
+async def _send_html(send, status: int, body: bytes) -> None:
+    await send({
+        "type": "http.response.start",
+        "status": status,
+        "headers": [
+            (b"content-type", b"text/html; charset=utf-8"),
+            (b"content-length", str(len(body)).encode("ascii")),
+            (b"cache-control", b"no-store"),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+async def _redirect(send, location: str) -> None:
+    await send({
+        "type": "http.response.start",
+        "status": 302,
+        "headers": [
+            (b"location", location.encode("utf-8")),
+            (b"content-length", b"0"),
+            (b"cache-control", b"no-store"),
+        ],
+    })
+    await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+# ── /oauth/authorize ────────────────────────────────────────────────────────
+
+
+_REQUIRED_AUTHORIZE_PARAMS = (
+    "client_id", "redirect_uri", "response_type",
+    "code_challenge", "code_challenge_method",
+)
+
+
+def _validate_authorize_params(params: dict[str, str]) -> str | None:
+    """Return an error message if the authorize params are malformed,
+    else None. Intentionally strict — we reject anything not matching
+    OAuth 2.1 + PKCE S256 up front rather than silently falling back."""
+    missing = [p for p in _REQUIRED_AUTHORIZE_PARAMS if not params.get(p)]
+    if missing:
+        return f"missing required parameter(s): {', '.join(missing)}"
+    if params["response_type"] != "code":
+        return "only response_type=code is supported (OAuth 2.1)"
+    if params["code_challenge_method"] != "S256":
+        return "only code_challenge_method=S256 is supported (OAuth 2.1 requires PKCE)"
+    return None
+
+
+async def serve_authorize(
+    config: AuthorizationServerConfig, scope: dict, receive, send
+) -> None:
+    """ASGI handler: GET serves the login form, POST validates the
+    passphrase and issues an authorization code via redirect."""
+    from .auth import _send_json
+
+    if not config.enabled:
+        await _send_json(send, 404, {"error": "authorization server not enabled"})
+        return
+
+    method = scope.get("method", "GET").upper()
+
+    if method == "GET":
+        params = _scope_query(scope)
+        err = _validate_authorize_params(params)
+        if err:
+            await _send_json(send, 400, {"error": "invalid_request", "error_description": err})
+            return
+        await _send_html(send, 200, _render_login_form(params))
+        return
+
+    if method != "POST":
+        await _send_json(send, 405, {"error": "method_not_allowed"})
+        return
+
+    # POST — login attempt
+    body = await _read_body(receive)
+    params = _parse_query_or_form(body)
+    err = _validate_authorize_params(params)
+    if err:
+        await _send_json(send, 400, {"error": "invalid_request", "error_description": err})
+        return
+
+    passphrase = params.get("passphrase", "")
+    if not _verify_passphrase(passphrase, config.passphrase or ""):
+        # Re-render form with error — don't redirect back to client with
+        # an error code, because that would leak "this URL is a valid
+        # OAuth init" to anyone who can read network logs. A re-rendered
+        # form keeps the failure contained.
+        form_params = {k: v for k, v in params.items() if k != "passphrase"}
+        await _send_html(
+            send, 401,
+            _render_login_form(form_params, error="Invalid passphrase.")
+        )
+        return
+
+    # Issue auth code and redirect to client's redirect_uri.
+    code = _new_random_token()
+    _auth_codes[code] = {
+        "client_id": params["client_id"],
+        "redirect_uri": params["redirect_uri"],
+        "code_challenge": params["code_challenge"],
+        "code_challenge_method": params["code_challenge_method"],
+        "scope": params.get("scope", "mcp"),
+        "subject": "owner",  # single-user AS
+        "expires_at": _now() + _AUTH_CODE_TTL_SEC,
+    }
+
+    from urllib.parse import urlencode
+    redirect_params = {"code": code}
+    if "state" in params:
+        redirect_params["state"] = params["state"]
+    sep = "&" if "?" in params["redirect_uri"] else "?"
+    location = f"{params['redirect_uri']}{sep}{urlencode(redirect_params)}"
+    await _redirect(send, location)
+
+
+def _verify_passphrase(submitted: str, configured: str) -> bool:
+    """Constant-time passphrase comparison. Rejects empty configured
+    values outright — prevents a misconfiguration where an unset
+    passphrase accidentally matches an empty submission."""
+    import hmac
+    if not configured:
+        return False
+    return hmac.compare_digest(submitted, configured)
+
+
+# ── /oauth/token ────────────────────────────────────────────────────────────
+
+
+async def serve_token(
+    config: AuthorizationServerConfig, scope: dict, receive, send
+) -> None:
+    """ASGI handler: POST /oauth/token. Supports authorization_code and
+    refresh_token grants."""
+    from .auth import _send_json
+
+    if not config.enabled:
+        await _send_json(send, 404, {"error": "authorization server not enabled"})
+        return
+    if scope.get("method", "GET").upper() != "POST":
+        await _send_json(send, 405, {"error": "method_not_allowed"})
+        return
+
+    body = await _read_body(receive)
+    params = _parse_query_or_form(body)
+    grant_type = params.get("grant_type", "")
+
+    if grant_type == "authorization_code":
+        await _token_authorization_code(config, params, send)
+        return
+    if grant_type == "refresh_token":
+        await _token_refresh(config, params, send)
+        return
+    await _send_json(send, 400, {
+        "error": "unsupported_grant_type",
+        "error_description": (
+            f"grant_type={grant_type!r} not supported; use "
+            "authorization_code or refresh_token"
+        ),
+    })
+
+
+async def _token_authorization_code(
+    config: AuthorizationServerConfig, params: dict[str, str], send
+) -> None:
+    from .auth import _send_json
+
+    code = params.get("code", "")
+    redirect_uri = params.get("redirect_uri", "")
+    client_id = params.get("client_id", "")
+    code_verifier = params.get("code_verifier", "")
+
+    for required in ("code", "redirect_uri", "client_id", "code_verifier"):
+        if not params.get(required):
+            await _send_json(send, 400, {
+                "error": "invalid_request",
+                "error_description": f"missing {required}",
+            })
+            return
+
+    record = _auth_codes.pop(code, None)  # one-time use — consume on lookup
+    if record is None:
+        await _send_json(send, 400, {
+            "error": "invalid_grant",
+            "error_description": "unknown, expired, or already-used code",
+        })
+        return
+    if record["expires_at"] < _now():
+        await _send_json(send, 400, {
+            "error": "invalid_grant",
+            "error_description": "code expired",
+        })
+        return
+    if record["client_id"] != client_id:
+        await _send_json(send, 400, {
+            "error": "invalid_grant",
+            "error_description": "client_id mismatch",
+        })
+        return
+    if record["redirect_uri"] != redirect_uri:
+        await _send_json(send, 400, {
+            "error": "invalid_grant",
+            "error_description": "redirect_uri mismatch",
+        })
+        return
+    if not _verify_pkce_s256(code_verifier, record["code_challenge"]):
+        await _send_json(send, 400, {
+            "error": "invalid_grant",
+            "error_description": "PKCE verification failed",
+        })
+        return
+
+    tokens = _issue_token_pair(
+        config,
+        subject=record["subject"],
+        scope=record["scope"],
+        client_id=client_id,
+    )
+    await _send_json(send, 200, tokens)
+
+
+async def _token_refresh(
+    config: AuthorizationServerConfig, params: dict[str, str], send
+) -> None:
+    from .auth import _send_json
+
+    refresh_token = params.get("refresh_token", "")
+    if not refresh_token:
+        await _send_json(send, 400, {
+            "error": "invalid_request",
+            "error_description": "missing refresh_token",
+        })
+        return
+
+    # Rotation: consume the old refresh token regardless of outcome so a
+    # leaked token can only be used once.
+    record = _refresh_tokens.pop(refresh_token, None)
+    if record is None:
+        await _send_json(send, 400, {
+            "error": "invalid_grant",
+            "error_description": "unknown, expired, or already-rotated refresh token",
+        })
+        return
+    if record["expires_at"] < _now():
+        await _send_json(send, 400, {
+            "error": "invalid_grant",
+            "error_description": "refresh token expired",
+        })
+        return
+
+    tokens = _issue_token_pair(
+        config,
+        subject=record["subject"],
+        scope=record["scope"],
+        client_id=record["client_id"],
+    )
+    await _send_json(send, 200, tokens)
