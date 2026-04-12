@@ -14,6 +14,7 @@ from mnemon.server import (
     memory_related,
     memory_save,
     memory_search,
+    memory_search_structured,
     memory_status,
     memory_sweep,
     memory_timeline,
@@ -178,6 +179,62 @@ class TestMemorySearch:
         memory_search("query", content_type="decision")
         mock_search.assert_called_once_with(
             MockStore.return_value, "query", limit=10, content_type="decision"
+        )
+
+
+# ── memory_search_structured ─────────────────────────────────────────────────
+
+
+class TestMemorySearchStructured:
+    @patch("mnemon.server.search")
+    @patch("mnemon.server.Store")
+    def test_empty_results_returns_empty_json_array(self, MockStore, mock_search):
+        import json
+        mock_search.return_value = []
+        result = memory_search_structured("q")
+        assert json.loads(result) == []
+
+    @patch("mnemon.server.search")
+    @patch("mnemon.server.Store")
+    def test_results_are_json_objects_with_numeric_scores(self, MockStore, mock_search):
+        import json
+        r1 = _make_search_result(doc_id=1, title="Alpha", composite_score=0.9, confidence=0.85)
+        r2 = _make_search_result(doc_id=2, title="Beta", composite_score=0.7, confidence=0.60)
+        mock_search.return_value = [r1, r2]
+
+        result = memory_search_structured("q", limit=5)
+        parsed = json.loads(result)
+
+        assert len(parsed) == 2
+        assert parsed[0]["doc_id"] == 1
+        assert parsed[0]["title"] == "Alpha"
+        # Scores are native floats — callers can compare against thresholds
+        # without parsing any string format.
+        assert isinstance(parsed[0]["composite_score"], float)
+        assert parsed[0]["composite_score"] == 0.9
+        assert parsed[1]["composite_score"] == 0.7
+
+    @patch("mnemon.server.search")
+    @patch("mnemon.server.Store")
+    def test_includes_all_expected_fields(self, MockStore, mock_search):
+        import json
+        mock_search.return_value = [_make_search_result(
+            doc_id=42, title="T", content="C", content_type="decision",
+            confidence=0.9, composite_score=0.5, created_at="2026-04-12T00:00:00Z",
+        )]
+        result = memory_search_structured("q")
+        parsed = json.loads(result)[0]
+        expected = {"doc_id", "title", "content", "content_type",
+                    "confidence", "composite_score", "created_at"}
+        assert expected.issubset(parsed.keys())
+
+    @patch("mnemon.server.search")
+    @patch("mnemon.server.Store")
+    def test_passes_content_type(self, MockStore, mock_search):
+        mock_search.return_value = []
+        memory_search_structured("q", content_type="preference")
+        mock_search.assert_called_once_with(
+            MockStore.return_value, "q", limit=10, content_type="preference"
         )
 
 
