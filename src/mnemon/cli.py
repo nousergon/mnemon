@@ -183,7 +183,7 @@ Usage:
 
 Env vars:
   MNEMON_VAULT_DIR    Vault directory (default: ~/.mnemon)
-  MNEMON_TOKEN        Bearer token for remote server auth
+  MNEMON_LOCAL_TOKEN  Bearer token for remote server auth
   MNEMON_S3_BUCKET    S3 bucket for vault sync
   PORT                Remote server port (default: 8502)
 
