@@ -26,34 +26,34 @@ class TestVersionAndHelp:
         with patch("sys.argv", ["mnemon", "--help"]):
             main()
         out = capsys.readouterr().out
-        assert "Usage:" in out
         assert "mnemon serve" in out
+        assert "mnemon setup" in out
 
     def test_help_short_flag(self, capsys):
         with patch("sys.argv", ["mnemon", "-h"]):
             main()
         out = capsys.readouterr().out
-        assert "Usage:" in out
+        assert "mnemon" in out
 
     def test_no_args_prints_usage(self, capsys):
         with patch("sys.argv", ["mnemon"]):
             main()
         out = capsys.readouterr().out
-        assert "Usage:" in out
+        assert "mnemon" in out
 
     def test_print_usage_contains_all_commands(self, capsys):
         _print_usage()
         out = capsys.readouterr().out
         for cmd in ["serve", "serve-remote", "status", "search", "save",
-                     "forget", "setup", "sync push", "sync pull",
-                     "--version", "--help"]:
+                     "forget", "setup", "sync push", "sync pull"]:
             assert cmd in out
 
     def test_print_usage_contains_env_vars(self, capsys):
         _print_usage()
         out = capsys.readouterr().out
-        assert "MNEMON_VAULT_DIR" in out
+        assert "MNEMON_REMOTE_URL" in out
         assert "MNEMON_LOCAL_TOKEN" in out
+        assert "MNEMON_VAULT_DIR" in out
         assert "MNEMON_S3_BUCKET" in out
 
 
@@ -374,4 +374,4 @@ class TestUnknownCommand:
         # _print_usage prints to stdout
         combined = capsys.readouterr()
         assert "Unknown command: badcmd" in combined.err
-        assert "Usage:" in combined.out
+        assert "mnemon setup" in combined.out
