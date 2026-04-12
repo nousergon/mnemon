@@ -1,17 +1,9 @@
 """CLI entry point for mnemon.
 
-Usage:
-    mnemon serve              Start MCP server (stdio transport)
-    mnemon serve-remote       Start HTTP server (Streamable HTTP)
-    mnemon dashboard [port]   Launch web dashboard (default port: 8503)
-    mnemon status             Show vault health stats
-    mnemon search <query>     Search memories
-    mnemon save <title> <content>  Save a memory
-    mnemon setup <target>     Configure integration (claude-code, cursor, gemini, hooks)
-    mnemon sync push          Push vault to S3
-    mnemon sync pull          Pull vault from S3
-    mnemon --version          Show version
-    mnemon --help             Show this help
+Setup commands configure clients to use a remote vault. Local vault
+commands (status, search, save, forget, sync) operate on the local
+``~/.mnemon/default.sqlite`` and are intended for development or
+server-side administration — they do not interact with a remote vault.
 """
 
 from __future__ import annotations
@@ -167,23 +159,26 @@ def main() -> None:
 def _print_usage() -> None:
     print(f"""mnemon v{__version__} — Universal long-term memory for AI agents
 
-Usage:
-  mnemon serve              Start MCP server (stdio transport)
-  mnemon serve-remote       Start HTTP server (Streamable HTTP)
-  mnemon dashboard [port]   Launch web dashboard (default: 8503)
-  mnemon status             Show vault health stats
-  mnemon search <query>     Search memories
-  mnemon save <title> <c>   Save a memory
-  mnemon forget <id>        Soft-delete a memory
+Setup (configure clients to use remote vault):
   mnemon setup <target>     Configure integration [--remote-url URL] [--token TOKEN]
-  mnemon sync push          Push vault to S3
+
+Server:
+  mnemon serve              Start MCP server (stdio, local development)
+  mnemon serve-remote       Start HTTP server (Streamable HTTP, production)
+
+Local vault (development/server-side only):
+  mnemon status             Show local vault health stats
+  mnemon search <query>     Search local vault
+  mnemon save <title> <c>   Save to local vault
+  mnemon forget <id>        Soft-delete from local vault
+  mnemon sync push          Push local vault to S3
   mnemon sync pull          Pull vault from S3
-  mnemon --version          Show version
-  mnemon --help             Show this help
+  mnemon dashboard [port]   Launch web dashboard (default: 8503)
 
 Env vars:
-  MNEMON_VAULT_DIR    Vault directory (default: ~/.mnemon)
-  MNEMON_LOCAL_TOKEN  Bearer token for remote server auth
+  MNEMON_REMOTE_URL   Remote server URL (or ~/.mnemon/remote_url file)
+  MNEMON_LOCAL_TOKEN  Bearer token for remote auth (or ~/.mnemon/local_token file)
+  MNEMON_VAULT_DIR    Local vault directory (default: ~/.mnemon)
   MNEMON_S3_BUCKET    S3 bucket for vault sync
   PORT                Remote server port (default: 8502)
 

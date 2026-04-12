@@ -164,8 +164,9 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
     ``~/.mnemon/`` config files and adds a SessionStart pre-warm hook.
     The hooks themselves read these files at runtime via ``_remote_client``.
 
-    When ``remote_url`` is not provided, configures local stdio MCP server
-    only (pre-unification mode).
+    When ``remote_url`` is not provided, configures a local stdio MCP server
+    for development/testing. Hooks will attempt to use remote if
+    ``~/.mnemon/remote_url`` exists, otherwise fall back to local.
     """
     settings_path = Path.home() / ".claude" / "settings.json"
     settings = _read_json(settings_path)
