@@ -57,16 +57,14 @@ def parse_handoff(response: str) -> dict | None:
 
 def generate_with_llm(transcript: str) -> dict | None:
     """Generate handoff using local LLM. Returns None if LLM unavailable."""
-    try:
-        from ..llm import generate, is_available
-        if not is_available():
-            return None
-        response = generate(HANDOFF_SYSTEM_PROMPT, transcript, max_tokens=500)
-        if "<none/>" in response:
-            return {"skip": True}
-        return parse_handoff(response)
-    except Exception:
+    from ..llm import try_generate
+
+    response = try_generate(HANDOFF_SYSTEM_PROMPT, transcript, max_tokens=500)
+    if response is None:
         return None
+    if "<none/>" in response:
+        return {"skip": True}
+    return parse_handoff(response)
 
 
 # ── Regex Fallback (when LLM unavailable) ──────────────────────────────────

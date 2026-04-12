@@ -67,6 +67,35 @@ COMPOSITE_WEIGHTS = (0.5, 0.25, 0.25)  # (relevance, recency, confidence)
 RECENCY_HALF_LIFE_DAYS = 30
 PIN_BOOST = 0.3
 
+# Hook timeouts and budgets (seconds / chars)
+#
+# HOOK_REMOTE_TIMEOUT_SEC — matches Claude Code's ~/.claude/settings.json
+# hook timeout budget. Longer than the 2s the original plan called for
+# because Fly cold starts (wake machine + load FastEmbed ONNX) can take
+# 15-25s before the machine responds; 8s lets a warm machine always
+# succeed while a cold one surfaces a clean timeout.
+HOOK_REMOTE_TIMEOUT_SEC = 8.0
+
+# HOOK_DEDUP_TIMEOUT_SEC — tighter budget for the session_extractor
+# dedup check (memory_search against the Fly vault). Runs in a Stop
+# hook loop so each observation gets its own call; shorter timeout keeps
+# the loop from stacking up against the 30s hook ceiling.
+HOOK_DEDUP_TIMEOUT_SEC = 5.0
+
+# HOOK_DEDUP_SIMILARITY_THRESHOLD — cosine similarity above which a new
+# observation is treated as a duplicate of an existing memory.
+HOOK_DEDUP_SIMILARITY_THRESHOLD = 0.92
+
+# Context surfacing budget (context_surfacing hook)
+HOOK_TOKEN_BUDGET = 800          # approx tokens injected per prompt
+HOOK_CHARS_PER_TOKEN = 4         # rough conversion factor
+HOOK_CHAR_BUDGET = HOOK_TOKEN_BUDGET * HOOK_CHARS_PER_TOKEN
+
+# HOOK_SLOW_THRESHOLD_SEC — elapsed time above which a successful
+# context_surfacing call prefixes a ⚠ slow warning. Lets the user see
+# latency degradation in the prompt itself without watching logs.
+HOOK_SLOW_THRESHOLD_SEC = 3.0
+
 # Content type enum values for validation
 CONTENT_TYPE_VALUES = [ct.value for ct in ContentType]
 

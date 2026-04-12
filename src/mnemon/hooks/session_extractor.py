@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 import sys
 
+from ..config import HOOK_DEDUP_SIMILARITY_THRESHOLD, HOOK_DEDUP_TIMEOUT_SEC
+
 # ── LLM Extraction ──────────────────────────────────────────────────────────
 
 EXTRACTION_SYSTEM_PROMPT = (
@@ -68,16 +70,14 @@ def parse_observations(response: str) -> list[dict]:
 
 def extract_with_llm(transcript: str) -> list[dict] | None:
     """Extract observations using local LLM. Returns None if LLM unavailable."""
-    try:
-        from ..llm import generate, is_available
-        if not is_available():
-            return None
-        response = generate(EXTRACTION_SYSTEM_PROMPT, transcript, max_tokens=2000)
-        if "<none/>" in response:
-            return []
-        return parse_observations(response)
-    except Exception:
+    from ..llm import try_generate
+
+    response = try_generate(EXTRACTION_SYSTEM_PROMPT, transcript, max_tokens=2000)
+    if response is None:
         return None
+    if "<none/>" in response:
+        return []
+    return parse_observations(response)
 
 
 # ── Regex Fallback (when LLM unavailable) ──────────────────────────────────
@@ -143,14 +143,14 @@ def is_duplicate_remote(title: str, content: str) -> bool:
         raw, _elapsed = call_tool_sync(
             "memory_search",
             {"query": query, "limit": 3},
-            timeout=5.0,
+            timeout=HOOK_DEDUP_TIMEOUT_SEC,
             client_label=CLIENT_LABEL,
         )
         # The server returns formatted text with similarity scores like:
         #   "1. [type] **title** (score: 0.456, confidence: 0.80)"
         # Check if any score exceeds our dedup threshold.
         scores = re.findall(r"score:\s*([\d.]+)", raw)
-        return any(float(s) > 0.92 for s in scores)
+        return any(float(s) > HOOK_DEDUP_SIMILARITY_THRESHOLD for s in scores)
     except Exception:
         return False
 

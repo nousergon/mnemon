@@ -111,3 +111,27 @@ def is_available() -> bool:
         return True
     except FileNotFoundError:
         return False
+
+
+def try_generate(
+    system_prompt: str, user_message: str, max_tokens: int = 2000
+) -> str | None:
+    """Try to generate an LLM response, returning None if unavailable.
+
+    Unifies the try-import, check-available, generate-or-fail pattern
+    duplicated across ``session_extractor.extract_with_llm``,
+    ``handoff_generator.generate_with_llm``, and ``search.expand_query``.
+    Each caller still does its own parsing of the returned text; this
+    helper only covers the "is the LLM usable right now" plumbing.
+
+    Returns:
+        The raw LLM output string, or None if the backend is unavailable
+        or the call raises any exception. Callers should treat None as
+        "fall back to regex/empty" rather than an error.
+    """
+    try:
+        if not is_available():
+            return None
+        return generate(system_prompt, user_message, max_tokens=max_tokens)
+    except Exception:
+        return None
