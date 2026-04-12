@@ -53,7 +53,7 @@ class TestVersionAndHelp:
         _print_usage()
         out = capsys.readouterr().out
         assert "MNEMON_VAULT_DIR" in out
-        assert "MNEMON_TOKEN" in out
+        assert "MNEMON_LOCAL_TOKEN" in out
         assert "MNEMON_S3_BUCKET" in out
 
 

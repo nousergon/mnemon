@@ -69,7 +69,7 @@ def generate_with_llm(transcript: str) -> dict | None:
         return None
 
 
-# ── Regex Fallback (Phase 2 heuristics) ────────────────────────────────────
+# ── Regex Fallback (when LLM unavailable) ──────────────────────────────────
 
 def generate_with_regex(transcript: str) -> dict | None:
     """Fallback: generate handoff using regex heuristics."""

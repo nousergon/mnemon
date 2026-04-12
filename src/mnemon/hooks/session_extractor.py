@@ -80,7 +80,7 @@ def extract_with_llm(transcript: str) -> list[dict] | None:
         return None
 
 
-# ── Regex Fallback (Phase 2 heuristics) ────────────────────────────────────
+# ── Regex Fallback (when LLM unavailable) ──────────────────────────────────
 
 DECISION_PATTERNS = [
     re.compile(r"(?:decided|decision|chose|choosing|going with|went with|settled on)\s+(.{20,200})", re.I),
@@ -149,8 +149,7 @@ def is_duplicate_remote(title: str, content: str) -> bool:
         # The server returns formatted text with similarity scores like:
         #   "1. [type] **title** (score: 0.456, confidence: 0.80)"
         # Check if any score exceeds our dedup threshold.
-        import re as _re
-        scores = _re.findall(r"score:\s*([\d.]+)", raw)
+        scores = re.findall(r"score:\s*([\d.]+)", raw)
         return any(float(s) > 0.92 for s in scores)
     except Exception:
         return False

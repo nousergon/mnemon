@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-253_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-327_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/badge/PyPI-v0.2.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
@@ -151,7 +151,7 @@ For use with Claude.ai web or iOS (any Streamable HTTP MCP client):
 mnemon serve-remote
 
 # With authentication (at proxy/infra level)
-MNEMON_TOKEN=your-secret-token mnemon serve-remote
+MNEMON_LOCAL_TOKEN=your-secret-token mnemon serve-remote
 
 # Custom port
 PORT=9000 mnemon serve-remote
@@ -199,7 +199,7 @@ Requires the AWS CLI (`aws`) on your PATH with valid credentials.
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `MNEMON_VAULT_DIR` | `~/.mnemon` | Vault directory |
-| `MNEMON_TOKEN` | (none) | Bearer token for remote server auth |
+| `MNEMON_LOCAL_TOKEN` | (none) | Bearer token for remote server auth |
 | `MNEMON_MODEL_DIR` | `~/.mnemon/models` | Directory for LLM model files |
 | `PORT` | `8502` | Remote server port |
 
