@@ -153,10 +153,10 @@ def main() -> None:
     elif command == "setup":
         target = args[1] if len(args) > 1 else ""
         if not target:
-            print("Usage: mnemon setup <claude-code|cursor|gemini|hooks>", file=sys.stderr)
+            print("Usage: mnemon setup <claude-code|cursor|gemini|hooks> [--remote-url URL] [--token TOKEN]", file=sys.stderr)
             sys.exit(1)
         from .setup import run_setup
-        print(run_setup(target))
+        print(run_setup(target, args[2:]))
 
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
@@ -175,7 +175,7 @@ Usage:
   mnemon search <query>     Search memories
   mnemon save <title> <c>   Save a memory
   mnemon forget <id>        Soft-delete a memory
-  mnemon setup <target>     Configure integration (claude-code, cursor, gemini, hooks)
+  mnemon setup <target>     Configure integration [--remote-url URL] [--token TOKEN]
   mnemon sync push          Push vault to S3
   mnemon sync pull          Pull vault from S3
   mnemon --version          Show version

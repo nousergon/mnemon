@@ -343,7 +343,7 @@ class TestSetup:
         with patch("sys.argv", ["mnemon", "setup", "claude-code"]):
             main()
 
-        mock_run.assert_called_once_with("claude-code")
+        mock_run.assert_called_once_with("claude-code", [])
         out = capsys.readouterr().out
         assert "Configured claude-code successfully." in out
 
