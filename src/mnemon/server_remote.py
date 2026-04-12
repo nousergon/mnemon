@@ -80,6 +80,22 @@ def run_remote() -> None:
 
     config = OAuthConfig.from_env()
 
+    # Self-hosted Authorization Server config (Phase 2 scaffolding). When
+    # MNEMON_AS_ENABLED=true, the well-known AS metadata + JWKS endpoints
+    # are served. The token-issuing endpoints themselves are not yet
+    # implemented — coming in PR #37.
+    from .oauth_as import AuthorizationServerConfig
+
+    as_config = AuthorizationServerConfig.from_env()
+    as_problems = as_config.validate()
+    if as_problems:
+        print(
+            "ERROR: self-hosted AS enabled but misconfigured:\n  - "
+            + "\n  - ".join(as_problems),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print(
         f"mnemon remote server starting on http://0.0.0.0:{PORT}/mcp",
         file=sys.stderr,
@@ -88,6 +104,12 @@ def run_remote() -> None:
         print(
             f"Auth: OAuth 2.1 resource server (issuer={config.issuer}, "
             f"audience={config.audience})",
+            file=sys.stderr,
+        )
+    if as_config.enabled:
+        print(
+            f"Auth: self-hosted Authorization Server enabled "
+            f"(issuer={as_config.issuer})",
             file=sys.stderr,
         )
     if config.local_token:
@@ -115,5 +137,5 @@ def run_remote() -> None:
         sys.exit(1)
 
     mcp_app = mcp.streamable_http_app()
-    wrapped = OAuthMiddleware(mcp_app, config)
+    wrapped = OAuthMiddleware(mcp_app, config, as_config=as_config)
     uvicorn.run(wrapped, host="0.0.0.0", port=PORT, log_level="info")

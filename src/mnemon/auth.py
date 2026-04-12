@@ -22,7 +22,10 @@ import hmac
 import json
 import logging
 import os
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from .oauth_as import AuthorizationServerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -135,9 +138,21 @@ class OAuthMiddleware:
     ``mnemon serve-remote`` without env vars.
     """
 
-    def __init__(self, app: ASGIApp, config: OAuthConfig) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        config: OAuthConfig,
+        as_config: "AuthorizationServerConfig | None" = None,
+    ) -> None:
         self.app = app
         self.config = config
+        # Optional self-hosted Authorization Server config. When set and
+        # enabled, the middleware serves the AS well-known documents and
+        # (in future PRs) the AS endpoints themselves. Kept as a separate
+        # parameter from ``config`` so the resource-server concerns stay
+        # decoupled from the AS concerns — callers can wire one without
+        # the other.
+        self.as_config = as_config
         self._jwks_client: Any = None  # Lazy-init PyJWKClient
         self._userinfo_cache: dict[str, float] = {}  # token hash -> expiry ts
 
@@ -163,6 +178,32 @@ class OAuthMiddleware:
                 )
                 return
             await _send_json(send, 200, self._protected_resource_metadata())
+            return
+
+        # Self-hosted Authorization Server well-known endpoints (Phase 2).
+        # These are served only when an AS config is wired AND enabled;
+        # otherwise they 404 so clients can tell the difference between
+        # "not hosting an AS" and "misconfigured."
+        if path == "/.well-known/oauth-authorization-server":
+            from .oauth_as import serve_as_metadata
+
+            if self.as_config is None:
+                await _send_json(
+                    send, 404, {"error": "authorization server not enabled"}
+                )
+                return
+            await serve_as_metadata(self.as_config, send)
+            return
+
+        if path == "/.well-known/jwks.json":
+            from .oauth_as import serve_jwks
+
+            if self.as_config is None:
+                await _send_json(
+                    send, 404, {"error": "authorization server not enabled"}
+                )
+                return
+            await serve_jwks(self.as_config, send)
             return
 
         # Unauthenticated mode — pass through only when NEITHER auth method
