@@ -747,3 +747,95 @@ def test_oauth_config_empty_local_token_coerced_to_none(monkeypatch):
     monkeypatch.setenv("MNEMON_LOCAL_TOKEN", "")
     config = OAuthConfig.from_env()
     assert config.local_token is None
+
+
+# --- Self-hosted AS well-known routing (Phase 2 PR #36) -------------------
+
+
+@pytest.mark.asyncio
+async def test_as_metadata_404_when_as_config_not_provided(oauth_config):
+    """If the middleware wasn't given an AS config, /.well-known/
+    oauth-authorization-server must 404 — don't claim to be an AS we're
+    not running."""
+    downstream_called: list[bool] = []
+    app = _stub_downstream_factory(downstream_called)
+    mw = OAuthMiddleware(app, oauth_config)  # no as_config
+
+    status, _, body = await _call_middleware(
+        mw, "/.well-known/oauth-authorization-server"
+    )
+    assert status == 404
+    assert downstream_called == []
+
+
+@pytest.mark.asyncio
+async def test_as_metadata_returns_rfc8414_document_when_enabled(
+    oauth_config, tmp_path
+):
+    from mnemon.oauth_as import AuthorizationServerConfig
+
+    as_config = AuthorizationServerConfig(
+        enabled=True,
+        public_url="https://example.fly.dev",
+        passphrase="x",
+        key_dir=tmp_path,
+    )
+    downstream_called: list[bool] = []
+    app = _stub_downstream_factory(downstream_called)
+    mw = OAuthMiddleware(app, oauth_config, as_config=as_config)
+
+    status, _, body = await _call_middleware(
+        mw, "/.well-known/oauth-authorization-server"
+    )
+    assert status == 200
+    doc = json.loads(body)
+    assert doc["issuer"] == "https://example.fly.dev"
+    assert doc["token_endpoint_auth_methods_supported"] == ["none"]
+    assert downstream_called == []
+
+
+@pytest.mark.asyncio
+async def test_jwks_404_when_as_config_not_provided(oauth_config):
+    downstream_called: list[bool] = []
+    app = _stub_downstream_factory(downstream_called)
+    mw = OAuthMiddleware(app, oauth_config)
+
+    status, _, body = await _call_middleware(mw, "/.well-known/jwks.json")
+    assert status == 404
+
+
+@pytest.mark.asyncio
+async def test_jwks_returns_public_key_when_enabled(oauth_config, tmp_path):
+    from mnemon.oauth_as import AuthorizationServerConfig
+
+    as_config = AuthorizationServerConfig(
+        enabled=True,
+        public_url="https://example.fly.dev",
+        passphrase="x",
+        key_dir=tmp_path,
+    )
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, oauth_config, as_config=as_config)
+
+    status, _, body = await _call_middleware(mw, "/.well-known/jwks.json")
+    assert status == 200
+    doc = json.loads(body)
+    assert "keys" in doc
+    assert doc["keys"][0]["kty"] == "RSA"
+    assert doc["keys"][0]["alg"] == "RS256"
+
+
+@pytest.mark.asyncio
+async def test_as_metadata_404_when_as_disabled_even_if_config_provided(oauth_config):
+    """AS config present but enabled=False still 404s — don't leak a
+    half-configured AS to clients."""
+    from mnemon.oauth_as import AuthorizationServerConfig
+
+    as_config = AuthorizationServerConfig(enabled=False)
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, oauth_config, as_config=as_config)
+
+    status, _, _ = await _call_middleware(
+        mw, "/.well-known/oauth-authorization-server"
+    )
+    assert status == 404

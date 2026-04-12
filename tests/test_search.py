@@ -125,8 +125,16 @@ class TestSearch:
     def test_search_attaches_vector_similarity_when_vector_match(self, store):
         """Results that came back from the vector store must carry the
         raw cosine similarity on ScoredResult.vector_similarity — it's
-        the dedup signal used by is_duplicate_remote."""
+        the dedup signal used by is_duplicate_remote.
+
+        Patches ``mnemon.embedder.embed`` (the real import target from
+        inside search()), not ``mnemon.search.embed`` — the latter
+        doesn't exist at the module level since search() imports embed
+        lazily, so patching it silently did nothing and the test
+        depended on the real FastEmbed being loadable (flaky)."""
         from unittest.mock import patch
+
+        import numpy as np
 
         from mnemon.store import SearchResult
 
@@ -137,7 +145,7 @@ class TestSearch:
         )
         with patch.object(store, "search_bm25", return_value=[fake_vector_hit]), \
              patch.object(store, "search_vector", return_value=[fake_vector_hit]), \
-             patch("mnemon.search.embed", create=True, return_value=[0.0] * 384):
+             patch("mnemon.embedder.embed", return_value=np.zeros(384, dtype=np.float32)):
             results = search(store, "foo")
         assert len(results) >= 1
         assert results[0].vector_similarity == 0.87
