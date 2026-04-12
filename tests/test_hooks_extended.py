@@ -631,44 +631,46 @@ class TestExtractWithLLM:
         assert result is None
 
 
-# ── session_extractor.py: is_duplicate (vector dedup) ─────────────────────────
+# ── session_extractor.py: is_duplicate_remote (remote vector dedup) ───────────
 
 
-class TestSessionExtractorIsDuplicate:
+class TestSessionExtractorIsDuplicateRemote:
     def test_not_duplicate_when_low_similarity(self):
-        from mnemon.hooks.session_extractor import is_duplicate as vec_is_dup
+        from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        mock_store = MagicMock()
-        low_result = MagicMock()
-        low_result.score = 0.80
-        mock_store.search_vector.return_value = [low_result]
-        with patch("mnemon.embedder.embed", return_value="fake_emb"):
-            assert vec_is_dup(mock_store, "title", "content") is False
+        raw = "1. [note] **Existing** (score: 0.456, confidence: 0.80)\n   content"
+        with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
+            assert is_duplicate_remote("title", "content") is False
 
     def test_duplicate_when_high_similarity(self):
-        from mnemon.hooks.session_extractor import is_duplicate as vec_is_dup
+        from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        mock_store = MagicMock()
-        high_result = MagicMock()
-        high_result.score = 0.95
-        mock_store.search_vector.return_value = [high_result]
-        with patch("mnemon.embedder.embed", return_value="fake_emb"):
-            assert vec_is_dup(mock_store, "title", "content") is True
+        raw = "1. [note] **Same thing** (score: 0.950, confidence: 0.90)\n   content"
+        with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
+            assert is_duplicate_remote("title", "content") is True
 
     def test_returns_false_on_exception(self):
-        from mnemon.hooks.session_extractor import is_duplicate as vec_is_dup
+        from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        mock_store = MagicMock()
-        with patch("mnemon.embedder.embed", side_effect=Exception("no model")):
-            assert vec_is_dup(mock_store, "title", "content") is False
+        with patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=Exception("network")):
+            assert is_duplicate_remote("title", "content") is False
 
     def test_no_results_not_duplicate(self):
-        from mnemon.hooks.session_extractor import is_duplicate as vec_is_dup
+        from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        mock_store = MagicMock()
-        mock_store.search_vector.return_value = []
-        with patch("mnemon.embedder.embed", return_value="fake_emb"):
-            assert vec_is_dup(mock_store, "title", "content") is False
+        raw = "No memories found matching your query."
+        with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.2)):
+            assert is_duplicate_remote("title", "content") is False
+
+    def test_multiple_scores_only_needs_one_above_threshold(self):
+        from mnemon.hooks.session_extractor import is_duplicate_remote
+
+        raw = (
+            "1. [note] **A** (score: 0.800, confidence: 0.80)\n   a\n"
+            "2. [note] **B** (score: 0.930, confidence: 0.90)\n   b"
+        )
+        with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
+            assert is_duplicate_remote("title", "content") is True
 
 
 # ── session_extractor.py: main ────────────────────────────────────────────────
@@ -682,36 +684,37 @@ class TestSessionExtractorMain:
              patch("mnemon.hooks.framework.read_transcript", return_value="short"):
             main()
 
-    def test_falls_back_to_regex(self):
+    def test_falls_back_to_regex_and_saves_remotely(self):
         from mnemon.hooks import session_extractor
         from mnemon.hooks.session_extractor import main
 
-        mock_store = MagicMock()
-        mock_store.save.return_value = "doc-123"
-        mock_store.get.return_value = MagicMock(hash="abc123")
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 200), \
              patch.object(session_extractor, "extract_with_llm", return_value=None), \
              patch.object(session_extractor, "extract_with_regex", return_value=[{"type": "decision", "title": "Use Redis", "content": "Chose Redis for caching."}]) as mock_regex, \
-             patch.object(session_extractor, "is_duplicate", return_value=False), \
-             patch("mnemon.store.Store", return_value=mock_store), \
-             patch("mnemon.embedder.embed_document"):
+             patch.object(session_extractor, "is_duplicate_remote", return_value=False), \
+             patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("Saved doc-123", 0.5)) as mock_call:
             main()
         mock_regex.assert_called_once()
-        mock_store.save.assert_called_once()
+        mock_call.assert_called_once()
+        args = mock_call.call_args[0]
+        assert args[0] == "memory_save"
+        assert args[1]["title"] == "Use Redis"
+        assert args[1]["content"] == "Chose Redis for caching."
+        assert args[1]["content_type"] == "decision"
+        assert args[1]["source_client"] == "claude-code-hook"
 
     def test_skips_duplicate_observations(self):
         from mnemon.hooks import session_extractor
         from mnemon.hooks.session_extractor import main
 
-        mock_store = MagicMock()
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 200), \
              patch.object(session_extractor, "extract_with_llm", return_value=[{"type": "decision", "title": "Dup", "content": "Already saved."}]), \
-             patch.object(session_extractor, "is_duplicate", return_value=True), \
-             patch("mnemon.store.Store", return_value=mock_store):
+             patch.object(session_extractor, "is_duplicate_remote", return_value=True), \
+             patch("mnemon.hooks._remote_client.call_tool_sync") as mock_call:
             main()
-        mock_store.save.assert_not_called()
+        mock_call.assert_not_called()
 
     def test_no_observations_exits_early(self):
         from mnemon.hooks import session_extractor
@@ -720,9 +723,49 @@ class TestSessionExtractorMain:
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 200), \
              patch.object(session_extractor, "extract_with_llm", return_value=[]), \
-             patch("mnemon.store.Store") as mock_store_cls:
+             patch("mnemon.hooks._remote_client.call_tool_sync") as mock_call:
             main()
-        mock_store_cls.assert_not_called()
+        mock_call.assert_not_called()
+
+    def test_config_error_stops_immediately(self, capsys):
+        from mnemon.hooks import session_extractor
+        from mnemon.hooks._remote_client import RemoteClientConfigError
+        from mnemon.hooks.session_extractor import main
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
+             patch("mnemon.hooks.framework.read_transcript", return_value="A" * 200), \
+             patch.object(session_extractor, "extract_with_llm", return_value=[{"type": "decision", "title": "X", "content": "Y"}]), \
+             patch.object(session_extractor, "is_duplicate_remote", return_value=False), \
+             patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=RemoteClientConfigError("no token")):
+            main()
+        captured = capsys.readouterr()
+        assert "config error" in captured.err
+
+    def test_network_error_continues_to_next_observation(self, capsys):
+        from mnemon.hooks import session_extractor
+        from mnemon.hooks.session_extractor import main
+
+        observations = [
+            {"type": "decision", "title": "First", "content": "Content 1"},
+            {"type": "observation", "title": "Second", "content": "Content 2"},
+        ]
+        call_count = {"n": 0}
+
+        def side_effect(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise ConnectionError("refused")
+            return ("Saved", 0.3)
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
+             patch("mnemon.hooks.framework.read_transcript", return_value="A" * 200), \
+             patch.object(session_extractor, "extract_with_llm", return_value=observations), \
+             patch.object(session_extractor, "is_duplicate_remote", return_value=False), \
+             patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=side_effect):
+            main()
+        captured = capsys.readouterr()
+        assert "save error" in captured.err
+        assert "saved [observation]" in captured.err
 
 
 # ── handoff_generator.py: generate_with_llm ──────────────────────────────────
@@ -785,29 +828,28 @@ class TestHandoffGeneratorMain:
 
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="short"), \
-             patch("mnemon.store.Store") as mock_store_cls:
+             patch("mnemon.hooks._remote_client.call_tool_sync") as mock_call:
             main()
-        mock_store_cls.assert_not_called()
+        mock_call.assert_not_called()
 
-    def test_falls_back_to_regex(self):
+    def test_falls_back_to_regex_and_saves_remotely(self):
         from mnemon.hooks import handoff_generator
         from mnemon.hooks.handoff_generator import main
 
-        mock_store = MagicMock()
-        mock_store.save.return_value = "doc-456"
-        mock_store.get.return_value = MagicMock(hash="def456")
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
              patch.object(handoff_generator, "generate_with_llm", return_value=None), \
              patch.object(handoff_generator, "generate_with_regex", return_value={"title": "Regex handoff", "summary": "- Did stuff"}) as mock_regex, \
-             patch("mnemon.store.Store", return_value=mock_store), \
-             patch("mnemon.embedder.embed_document"):
+             patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("Saved doc-456", 0.4)) as mock_call:
             main()
         mock_regex.assert_called_once()
-        mock_store.save.assert_called_once()
-        call_kwargs = mock_store.save.call_args[1]
-        assert call_kwargs["content_type"] == "handoff"
-        assert "Regex handoff" in call_kwargs["title"]
+        mock_call.assert_called_once()
+        args = mock_call.call_args[0]
+        assert args[0] == "memory_save"
+        assert args[1]["title"] == "Session: Regex handoff"
+        assert args[1]["content"] == "- Did stuff"
+        assert args[1]["content_type"] == "handoff"
+        assert args[1]["source_client"] == "claude-code-hook"
 
     def test_skips_when_llm_says_none(self):
         from mnemon.hooks import handoff_generator
@@ -816,24 +858,47 @@ class TestHandoffGeneratorMain:
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
              patch.object(handoff_generator, "generate_with_llm", return_value={"skip": True}), \
-             patch("mnemon.store.Store") as mock_store_cls:
+             patch("mnemon.hooks._remote_client.call_tool_sync") as mock_call:
             main()
-        mock_store_cls.assert_not_called()
+        mock_call.assert_not_called()
 
-    def test_saves_llm_handoff(self):
+    def test_saves_llm_handoff_remotely(self):
         from mnemon.hooks import handoff_generator
         from mnemon.hooks.handoff_generator import main
 
-        mock_store = MagicMock()
-        mock_store.save.return_value = "doc-789"
-        mock_store.get.return_value = MagicMock(hash="ghi789")
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
              patch.object(handoff_generator, "generate_with_llm", return_value={"title": "LLM summary", "summary": "- Deployed feature X"}), \
-             patch("mnemon.store.Store", return_value=mock_store), \
-             patch("mnemon.embedder.embed_document"):
+             patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("Saved doc-789", 0.5)) as mock_call:
             main()
-        mock_store.save.assert_called_once()
-        call_kwargs = mock_store.save.call_args[1]
-        assert call_kwargs["title"] == "Session: LLM summary"
-        assert call_kwargs["content"] == "- Deployed feature X"
+        mock_call.assert_called_once()
+        args = mock_call.call_args[0]
+        assert args[0] == "memory_save"
+        assert args[1]["title"] == "Session: LLM summary"
+        assert args[1]["content"] == "- Deployed feature X"
+
+    def test_config_error_logged(self, capsys):
+        from mnemon.hooks import handoff_generator
+        from mnemon.hooks._remote_client import RemoteClientConfigError
+        from mnemon.hooks.handoff_generator import main
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
+             patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
+             patch.object(handoff_generator, "generate_with_llm", return_value={"title": "X", "summary": "Y"}), \
+             patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=RemoteClientConfigError("no url")):
+            main()
+        captured = capsys.readouterr()
+        assert "config error" in captured.err
+
+    def test_network_error_logged(self, capsys):
+        from mnemon.hooks import handoff_generator
+        from mnemon.hooks.handoff_generator import main
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
+             patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
+             patch.object(handoff_generator, "generate_with_llm", return_value={"title": "X", "summary": "Y"}), \
+             patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=ConnectionError("timeout")):
+            main()
+        captured = capsys.readouterr()
+        assert "save error" in captured.err
+        assert "ConnectionError" in captured.err

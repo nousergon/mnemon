@@ -2,11 +2,13 @@
 """Session extractor hook — Stop event.
 
 Extracts observations from the conversation transcript using a local
-1.7B LLM model. Deduplicates against existing memories via vector
-similarity. Saves new observations to the vault.
+1.7B LLM model. Deduplicates against existing memories via remote
+vector similarity search. Saves new observations to the Fly vault.
 
-Phase 3: LLM-based extraction with vector dedup (replaces Phase 2 regex).
-Falls back to regex heuristics if LLM is unavailable.
+Phase 3 unification: saves go to the Fly vault via _remote_client
+(``memory_save`` tool call). LLM extraction remains local. Dedup
+uses a remote ``memory_search`` call to check for high-similarity
+existing content. Falls back to regex heuristics if LLM is unavailable.
 """
 
 from __future__ import annotations
@@ -48,6 +50,8 @@ OBSERVATION_RE = re.compile(
 )
 
 VALID_TYPES = {"decision", "preference", "observation", "antipattern", "research", "project"}
+
+CLIENT_LABEL = "claude-code-session-extractor"
 
 
 def parse_observations(response: str) -> list[dict]:
@@ -122,15 +126,32 @@ def extract_with_regex(transcript: str) -> list[dict]:
     return observations[:5]
 
 
-# ── Deduplication ───────────────────────────────────────────────────────────
+# ── Remote Deduplication ───────────────────────────────────────────────────
 
-def is_duplicate(store, title: str, content: str) -> bool:
-    """Check if an observation is too similar to existing memories (> 0.92 cosine)."""
+def is_duplicate_remote(title: str, content: str) -> bool:
+    """Check if an observation is too similar to existing memories via remote search.
+
+    Searches the Fly vault for content matching the combined title+content.
+    If any result has a similarity score > 0.92, consider it a duplicate.
+    Returns False on any error (network, timeout, etc.) — prefer saving a
+    possible duplicate over silently dropping a novel observation.
+    """
     try:
-        from ..embedder import embed
-        query_emb = embed(f"title: {title} | text: {content}")
-        results = store.search_vector(query_emb, 3)
-        return any(r.score > 0.92 for r in results)
+        from ._remote_client import call_tool_sync
+
+        query = f"{title}: {content}"
+        raw, _elapsed = call_tool_sync(
+            "memory_search",
+            {"query": query, "limit": 3},
+            timeout=5.0,
+            client_label=CLIENT_LABEL,
+        )
+        # The server returns formatted text with similarity scores like:
+        #   "1. [type] **title** (score: 0.456, confidence: 0.80)"
+        # Check if any score exceeds our dedup threshold.
+        import re as _re
+        scores = _re.findall(r"score:\s*([\d.]+)", raw)
+        return any(float(s) > 0.92 for s in scores)
     except Exception:
         return False
 
@@ -140,6 +161,7 @@ def is_duplicate(store, title: str, content: str) -> bool:
 def main() -> None:
     try:
         from .framework import read_stdin, read_transcript
+        from ._remote_client import RemoteClientConfigError, call_tool_sync
 
         hook_input = read_stdin()
         transcript = read_transcript(hook_input.get("transcript_path", ""), 6000)
@@ -154,42 +176,40 @@ def main() -> None:
         if not observations:
             return
 
-        from ..store import Store
+        saved = 0
+        for obs in observations:
+            content_type = obs["type"] if obs["type"] in VALID_TYPES else "observation"
 
-        store = Store()
-        try:
-            saved = 0
-            for obs in observations:
-                content_type = obs["type"] if obs["type"] in VALID_TYPES else "observation"
+            # Remote vector dedup check
+            if is_duplicate_remote(obs["title"], obs["content"]):
+                print(f'mnemon: skipping duplicate observation: "{obs["title"]}"', file=sys.stderr)
+                continue
 
-                # Vector dedup check
-                if is_duplicate(store, obs["title"], obs["content"]):
-                    print(f'mnemon: skipping duplicate observation: "{obs["title"]}"', file=sys.stderr)
-                    continue
-
-                doc_id = store.save(
-                    title=obs["title"],
-                    content=obs["content"],
-                    content_type=content_type,
-                    source_client="claude-code-hook",
+            try:
+                result, elapsed = call_tool_sync(
+                    "memory_save",
+                    {
+                        "title": obs["title"],
+                        "content": obs["content"],
+                        "content_type": content_type,
+                        "source_client": "claude-code-hook",
+                    },
+                    client_label=CLIENT_LABEL,
                 )
-
-                # Embed if available
-                try:
-                    from ..embedder import embed_document
-                    doc = store.get(doc_id)
-                    if doc:
-                        embed_document(store, doc.hash, obs["title"], obs["content"])
-                except Exception:
-                    pass
-
                 saved += 1
                 print(f'mnemon: saved [{content_type}] "{obs["title"]}"', file=sys.stderr)
+            except RemoteClientConfigError as e:
+                print(f"mnemon session-extractor config error: {e}", file=sys.stderr)
+                return
+            except Exception as e:
+                print(
+                    f"mnemon session-extractor save error: {type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
+                continue
 
-            if saved > 0:
-                print(f"mnemon: extracted {saved} observations from session", file=sys.stderr)
-        finally:
-            store.close()
+        if saved > 0:
+            print(f"mnemon: extracted {saved} observations from session", file=sys.stderr)
     except Exception as e:
         print(f"mnemon session-extractor error: {e}", file=sys.stderr)
 
