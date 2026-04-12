@@ -52,13 +52,14 @@ class TestMcpServer:
     def test_mcp_has_tools(self):
         from mnemon.server import mcp
         tools = mcp._tool_manager._tools
-        assert len(tools) == 13
+        assert len(tools) == 14
 
     def test_mcp_tool_names(self):
         from mnemon.server import mcp
         tool_names = set(mcp._tool_manager._tools.keys())
         expected = {
-            "memory_search", "memory_get", "memory_timeline",
+            "memory_search", "memory_search_structured",
+            "memory_get", "memory_timeline",
             "memory_save", "memory_pin", "memory_forget",
             "memory_status", "memory_sweep", "memory_related",
             "memory_rebuild", "memory_check_contradictions",

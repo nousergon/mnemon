@@ -638,14 +638,14 @@ class TestSessionExtractorIsDuplicateRemote:
     def test_not_duplicate_when_low_similarity(self):
         from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        raw = "1. [note] **Existing** (score: 0.456, confidence: 0.80)\n   content"
+        raw = json.dumps([{"doc_id": 1, "title": "Existing", "composite_score": 0.456}])
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
             assert is_duplicate_remote("title", "content") is False
 
     def test_duplicate_when_high_similarity(self):
         from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        raw = "1. [note] **Same thing** (score: 0.950, confidence: 0.90)\n   content"
+        raw = json.dumps([{"doc_id": 1, "title": "Same thing", "composite_score": 0.950}])
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
             assert is_duplicate_remote("title", "content") is True
 
@@ -655,22 +655,44 @@ class TestSessionExtractorIsDuplicateRemote:
         with patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=Exception("network")):
             assert is_duplicate_remote("title", "content") is False
 
+    def test_returns_false_on_invalid_json(self):
+        """Dedup must not crash if the server returns malformed JSON —
+        treat as 'not duplicate' and let the save proceed."""
+        from mnemon.hooks.session_extractor import is_duplicate_remote
+
+        with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("not json", 0.2)):
+            assert is_duplicate_remote("title", "content") is False
+
     def test_no_results_not_duplicate(self):
         from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        raw = "No memories found matching your query."
+        raw = json.dumps([])
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.2)):
             assert is_duplicate_remote("title", "content") is False
 
     def test_multiple_scores_only_needs_one_above_threshold(self):
         from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        raw = (
-            "1. [note] **A** (score: 0.800, confidence: 0.80)\n   a\n"
-            "2. [note] **B** (score: 0.930, confidence: 0.90)\n   b"
-        )
+        raw = json.dumps([
+            {"doc_id": 1, "title": "A", "composite_score": 0.800},
+            {"doc_id": 2, "title": "B", "composite_score": 0.930},
+        ])
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
             assert is_duplicate_remote("title", "content") is True
+
+    def test_calls_structured_tool_not_text(self):
+        """Guard against regression to text-parsing dedup. The hook must
+        use memory_search_structured so scores aren't parsed from
+        human-readable formatted output."""
+        from mnemon.hooks.session_extractor import is_duplicate_remote
+
+        raw = json.dumps([])
+        with patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=(raw, 0.1),
+        ) as mock_call:
+            is_duplicate_remote("title", "content")
+        assert mock_call.call_args[0][0] == "memory_search_structured"
 
 
 # ── session_extractor.py: main ────────────────────────────────────────────────

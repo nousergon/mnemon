@@ -7,6 +7,7 @@ Tools: memory_search, memory_get, memory_save, memory_pin, memory_forget,
 
 from __future__ import annotations
 
+import json
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -90,6 +91,40 @@ def memory_search(
             f"   _id: {r.doc_id} | created: {r.created_at}_"
         )
     return "\n\n".join(lines)
+
+
+@mcp.tool()
+def memory_search_structured(
+    query: str,
+    limit: int = 10,
+    content_type: str | None = None,
+) -> str:
+    """Search memories and return results as a JSON array.
+
+    Machine-readable counterpart to ``memory_search``. Use this when a
+    client needs to act on score thresholds or individual fields rather
+    than present the results to a human. Returns a JSON string with one
+    object per result; empty array when nothing matches.
+
+    Each result object contains: doc_id, title, content, content_type,
+    confidence, composite_score, created_at. Score fields are floats —
+    callers can compare against thresholds without text parsing.
+    """
+    store = _get_store()
+    results = search(store, query, limit=limit, content_type=content_type)
+    payload = [
+        {
+            "doc_id": r.doc_id,
+            "title": r.title,
+            "content": r.content,
+            "content_type": r.content_type,
+            "confidence": r.confidence,
+            "composite_score": r.composite_score,
+            "created_at": r.created_at,
+        }
+        for r in results
+    ]
+    return json.dumps(payload)
 
 
 @mcp.tool()

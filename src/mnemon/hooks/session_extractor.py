@@ -131,26 +131,31 @@ def extract_with_regex(transcript: str) -> list[dict]:
 def is_duplicate_remote(title: str, content: str) -> bool:
     """Check if an observation is too similar to existing memories via remote search.
 
-    Searches the Fly vault for content matching the combined title+content.
-    If any result has a similarity score > 0.92, consider it a duplicate.
-    Returns False on any error (network, timeout, etc.) — prefer saving a
-    possible duplicate over silently dropping a novel observation.
+    Searches the Fly vault for content matching the combined title+content
+    using the structured ``memory_search_structured`` tool, which returns a
+    JSON array with explicit ``composite_score`` fields — no text parsing.
+    If any result scores above ``HOOK_DEDUP_SIMILARITY_THRESHOLD``, treat
+    it as a duplicate. Returns False on any error (network, timeout,
+    JSON parse failure) — prefer saving a possible duplicate over
+    silently dropping a novel observation.
     """
+    import json
+
     try:
         from ._remote_client import call_tool_sync
 
         query = f"{title}: {content}"
         raw, _elapsed = call_tool_sync(
-            "memory_search",
+            "memory_search_structured",
             {"query": query, "limit": 3},
             timeout=HOOK_DEDUP_TIMEOUT_SEC,
             client_label=CLIENT_LABEL,
         )
-        # The server returns formatted text with similarity scores like:
-        #   "1. [type] **title** (score: 0.456, confidence: 0.80)"
-        # Check if any score exceeds our dedup threshold.
-        scores = re.findall(r"score:\s*([\d.]+)", raw)
-        return any(float(s) > HOOK_DEDUP_SIMILARITY_THRESHOLD for s in scores)
+        results = json.loads(raw)
+        return any(
+            r.get("composite_score", 0.0) > HOOK_DEDUP_SIMILARITY_THRESHOLD
+            for r in results
+        )
     except Exception:
         return False
 
