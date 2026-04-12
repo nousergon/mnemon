@@ -66,3 +66,30 @@ class TestGenerate:
         from mnemon.llm import generate
         result = generate("sys", "user")
         assert result == "contradiction"
+
+
+class TestTryGenerate:
+    def test_returns_none_when_unavailable(self):
+        with patch("mnemon.llm.is_available", return_value=False):
+            from mnemon.llm import try_generate
+            assert try_generate("sys", "user") is None
+
+    @patch("mnemon.llm.is_available", return_value=True)
+    @patch("mnemon.llm.generate", return_value="llm output")
+    def test_returns_generate_output_when_available(self, mock_gen, mock_avail):
+        from mnemon.llm import try_generate
+        assert try_generate("sys", "user", max_tokens=42) == "llm output"
+        # max_tokens is forwarded
+        assert mock_gen.call_args.kwargs["max_tokens"] == 42
+
+    @patch("mnemon.llm.is_available", return_value=True)
+    @patch("mnemon.llm.generate", side_effect=RuntimeError("oom"))
+    def test_returns_none_on_exception(self, mock_gen, mock_avail):
+        """try_generate must never raise — hooks rely on it as best-effort."""
+        from mnemon.llm import try_generate
+        assert try_generate("sys", "user") is None
+
+    def test_returns_none_when_is_available_raises(self):
+        with patch("mnemon.llm.is_available", side_effect=Exception("boom")):
+            from mnemon.llm import try_generate
+            assert try_generate("sys", "user") is None

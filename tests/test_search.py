@@ -11,7 +11,7 @@ from mnemon.search import (
     _jaccard_similarity,
     composite_score,
     compute_recency,
-    mmr_filter,
+    mmr_rerank,
     rrf_fuse,
     search,
 )
@@ -76,10 +76,10 @@ class TestMMR:
             ScoredResult(doc_id=1, title="A", content="unique content here", content_type="note", memory_type="semantic", confidence=0.5, created_at="2026-04-09", score=1.0, source="bm25", composite_score=0.9, recency_score=0.8),
             ScoredResult(doc_id=2, title="B", content="completely different text", content_type="note", memory_type="semantic", confidence=0.5, created_at="2026-04-09", score=0.8, source="bm25", composite_score=0.7, recency_score=0.8),
         ]
-        filtered = mmr_filter(results)
-        assert len(filtered) == 2
+        reranked = mmr_rerank(results)
+        assert len(reranked) == 2
         # Both should keep their scores since they're different
-        assert filtered[0].composite_score == 0.9
+        assert reranked[0].composite_score == 0.9
 
 
 class TestRRF:

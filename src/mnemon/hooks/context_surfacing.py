@@ -24,11 +24,18 @@ from __future__ import annotations
 
 import sys
 
-# Overall character budget for the injected context. Kept generous
-# because the server already truncates each result to a 300-char snippet.
-TOKEN_BUDGET = 800
-CHARS_PER_TOKEN = 4
-CHAR_BUDGET = TOKEN_BUDGET * CHARS_PER_TOKEN
+from ..config import (
+    HOOK_CHAR_BUDGET,
+    HOOK_CHARS_PER_TOKEN,
+    HOOK_SLOW_THRESHOLD_SEC,
+    HOOK_TOKEN_BUDGET,
+)
+
+# Re-exported for tests and external callers. See ``config`` for rationale.
+TOKEN_BUDGET = HOOK_TOKEN_BUDGET
+CHARS_PER_TOKEN = HOOK_CHARS_PER_TOKEN
+CHAR_BUDGET = HOOK_CHAR_BUDGET
+SLOW_THRESHOLD_SEC = HOOK_SLOW_THRESHOLD_SEC
 
 CLIENT_LABEL = "claude-code-context-surfacing"
 SEARCH_LIMIT = 8
@@ -36,9 +43,6 @@ SEARCH_LIMIT = 8
 # Sentinel string the server returns when memory_search finds nothing.
 # Kept in sync with src/mnemon/server.py memory_search().
 NO_RESULTS_SENTINEL = "No memories found matching your query."
-
-# Wall-clock threshold above which a successful call is flagged as slow.
-SLOW_THRESHOLD_SEC = 3.0
 
 
 def build_context(raw_text: str, *, prefix: str = "") -> str:

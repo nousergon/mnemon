@@ -8,6 +8,8 @@ dist/
 build/
 .venv/
 .pytest_cache/
+pytest-of-*/
+fastembed_cache/
 
 # Vault data (local only)
 *.sqlite

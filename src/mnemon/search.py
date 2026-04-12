@@ -76,8 +76,16 @@ def _jaccard_similarity(a: set[str], b: set[str]) -> float:
     return intersection / union if union > 0 else 0.0
 
 
-def mmr_filter(results: list[ScoredResult]) -> list[ScoredResult]:
-    """MMR diversity filtering — demote results too similar to already-selected ones."""
+def mmr_rerank(results: list[ScoredResult]) -> list[ScoredResult]:
+    """MMR diversity reranking — demote (not remove) results too similar
+    to already-selected ones.
+
+    All candidate results are kept in the output; similar ones have their
+    composite score cut by 50%, then the list is re-sorted. Name is
+    ``rerank`` (not ``filter``) to reflect that items are never dropped —
+    the 50% demotion is usually enough to push near-duplicates below more
+    diverse lower-scoring results.
+    """
     if len(results) <= 1:
         return results
 
@@ -142,23 +150,23 @@ def expand_query(query: str) -> list[str]:
 
     Returns up to 3 alternative queries. Falls back to empty list if LLM unavailable.
     """
-    try:
-        from .llm import generate
-        response = generate(
-            "Generate 3 alternative search queries for the given query. "
-            "Output one per line, no numbering or bullets. "
-            "Keep them short and diverse — include synonyms, related concepts, "
-            "and different phrasings.",
-            query,
-            max_tokens=200,
-        )
-        expansions = [
-            line.strip() for line in response.split("\n")
-            if 3 < len(line.strip()) < 200
-        ]
-        return expansions[:3]
-    except Exception:
+    from .llm import try_generate
+
+    response = try_generate(
+        "Generate 3 alternative search queries for the given query. "
+        "Output one per line, no numbering or bullets. "
+        "Keep them short and diverse — include synonyms, related concepts, "
+        "and different phrasings.",
+        query,
+        max_tokens=200,
+    )
+    if response is None:
         return []
+    expansions = [
+        line.strip() for line in response.split("\n")
+        if 3 < len(line.strip()) < 200
+    ]
+    return expansions[:3]
 
 
 def search(
@@ -213,4 +221,4 @@ def search(
     if content_type:
         scored = [r for r in scored if r.content_type == content_type]
 
-    return mmr_filter(scored[:limit])
+    return mmr_rerank(scored[:limit])
