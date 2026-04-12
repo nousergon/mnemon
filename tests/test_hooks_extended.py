@@ -318,7 +318,7 @@ class TestContextSurfacingMain:
             "mnemon.hooks.framework.write_output"
         ) as mock_write, patch(
             "mnemon.hooks._remote_client.call_tool_sync",
-            return_value=raw_tool_output,
+            return_value=(raw_tool_output, 0.5),
         ) as mock_call:
             main()
 
@@ -402,7 +402,7 @@ class TestContextSurfacingMain:
             "mnemon.hooks.framework.write_output"
         ) as mock_write, patch(
             "mnemon.hooks._remote_client.call_tool_sync",
-            return_value=NO_RESULTS_SENTINEL,
+            return_value=(NO_RESULTS_SENTINEL, 0.3),
         ):
             main()
         mock_write.assert_not_called()
@@ -412,10 +412,11 @@ class TestContextSurfacingMain:
         self, capsys
     ):
         """Network errors must not crash the hook — log to stderr, exit 0,
-        no output written. Critically, mark_seen must NOT fire on failure,
-        so the exact same prompt can be retried immediately once the
-        transient failure clears (wifi reconnect, Fly cold start wakes,
-        etc.). The exception type is included in the stderr line so
+        and emit a visible warning context block so the user sees the
+        outage without having to watch logs. Critically, mark_seen must NOT
+        fire on failure so the exact same prompt can be retried immediately
+        once the transient failure clears (wifi reconnect, Fly cold-start
+        wakes, etc.). The exception type is included in the stderr line so
         empty-str exceptions like asyncio.TimeoutError still produce a
         debuggable trace."""
         from mnemon.hooks.context_surfacing import main
@@ -436,7 +437,12 @@ class TestContextSurfacingMain:
             side_effect=ConnectionError("connection refused"),
         ):
             main()
-        mock_write.assert_not_called()
+        # Warning context block emitted so user sees it in the prompt.
+        mock_write.assert_called_once()
+        injected = mock_write.call_args[0][0]["hookSpecificOutput"]["additionalContext"]
+        assert "⚠ mnemon unavailable" in injected
+        assert "ConnectionError" in injected
+        assert "connection refused" in injected
         mock_mark_seen.assert_not_called()
         captured = capsys.readouterr()
         assert "remote error" in captured.err
@@ -447,7 +453,8 @@ class TestContextSurfacingMain:
         """asyncio.TimeoutError has an empty str() which caused the
         original 'remote error: ' empty message during smoke testing.
         The rewritten error handler includes the exception class name so
-        even empty-message exceptions produce a debuggable log line."""
+        even empty-message exceptions produce a debuggable log line and
+        a visible warning context block."""
         import asyncio
 
         from mnemon.hooks.context_surfacing import main
@@ -463,18 +470,22 @@ class TestContextSurfacingMain:
             "mnemon.hooks.framework.mark_seen"
         ), patch(
             "mnemon.hooks.framework.write_output"
-        ), patch(
+        ) as mock_write, patch(
             "mnemon.hooks._remote_client.call_tool_sync",
             side_effect=asyncio.TimeoutError(),
         ):
             main()
         captured = capsys.readouterr()
         assert "TimeoutError" in captured.err
+        mock_write.assert_called_once()
+        injected = mock_write.call_args[0][0]["hookSpecificOutput"]["additionalContext"]
+        assert "⚠ mnemon unavailable" in injected
+        assert "TimeoutError" in injected
 
     def test_config_error_degrades_gracefully(self, capsys):
-        """Missing URL/token should log a specific config error, exit 0,
-        and must NOT mark the prompt as seen — the user can fix the
-        config and retry immediately."""
+        """Missing URL/token should log a specific config error, emit a
+        visible warning context block, exit 0, and must NOT mark the prompt
+        as seen — the user can fix the config and retry immediately."""
         from mnemon.hooks._remote_client import RemoteClientConfigError
         from mnemon.hooks.context_surfacing import main
 
@@ -494,10 +505,86 @@ class TestContextSurfacingMain:
             side_effect=RemoteClientConfigError("no token"),
         ):
             main()
-        mock_write.assert_not_called()
+        mock_write.assert_called_once()
+        injected = mock_write.call_args[0][0]["hookSpecificOutput"]["additionalContext"]
+        assert "⚠ mnemon config error" in injected
+        assert "no token" in injected
         mock_mark_seen.assert_not_called()
         captured = capsys.readouterr()
         assert "config error" in captured.err
+
+
+    def test_slow_success_prepends_warning(self):
+        """When the remote call succeeds but takes >3s, the context block
+        must start with a ⚠ mnemon slow: warning so the user sees the
+        latency degradation without watching logs."""
+        from mnemon.hooks.context_surfacing import SLOW_THRESHOLD_SEC, main
+
+        raw_tool_output = (
+            "1. [note] **Thing** (score: 0.80)\n"
+            "   Some content\n"
+            "   _id: 1 | created: 2026-04-11_"
+        )
+        slow_elapsed = SLOW_THRESHOLD_SEC + 1.0
+
+        with patch(
+            "mnemon.hooks.framework.read_stdin",
+            return_value={"prompt": "how does it work?"},
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.is_duplicate", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.mark_seen"
+        ), patch(
+            "mnemon.hooks.framework.write_output"
+        ) as mock_write, patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=(raw_tool_output, slow_elapsed),
+        ):
+            main()
+
+        mock_write.assert_called_once()
+        injected = mock_write.call_args[0][0]["hookSpecificOutput"]["additionalContext"]
+        assert "⚠ mnemon slow:" in injected
+        assert f"{slow_elapsed:.1f}s" in injected
+        # Memories still present after the warning.
+        assert "Thing" in injected
+        assert "Some content" in injected
+
+    def test_fast_success_no_slow_warning(self):
+        """When elapsed is within the threshold, no slow warning is emitted —
+        the context block contains only the memories header and results."""
+        from mnemon.hooks.context_surfacing import SLOW_THRESHOLD_SEC, main
+
+        raw_tool_output = (
+            "1. [note] **Fast** (score: 0.90)\n"
+            "   Quick response\n"
+            "   _id: 2 | created: 2026-04-11_"
+        )
+        fast_elapsed = SLOW_THRESHOLD_SEC - 0.5
+
+        with patch(
+            "mnemon.hooks.framework.read_stdin",
+            return_value={"prompt": "quick query"},
+        ), patch(
+            "mnemon.hooks.framework.is_noise", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.is_duplicate", return_value=False
+        ), patch(
+            "mnemon.hooks.framework.mark_seen"
+        ), patch(
+            "mnemon.hooks.framework.write_output"
+        ) as mock_write, patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=(raw_tool_output, fast_elapsed),
+        ):
+            main()
+
+        mock_write.assert_called_once()
+        injected = mock_write.call_args[0][0]["hookSpecificOutput"]["additionalContext"]
+        assert "⚠ mnemon slow" not in injected
+        assert "Fast" in injected
 
 
 # ── session_extractor.py: extract_with_llm ───────────────────────────────────

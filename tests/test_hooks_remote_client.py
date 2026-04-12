@@ -151,8 +151,9 @@ class TestCallToolSync:
 
         monkeypatch.setattr(_remote_client, "_call_tool_async", _fake)
 
-        result = call_tool_sync("memory_search", {"query": "test", "limit": 5})
+        result, elapsed = call_tool_sync("memory_search", {"query": "test", "limit": 5})
         assert result == "fake tool output"
+        assert elapsed >= 0
 
     def test_passes_custom_timeout_and_label(self, monkeypatch):
         captured = {}

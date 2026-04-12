@@ -37,8 +37,11 @@ SEARCH_LIMIT = 8
 # Kept in sync with src/mnemon/server.py memory_search().
 NO_RESULTS_SENTINEL = "No memories found matching your query."
 
+# Wall-clock threshold above which a successful call is flagged as slow.
+SLOW_THRESHOLD_SEC = 3.0
 
-def build_context(raw_text: str) -> str:
+
+def build_context(raw_text: str, *, prefix: str = "") -> str:
     """Wrap the ``memory_search`` response in a ``<mnemon-context>`` block.
 
     The server returns a pre-formatted markdown list of matches, each
@@ -46,6 +49,9 @@ def build_context(raw_text: str) -> str:
     and wrap it in a containing tag so Claude can recognise it as mnemon
     context. A character budget is enforced as a safety net in case the
     server ever returns an unexpectedly long payload.
+
+    ``prefix`` is prepended inside the block before the memories header —
+    used to surface latency warnings on slow-but-successful calls.
 
     Returns an empty string when there's nothing worth injecting — empty
     input, the server's no-results sentinel, or whitespace-only content.
@@ -59,12 +65,23 @@ def build_context(raw_text: str) -> str:
         return ""
     if len(trimmed) > CHAR_BUDGET:
         trimmed = trimmed[:CHAR_BUDGET].rstrip() + "\n...[truncated]"
-    return (
-        "<mnemon-context>\n"
-        "Relevant memories from previous sessions:\n"
-        f"{trimmed}\n"
-        "</mnemon-context>"
-    )
+    lines = []
+    if prefix:
+        lines.append(prefix)
+    lines.append("Relevant memories from previous sessions:")
+    lines.append(trimmed)
+    inner = "\n".join(lines)
+    return f"<mnemon-context>\n{inner}\n</mnemon-context>"
+
+
+def build_warning_context(message: str) -> str:
+    """Wrap a health-indicator warning in a ``<mnemon-context>`` block.
+
+    Used when the remote call fails or is misconfigured — emits a visible
+    warning into the prompt context rather than silently logging to stderr.
+    The user sees it on every affected prompt without having to watch logs.
+    """
+    return f"<mnemon-context>\n{message}\n</mnemon-context>"
 
 
 def main() -> None:
@@ -87,31 +104,41 @@ def main() -> None:
             return
 
         try:
-            raw = call_tool_sync(
+            raw, elapsed = call_tool_sync(
                 "memory_search",
                 {"query": prompt, "limit": SEARCH_LIMIT},
                 client_label=CLIENT_LABEL,
             )
         except RemoteClientConfigError as e:
-            # Configuration problem — URL or token not resolvable. Report
-            # once to stderr and continue with no context; there's no point
-            # retrying a misconfiguration inside a hook. Do NOT mark_seen —
-            # the user can fix the config and retry the same prompt
-            # immediately.
-            print(
-                f"mnemon context-surfacing config error: {e}",
-                file=sys.stderr,
-            )
+            # Configuration problem — URL or token not resolvable. Emit a
+            # visible warning block so the user sees it in the prompt context,
+            # not just buried in stderr. Do NOT mark_seen — the user can fix
+            # the config and retry the same prompt immediately.
+            msg = f"⚠ mnemon config error: {e}"
+            print(f"mnemon context-surfacing config error: {e}", file=sys.stderr)
+            write_output({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": build_warning_context(msg),
+                },
+            })
             return
         except Exception as e:
             # Network error, timeout, auth failure, or MCP protocol error.
-            # Log to stderr and continue — never crash Claude Code. Do NOT
+            # Emit a visible warning block and log to stderr. Do NOT
             # mark_seen so the same prompt can retry after the transient
-            # failure clears (e.g., wifi reconnect).
+            # failure clears (e.g., wifi reconnect, Fly cold-start wakes).
+            msg = f"⚠ mnemon unavailable: {type(e).__name__}: {e}"
             print(
                 f"mnemon context-surfacing remote error: {type(e).__name__}: {e}",
                 file=sys.stderr,
             )
+            write_output({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": build_warning_context(msg),
+                },
+            })
             return
 
         # Remote call succeeded — record the prompt as seen so we don't
@@ -120,7 +147,12 @@ def main() -> None:
         # clean and retryable.
         mark_seen(prompt)
 
-        context = build_context(raw)
+        slow_prefix = (
+            f"⚠ mnemon slow: {elapsed:.1f}s"
+            if elapsed > SLOW_THRESHOLD_SEC
+            else ""
+        )
+        context = build_context(raw, prefix=slow_prefix)
         if not context:
             return
 
