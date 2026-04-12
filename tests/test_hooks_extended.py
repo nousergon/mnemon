@@ -638,16 +638,41 @@ class TestSessionExtractorIsDuplicateRemote:
     def test_not_duplicate_when_low_similarity(self):
         from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        raw = json.dumps([{"doc_id": 1, "title": "Existing", "composite_score": 0.456}])
+        raw = json.dumps([{"doc_id": 1, "title": "Existing", "vector_similarity": 0.456}])
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
             assert is_duplicate_remote("title", "content") is False
 
     def test_duplicate_when_high_similarity(self):
         from mnemon.hooks.session_extractor import is_duplicate_remote
 
-        raw = json.dumps([{"doc_id": 1, "title": "Same thing", "composite_score": 0.950}])
+        raw = json.dumps([{"doc_id": 1, "title": "Same thing", "vector_similarity": 0.950}])
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
             assert is_duplicate_remote("title", "content") is True
+
+    def test_composite_score_alone_does_not_trip_dedup(self):
+        """Guard against the pre-C7 bug where is_duplicate_remote compared
+        composite_score against a 0.92 threshold it could never reach.
+        Now only vector_similarity matters."""
+        from mnemon.hooks.session_extractor import is_duplicate_remote
+
+        raw = json.dumps([{
+            "doc_id": 1,
+            "title": "Composite only",
+            "composite_score": 0.99,
+            "vector_similarity": None,
+        }])
+        with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
+            assert is_duplicate_remote("title", "content") is False
+
+    def test_null_vector_similarity_is_not_duplicate(self):
+        """BM25-only matches have vector_similarity=None and must not
+        trip dedup — they could easily be keyword-coincidence, not
+        semantic duplicates."""
+        from mnemon.hooks.session_extractor import is_duplicate_remote
+
+        raw = json.dumps([{"doc_id": 1, "title": "BM25 only", "vector_similarity": None}])
+        with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
+            assert is_duplicate_remote("title", "content") is False
 
     def test_returns_false_on_exception(self):
         from mnemon.hooks.session_extractor import is_duplicate_remote
@@ -670,12 +695,12 @@ class TestSessionExtractorIsDuplicateRemote:
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.2)):
             assert is_duplicate_remote("title", "content") is False
 
-    def test_multiple_scores_only_needs_one_above_threshold(self):
+    def test_multiple_results_only_needs_one_above_threshold(self):
         from mnemon.hooks.session_extractor import is_duplicate_remote
 
         raw = json.dumps([
-            {"doc_id": 1, "title": "A", "composite_score": 0.800},
-            {"doc_id": 2, "title": "B", "composite_score": 0.930},
+            {"doc_id": 1, "title": "A", "vector_similarity": 0.800},
+            {"doc_id": 2, "title": "B", "vector_similarity": 0.930},
         ])
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
             assert is_duplicate_remote("title", "content") is True

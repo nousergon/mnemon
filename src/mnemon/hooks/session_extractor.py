@@ -132,11 +132,13 @@ def is_duplicate_remote(title: str, content: str) -> bool:
     """Check if an observation is too similar to existing memories via remote search.
 
     Searches the Fly vault for content matching the combined title+content
-    using the structured ``memory_search_structured`` tool, which returns a
-    JSON array with explicit ``composite_score`` fields — no text parsing.
-    If any result scores above ``HOOK_DEDUP_SIMILARITY_THRESHOLD``, treat
-    it as a duplicate. Returns False on any error (network, timeout,
-    JSON parse failure) — prefer saving a possible duplicate over
+    using ``memory_search_structured``, then compares the
+    ``vector_similarity`` (true cosine similarity from the vector store)
+    against ``HOOK_DEDUP_SIMILARITY_THRESHOLD``. Composite score is
+    deliberately NOT used — it's a rank-fusion weighted score, not a
+    similarity metric, and tops out far below 1.0 even for exact matches.
+    Returns False on any error (network, timeout, JSON parse, missing
+    vector_similarity field) — prefer saving a possible duplicate over
     silently dropping a novel observation.
     """
     import json
@@ -152,10 +154,11 @@ def is_duplicate_remote(title: str, content: str) -> bool:
             client_label=CLIENT_LABEL,
         )
         results = json.loads(raw)
-        return any(
-            r.get("composite_score", 0.0) > HOOK_DEDUP_SIMILARITY_THRESHOLD
-            for r in results
-        )
+        for r in results:
+            sim = r.get("vector_similarity")
+            if sim is not None and sim > HOOK_DEDUP_SIMILARITY_THRESHOLD:
+                return True
+        return False
     except Exception:
         return False
 

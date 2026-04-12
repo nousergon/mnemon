@@ -203,16 +203,9 @@ def test_wrong_token_is_rejected(monkeypatch, remote_server):
 
 def test_structured_search_parses_real_server_json(remote_env):
     """Client-side JSON parsing must handle the real server's JSON output,
-    not just a mocked shape. Guards against server changing its JSON
+    not just a mocked shape. Guards against the server changing its JSON
     schema but the client's json.loads path still superficially working
     against unit-test fixtures.
-
-    Note: does NOT assert ``is_duplicate_remote`` returns True here —
-    that currently requires ``composite_score > 0.92``, which the
-    composite scoring formula cannot produce in practice (topping out
-    around ~0.75 for a top result). That's a separately-tracked bug in
-    the dedup logic, not a problem with the structured-search plumbing
-    this PR is validating. See audit follow-up.
     """
     import json
 
@@ -240,8 +233,47 @@ def test_structured_search_parses_real_server_json(remote_env):
     # Every result must have the fields the client relies on. Pin the
     # schema so a server-side rename would fail loudly here.
     required = {"doc_id", "title", "content", "content_type",
-                "confidence", "composite_score", "created_at"}
+                "confidence", "composite_score", "vector_similarity",
+                "created_at"}
     for r in results:
         assert required.issubset(r.keys()), f"missing fields in {r}"
         assert isinstance(r["composite_score"], (int, float))
         assert isinstance(r["confidence"], (int, float))
+        # vector_similarity can be None (BM25-only) or a float
+        if r["vector_similarity"] is not None:
+            assert isinstance(r["vector_similarity"], (int, float))
+            assert 0.0 <= r["vector_similarity"] <= 1.0
+
+
+def test_dedup_triggers_on_near_identical_memory(remote_env):
+    """End-to-end dedup: save a memory, then ask is_duplicate_remote
+    whether an identical observation would be a duplicate. The fix for
+    C7 (use vector_similarity instead of composite_score) means this
+    should now reliably return True. Before the fix, the threshold was
+    unreachable and dedup silently never triggered."""
+    from mnemon.hooks._remote_client import call_tool_sync
+    from mnemon.hooks.session_extractor import is_duplicate_remote
+
+    call_tool_sync(
+        "memory_save",
+        {
+            "title": "Dedup end-to-end guard",
+            "content": "A memory saved to verify the dedup cosine-similarity path works end-to-end.",
+            "content_type": "observation",
+            "source_client": "pytest-integration",
+        },
+        timeout=30.0,
+    )
+
+    # Same title + content → very high cosine similarity → dedup triggers.
+    assert is_duplicate_remote(
+        "Dedup end-to-end guard",
+        "A memory saved to verify the dedup cosine-similarity path works end-to-end.",
+    ) is True
+
+    # Unrelated content → low cosine similarity → dedup does NOT trigger,
+    # even if BM25 would catch stray keyword overlap.
+    assert is_duplicate_remote(
+        "Completely unrelated topic about alpine climbing routes in Patagonia",
+        "Nothing to do with any saved memory in this test vault.",
+    ) is False
