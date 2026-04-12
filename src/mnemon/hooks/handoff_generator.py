@@ -4,7 +4,8 @@
 Generates a session summary for continuity across sessions.
 Saved as a "handoff" memory with 30-day half-life.
 
-Phase 3: LLM-based summarization (replaces Phase 2 template heuristics).
+Phase 3 unification: saves go to the Fly vault via _remote_client
+(``memory_save`` tool call). LLM summarization remains local.
 Falls back to regex heuristics if LLM is unavailable.
 """
 
@@ -34,6 +35,8 @@ HANDOFF_SYSTEM_PROMPT = (
     "- Focus on what the NEXT session needs to know.\n"
     "- If the session was trivial (just a question, no real work), output: <none/>"
 )
+
+CLIENT_LABEL = "claude-code-handoff-generator"
 
 
 def parse_handoff(response: str) -> dict | None:
@@ -104,6 +107,7 @@ def generate_with_regex(transcript: str) -> dict | None:
 def main() -> None:
     try:
         from .framework import read_stdin, read_transcript
+        from ._remote_client import RemoteClientConfigError, call_tool_sync
 
         hook_input = read_stdin()
         transcript = read_transcript(hook_input.get("transcript_path", ""), 6000)
@@ -118,29 +122,25 @@ def main() -> None:
         if not handoff or handoff.get("skip"):
             return
 
-        from ..store import Store
-
-        store = Store()
         try:
-            doc_id = store.save(
-                title=f"Session: {handoff['title']}",
-                content=handoff["summary"],
-                content_type="handoff",
-                source_client="claude-code-hook",
+            result, elapsed = call_tool_sync(
+                "memory_save",
+                {
+                    "title": f"Session: {handoff['title']}",
+                    "content": handoff["summary"],
+                    "content_type": "handoff",
+                    "source_client": "claude-code-hook",
+                },
+                client_label=CLIENT_LABEL,
             )
-
-            # Embed if available
-            try:
-                from ..embedder import embed_document
-                doc = store.get(doc_id)
-                if doc:
-                    embed_document(store, doc.hash, handoff["title"], handoff["summary"])
-            except Exception:
-                pass
-
             print(f'mnemon: saved handoff "{handoff["title"]}"', file=sys.stderr)
-        finally:
-            store.close()
+        except RemoteClientConfigError as e:
+            print(f"mnemon handoff-generator config error: {e}", file=sys.stderr)
+        except Exception as e:
+            print(
+                f"mnemon handoff-generator save error: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
     except Exception as e:
         print(f"mnemon handoff-generator error: {e}", file=sys.stderr)
 
