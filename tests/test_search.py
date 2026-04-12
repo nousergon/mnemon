@@ -121,3 +121,30 @@ class TestSearch:
     def test_search_empty_returns_empty(self, store):
         results = search(store, "nonexistent term xyz")
         assert len(results) == 0
+
+    def test_search_attaches_vector_similarity_when_vector_match(self, store):
+        """Results that came back from the vector store must carry the
+        raw cosine similarity on ScoredResult.vector_similarity — it's
+        the dedup signal used by is_duplicate_remote."""
+        from unittest.mock import patch
+
+        from mnemon.store import SearchResult
+
+        fake_vector_hit = SearchResult(
+            doc_id=42, title="Foo", content="bar", content_type="note",
+            memory_type="semantic", confidence=0.8, created_at="2026-04-12",
+            score=0.87, source="vector",
+        )
+        with patch.object(store, "search_bm25", return_value=[fake_vector_hit]), \
+             patch.object(store, "search_vector", return_value=[fake_vector_hit]), \
+             patch("mnemon.search.embed", create=True, return_value=[0.0] * 384):
+            results = search(store, "foo")
+        assert len(results) >= 1
+        assert results[0].vector_similarity == 0.87
+
+    def test_search_vector_similarity_is_none_for_bm25_only(self, store):
+        store.save(title="Python", content="Python is great")
+        # Disable vector search so results come only from BM25.
+        results = search(store, "Python", use_vector=False)
+        assert len(results) >= 1
+        assert results[0].vector_similarity is None

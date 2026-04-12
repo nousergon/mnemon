@@ -29,6 +29,11 @@ class ScoredResult:
     source: str
     composite_score: float = 0.0
     recency_score: float = 0.0
+    # Raw cosine similarity from the vector store, preserved through RRF
+    # fusion so clients can do true-similarity comparisons (e.g., dedup)
+    # without trying to reverse-engineer it from composite_score. None
+    # when the result did not match a vector search (BM25-only).
+    vector_similarity: float | None = None
 
 
 def compute_recency(created_at: str) -> float:
@@ -203,6 +208,13 @@ def search(
         except Exception:
             pass  # Fall back to BM25-only
 
+    # Snapshot cosine similarities by doc_id before RRF fusion flattens
+    # the scores into opaque RRF values. Needed so downstream clients can
+    # do true-similarity dedup without recomputing embeddings locally.
+    vector_similarity_by_id: dict[int, float] = {
+        r.doc_id: r.score for r in vector_results
+    }
+
     # Fuse all result sets
     result_sets = [bm25_results]
     if vector_results:
@@ -217,6 +229,12 @@ def search(
         key=lambda r: r.composite_score,
         reverse=True,
     )
+
+    # Attach the pre-fusion cosine similarity to each result. Stays None
+    # for BM25-only matches; those shouldn't be treated as dedup
+    # candidates anyway (no semantic similarity signal).
+    for r in scored:
+        r.vector_similarity = vector_similarity_by_id.get(r.doc_id)
 
     if content_type:
         scored = [r for r in scored if r.content_type == content_type]

@@ -107,8 +107,12 @@ def memory_search_structured(
     object per result; empty array when nothing matches.
 
     Each result object contains: doc_id, title, content, content_type,
-    confidence, composite_score, created_at. Score fields are floats —
-    callers can compare against thresholds without text parsing.
+    confidence, composite_score, vector_similarity, created_at. Score
+    fields are floats — callers can compare against thresholds without
+    text parsing. ``vector_similarity`` is the raw cosine similarity
+    (0.0–1.0) from the vector store, preserved before RRF fusion; it
+    is None for BM25-only matches and is the right signal for dedup
+    (composite_score is a weighted rank score, not a similarity).
     """
     store = _get_store()
     results = search(store, query, limit=limit, content_type=content_type)
@@ -120,6 +124,7 @@ def memory_search_structured(
             "content_type": r.content_type,
             "confidence": r.confidence,
             "composite_score": r.composite_score,
+            "vector_similarity": r.vector_similarity,
             "created_at": r.created_at,
         }
         for r in results

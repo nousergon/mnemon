@@ -42,6 +42,7 @@ def _make_search_result(**overrides):
         "confidence": 0.80,
         "created_at": "2026-04-01T00:00:00Z",
         "composite_score": 0.75,
+        "vector_similarity": None,
     }
     defaults.update(overrides)
     m = MagicMock()
@@ -220,13 +221,16 @@ class TestMemorySearchStructured:
         import json
         mock_search.return_value = [_make_search_result(
             doc_id=42, title="T", content="C", content_type="decision",
-            confidence=0.9, composite_score=0.5, created_at="2026-04-12T00:00:00Z",
+            confidence=0.9, composite_score=0.5, vector_similarity=0.87,
+            created_at="2026-04-12T00:00:00Z",
         )]
         result = memory_search_structured("q")
         parsed = json.loads(result)[0]
         expected = {"doc_id", "title", "content", "content_type",
-                    "confidence", "composite_score", "created_at"}
+                    "confidence", "composite_score", "vector_similarity",
+                    "created_at"}
         assert expected.issubset(parsed.keys())
+        assert parsed["vector_similarity"] == 0.87
 
     @patch("mnemon.server.search")
     @patch("mnemon.server.Store")
