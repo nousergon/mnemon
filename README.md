@@ -5,11 +5,11 @@
 [![Tests](https://img.shields.io/badge/tests-327_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
-[![PyPI](https://img.shields.io/badge/PyPI-v0.2.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
+[![PyPI](https://img.shields.io/badge/PyPI-v0.3.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
 
 > Universal long-term memory layer for AI agents via [MCP](https://modelcontextprotocol.io).
 
-mnemon gives AI agents persistent, searchable memory that survives across sessions. It stores memories in a local SQLite vault with hybrid BM25 + vector search, automatic confidence decay, contradiction detection, and the Model Context Protocol for seamless integration with Claude Code, Cursor, and other MCP clients.
+mnemon gives AI agents persistent, searchable memory that survives across sessions. It uses hybrid BM25 + vector search, automatic confidence decay, and contradiction detection via the Model Context Protocol. Deploy as a remote server on Fly.io for a unified vault across all your MCP clients (Claude Code, Claude Desktop, Cursor, claude.ai), or run locally for development.
 
 ## Table of Contents
 
@@ -51,14 +51,15 @@ pip install -e ".[dev]"
 ### 1. Configure your client
 
 ```bash
-# Auto-configure Claude Code (MCP server + memory hooks)
+# Claude Code with remote vault (recommended — single vault across all clients)
+mnemon setup claude-code --remote-url https://your-app.fly.dev/mcp
+
+# Cursor with remote vault
+mnemon setup cursor --remote-url https://your-app.fly.dev/mcp
+
+# Local-only mode (development, no remote server needed)
 mnemon setup claude-code
-
-# Or configure Cursor
 mnemon setup cursor
-
-# Or just the hooks (if MCP is already configured)
-mnemon setup hooks
 ```
 
 ### 2. Use it
@@ -144,20 +145,17 @@ The extractor and handoff generator use LLM-based extraction when `mnemon[llm]` 
 
 ## Remote Server
 
-For use with Claude.ai web or iOS (any Streamable HTTP MCP client):
+Deploy mnemon as a remote Streamable HTTP server for a single vault shared across all MCP clients. This is the recommended production setup — Claude Code hooks, Claude Desktop, Cursor, and claude.ai all read and write the same memories.
 
 ```bash
-# Start remote server
-mnemon serve-remote
-
-# With authentication (at proxy/infra level)
+# Start remote server (local testing)
 MNEMON_LOCAL_TOKEN=your-secret-token mnemon serve-remote
 
 # Custom port
 PORT=9000 mnemon serve-remote
 ```
 
-The remote server exposes the same MCP tools as stdio mode via FastMCP's native Streamable HTTP transport at `http://localhost:8502/mcp`.
+For production, deploy to [Fly.io](https://fly.io) with a persistent volume (1GB minimum RAM required for FastEmbed model). See `fly.toml` and `Dockerfile` in the repo. Set `MNEMON_LOCAL_TOKEN` as a Fly secret for hook authentication. OAuth (Auth0 or self-hosted) is supported for browser-based clients like claude.ai.
 
 ## S3 Vault Sync
 
@@ -181,10 +179,17 @@ Requires the AWS CLI (`aws`) on your PATH with valid credentials.
 
 ## Architecture
 
+**Remote (production):** All clients hit a single Fly-hosted vault via Streamable HTTP. Claude Code hooks use a static bearer token (`MNEMON_LOCAL_TOKEN`). Browser clients (claude.ai, Claude Desktop) use OAuth.
+
+**Local (development):** SQLite vault at `~/.mnemon/default.sqlite` with a companion vector store. Useful for testing and offline work.
+
 ```
 ~/.mnemon/
-  default.sqlite      SQLite vault (FTS5 + WAL mode)
-  default.vec.npz     Companion vector store (numpy, brute-force cosine)
+  remote_url           Remote server URL (written by mnemon setup --remote-url)
+  local_token          Bearer token for remote auth (chmod 600)
+  default.sqlite       Local SQLite vault (FTS5 + WAL mode, development only)
+  default.vec.npz      Companion vector store (numpy, brute-force cosine)
+  models/              Local LLM weights (session extraction, query expansion)
 ```
 
 - **Storage**: SQLite with FTS5 full-text search, content-addressable deduplication (SHA-256)
@@ -198,8 +203,9 @@ Requires the AWS CLI (`aws`) on your PATH with valid credentials.
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `MNEMON_VAULT_DIR` | `~/.mnemon` | Vault directory |
-| `MNEMON_LOCAL_TOKEN` | (none) | Bearer token for remote server auth |
+| `MNEMON_REMOTE_URL` | (none) | Remote server URL (or `~/.mnemon/remote_url` file) |
+| `MNEMON_LOCAL_TOKEN` | (none) | Bearer token for remote auth (or `~/.mnemon/local_token` file) |
+| `MNEMON_VAULT_DIR` | `~/.mnemon` | Local vault directory |
 | `MNEMON_MODEL_DIR` | `~/.mnemon/models` | Directory for LLM model files |
 | `PORT` | `8502` | Remote server port |
 
@@ -209,7 +215,7 @@ Requires the AWS CLI (`aws`) on your PATH with valid credentials.
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests (253 tests)
+# Run tests (327 tests)
 pytest
 
 # Run tests with coverage
