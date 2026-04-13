@@ -231,6 +231,17 @@ class OAuthMiddleware:
             await serve_token(self.as_config, scope, receive, send)
             return
 
+        if path == "/oauth/register":
+            from .oauth_as import serve_register
+
+            if self.as_config is None:
+                await _send_json(
+                    send, 404, {"error": "authorization server not enabled"}
+                )
+                return
+            await serve_register(self.as_config, scope, receive, send)
+            return
+
         # Unauthenticated mode — pass through only when NEITHER auth method
         # is configured. If local_token is set but OAuth is not, we still
         # enforce auth below.

@@ -298,6 +298,21 @@ def reset_oauth_state():
     _reset_state_for_tests()
 
 
+@pytest.fixture
+def registered_client(as_config):
+    """Register a test client via the DCR code path so /authorize and
+    /token accept its client_id. Tests that exercise unknown-client
+    rejection should NOT use this fixture."""
+    from mnemon.oauth_as import register_client
+
+    return register_client(as_config, {
+        "redirect_uris": ["https://client/cb", "https://client.example/cb"],
+        "client_name": "Test Client",
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    })
+
+
 def _pkce_pair():
     """Generate a PKCE (code_verifier, code_challenge) pair matching RFC 7636."""
     import secrets
@@ -360,13 +375,14 @@ class TestServeAuthorizeGet:
         assert b"missing required parameter" in body
 
     @pytest.mark.asyncio
-    async def test_rejects_non_s256_pkce(self, as_config):
+    async def test_rejects_non_s256_pkce(self, as_config, registered_client):
         from mnemon.oauth_as import serve_authorize
 
+        cid = registered_client["client_id"]
         query = (
-            b"client_id=c&redirect_uri=https://x/cb&response_type=code&"
-            b"code_challenge=abc&code_challenge_method=plain"
-        )
+            f"client_id={cid}&redirect_uri=https://client/cb&response_type=code&"
+            f"code_challenge=abc&code_challenge_method=plain"
+        ).encode()
         status, _, body = await _run_asgi(
             serve_authorize, as_config, method="GET", query=query
         )
@@ -374,26 +390,67 @@ class TestServeAuthorizeGet:
         assert b"S256" in body
 
     @pytest.mark.asyncio
-    async def test_rejects_non_code_response_type(self, as_config):
+    async def test_rejects_non_code_response_type(self, as_config, registered_client):
         """OAuth 2.1 removes implicit grant — only response_type=code."""
         from mnemon.oauth_as import serve_authorize
 
+        cid = registered_client["client_id"]
         query = (
-            b"client_id=c&redirect_uri=https://x/cb&response_type=token&"
-            b"code_challenge=abc&code_challenge_method=S256"
-        )
+            f"client_id={cid}&redirect_uri=https://client/cb&response_type=token&"
+            f"code_challenge=abc&code_challenge_method=S256"
+        ).encode()
         status, _, _ = await _run_asgi(
             serve_authorize, as_config, method="GET", query=query
         )
         assert status == 400
 
     @pytest.mark.asyncio
-    async def test_renders_login_form_with_valid_params(self, as_config):
+    async def test_rejects_unknown_client_id(self, as_config):
+        """Unregistered client_ids must be rejected — the DCR endpoint
+        is the only way to obtain a valid one."""
         from mnemon.oauth_as import serve_authorize
 
         _, challenge = _pkce_pair()
         query = (
-            f"client_id=test-client&redirect_uri=https://client.example/cb&"
+            f"client_id=never-registered&redirect_uri=https://x/cb&"
+            f"response_type=code&code_challenge={challenge}&"
+            f"code_challenge_method=S256"
+        ).encode()
+        status, _, body = await _run_asgi(
+            serve_authorize, as_config, method="GET", query=query
+        )
+        assert status == 400
+        assert b"unknown client_id" in body
+
+    @pytest.mark.asyncio
+    async def test_rejects_unregistered_redirect_uri(self, as_config, registered_client):
+        """Redirect URI pinning: a registered client can only use
+        redirect_uris it explicitly registered."""
+        from mnemon.oauth_as import serve_authorize
+
+        cid = registered_client["client_id"]
+        _, challenge = _pkce_pair()
+        query = (
+            f"client_id={cid}&redirect_uri=https://attacker.example/cb&"
+            f"response_type=code&code_challenge={challenge}&"
+            f"code_challenge_method=S256"
+        ).encode()
+        status, _, body = await _run_asgi(
+            serve_authorize, as_config, method="GET", query=query
+        )
+        assert status == 400
+        assert b"redirect_uri not registered" in body
+
+    @pytest.mark.asyncio
+    async def test_renders_login_form_with_valid_params(
+        self, as_config, registered_client
+    ):
+        from mnemon.oauth_as import serve_authorize
+
+        cid = registered_client["client_id"]
+        _, challenge = _pkce_pair()
+        query = (
+            f"client_id={cid}&redirect_uri=https://client.example/cb&"
             f"response_type=code&code_challenge={challenge}&"
             f"code_challenge_method=S256&state=abc123"
         ).encode()
@@ -404,39 +461,40 @@ class TestServeAuthorizeGet:
         assert "text/html" in headers.get("content-type", "")
         # Hidden fields round-trip the authorize params back on POST
         assert b'name="client_id"' in body
-        assert b'value="test-client"' in body
+        assert cid.encode() in body
         assert b'name="state"' in body
         assert b'value="abc123"' in body
         # Never echo the passphrase field as a value
         assert b'name="passphrase"' in body
 
     @pytest.mark.asyncio
-    async def test_escapes_html_in_params(self, as_config):
+    async def test_escapes_html_in_params(self, as_config, registered_client):
         """state and redirect_uri are untrusted — must be HTML-escaped to
         avoid XSS via the login form."""
         from mnemon.oauth_as import serve_authorize
 
+        cid = registered_client["client_id"]
         _, challenge = _pkce_pair()
         query = (
-            f"client_id=<script>&redirect_uri=https://x/cb&response_type=code&"
+            f"client_id={cid}&redirect_uri=https://client/cb&response_type=code&"
             f"code_challenge={challenge}&code_challenge_method=S256&"
             f"state=<img src=x>"
         ).encode()
         _, _, body = await _run_asgi(
             serve_authorize, as_config, method="GET", query=query
         )
-        assert b"<script>" not in body
         assert b"<img src=x>" not in body
 
 
 class TestServeAuthorizePost:
     @pytest.mark.asyncio
-    async def test_rejects_wrong_passphrase(self, as_config):
+    async def test_rejects_wrong_passphrase(self, as_config, registered_client):
         from mnemon.oauth_as import serve_authorize
 
+        cid = registered_client["client_id"]
         _, challenge = _pkce_pair()
         form = (
-            f"client_id=c&redirect_uri=https://x/cb&response_type=code&"
+            f"client_id={cid}&redirect_uri=https://client/cb&response_type=code&"
             f"code_challenge={challenge}&code_challenge_method=S256&"
             f"passphrase=wrong"
         ).encode()
@@ -454,7 +512,7 @@ class TestServeAuthorizePost:
     async def test_empty_configured_passphrase_never_matches(self, tmp_path):
         """If AS is somehow enabled without a passphrase set, an empty
         submission must NOT match — guards the misconfig case."""
-        from mnemon.oauth_as import serve_authorize
+        from mnemon.oauth_as import register_client, serve_authorize
 
         # Directly construct config without validation to simulate boot
         # skipping the validate() call.
@@ -464,9 +522,10 @@ class TestServeAuthorizePost:
             passphrase="",  # misconfigured
             key_dir=tmp_path,
         )
+        cid = register_client(config, {"redirect_uris": ["https://client/cb"]})["client_id"]
         _, challenge = _pkce_pair()
         form = (
-            f"client_id=c&redirect_uri=https://x/cb&response_type=code&"
+            f"client_id={cid}&redirect_uri=https://client/cb&response_type=code&"
             f"code_challenge={challenge}&code_challenge_method=S256&"
             f"passphrase="
         ).encode()
@@ -476,12 +535,15 @@ class TestServeAuthorizePost:
         assert status == 401
 
     @pytest.mark.asyncio
-    async def test_correct_passphrase_redirects_with_code(self, as_config):
+    async def test_correct_passphrase_redirects_with_code(
+        self, as_config, registered_client
+    ):
         from mnemon.oauth_as import _auth_codes, serve_authorize
 
+        cid = registered_client["client_id"]
         _, challenge = _pkce_pair()
         form = (
-            f"client_id=test-client&redirect_uri=https://client/cb&"
+            f"client_id={cid}&redirect_uri=https://client/cb&"
             f"response_type=code&code_challenge={challenge}&"
             f"code_challenge_method=S256&state=xyz&passphrase=correct-horse-battery"
         ).encode()
@@ -502,14 +564,18 @@ class TestServeAuthorizePost:
 # ── /oauth/token ────────────────────────────────────────────────────────────
 
 
-async def _issue_code(as_config, **overrides):
+async def _issue_code(as_config, client_id, **overrides):
     """Helper: run an authorize POST with correct passphrase, return (code,
-    code_verifier, params-used-for-issuance)."""
+    code_verifier, params-used-for-issuance).
+
+    Callers must pass a pre-registered ``client_id`` — unknown clients
+    are rejected at the authorize step since DCR was added in PR #38.
+    """
     from mnemon.oauth_as import serve_authorize
 
     verifier, challenge = _pkce_pair()
     params = {
-        "client_id": "test-client",
+        "client_id": client_id,
         "redirect_uri": "https://client/cb",
         "response_type": "code",
         "code_challenge": challenge,
@@ -557,10 +623,10 @@ class TestServeTokenAuthorizationCode:
         assert b"unsupported_grant_type" in body
 
     @pytest.mark.asyncio
-    async def test_happy_path_returns_tokens(self, as_config):
+    async def test_happy_path_returns_tokens(self, as_config, registered_client):
         from mnemon.oauth_as import serve_token
 
-        code, verifier, params = await _issue_code(as_config)
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
         from urllib.parse import urlencode
         form = urlencode({
             "grant_type": "authorization_code",
@@ -581,14 +647,14 @@ class TestServeTokenAuthorizationCode:
         assert doc["scope"] == "mcp"
 
     @pytest.mark.asyncio
-    async def test_access_token_verifies_against_jwks(self, as_config):
+    async def test_access_token_verifies_against_jwks(self, as_config, registered_client):
         """Minted access token must be verifiable with the public key
         published at /.well-known/jwks.json — the contract the future
         resource-server swap (PR #39) relies on."""
         import jwt
         from mnemon.oauth_as import jwks_document, serve_token
 
-        code, verifier, params = await _issue_code(as_config)
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
         from urllib.parse import urlencode
         form = urlencode({
             "grant_type": "authorization_code",
@@ -613,10 +679,10 @@ class TestServeTokenAuthorizationCode:
         assert payload["scope"] == "mcp"
 
     @pytest.mark.asyncio
-    async def test_code_is_single_use(self, as_config):
+    async def test_code_is_single_use(self, as_config, registered_client):
         from mnemon.oauth_as import serve_token
 
-        code, verifier, params = await _issue_code(as_config)
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
         from urllib.parse import urlencode
         form = urlencode({
             "grant_type": "authorization_code",
@@ -635,10 +701,10 @@ class TestServeTokenAuthorizationCode:
         assert b"invalid_grant" in body2
 
     @pytest.mark.asyncio
-    async def test_wrong_code_verifier_rejected(self, as_config):
+    async def test_wrong_code_verifier_rejected(self, as_config, registered_client):
         from mnemon.oauth_as import serve_token
 
-        code, _, params = await _issue_code(as_config)
+        code, _, params = await _issue_code(as_config, registered_client["client_id"])
         from urllib.parse import urlencode
         form = urlencode({
             "grant_type": "authorization_code",
@@ -654,10 +720,10 @@ class TestServeTokenAuthorizationCode:
         assert b"PKCE verification failed" in body
 
     @pytest.mark.asyncio
-    async def test_wrong_redirect_uri_rejected(self, as_config):
+    async def test_wrong_redirect_uri_rejected(self, as_config, registered_client):
         from mnemon.oauth_as import serve_token
 
-        code, verifier, params = await _issue_code(as_config)
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
         from urllib.parse import urlencode
         form = urlencode({
             "grant_type": "authorization_code",
@@ -673,10 +739,10 @@ class TestServeTokenAuthorizationCode:
         assert b"redirect_uri" in body
 
     @pytest.mark.asyncio
-    async def test_wrong_client_id_rejected(self, as_config):
+    async def test_wrong_client_id_rejected(self, as_config, registered_client):
         from mnemon.oauth_as import serve_token
 
-        code, verifier, params = await _issue_code(as_config)
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
         from urllib.parse import urlencode
         form = urlencode({
             "grant_type": "authorization_code",
@@ -708,13 +774,13 @@ class TestServeTokenAuthorizationCode:
 
 class TestServeTokenRefreshGrant:
     @pytest.mark.asyncio
-    async def test_refresh_token_rotates(self, as_config):
+    async def test_refresh_token_rotates(self, as_config, registered_client):
         """Rotating refresh tokens means each refresh consumes the old
         one and issues a new one. A leaked refresh token only works once."""
         from mnemon.oauth_as import serve_token
 
         # Get an initial pair.
-        code, verifier, params = await _issue_code(as_config)
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
         from urllib.parse import urlencode
         code_form = urlencode({
             "grant_type": "authorization_code",
@@ -809,3 +875,208 @@ class TestMintAccessToken:
         header = jwt.get_unverified_header(token)
         assert header["kid"] == "mnemon-as-1"
         assert header["alg"] == "RS256"
+
+
+# ── /oauth/register (RFC 7591 DCR) ───────────────────────────────────────────
+
+
+class TestServeRegister:
+    @pytest.mark.asyncio
+    async def test_404_when_as_disabled(self):
+        from mnemon.oauth_as import serve_register
+
+        config = AuthorizationServerConfig(enabled=False)
+        body = json.dumps({"redirect_uris": ["https://client/cb"]}).encode()
+        status, _, _ = await _run_asgi(
+            serve_register, config, method="POST", body=body
+        )
+        assert status == 404
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_post(self, as_config):
+        from mnemon.oauth_as import serve_register
+
+        status, _, _ = await _run_asgi(serve_register, as_config, method="GET")
+        assert status == 405
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_json_body(self, as_config):
+        from mnemon.oauth_as import serve_register
+
+        status, _, body = await _run_asgi(
+            serve_register, as_config, method="POST",
+            body=b"not json at all",
+        )
+        assert status == 400
+        assert b"invalid_client_metadata" in body
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_object_json(self, as_config):
+        from mnemon.oauth_as import serve_register
+
+        status, _, body = await _run_asgi(
+            serve_register, as_config, method="POST",
+            body=b'["not", "an", "object"]',
+        )
+        assert status == 400
+        assert b"JSON object" in body
+
+    @pytest.mark.asyncio
+    async def test_rejects_missing_redirect_uris(self, as_config):
+        from mnemon.oauth_as import serve_register
+
+        body = json.dumps({"client_name": "X"}).encode()
+        status, _, body_bytes = await _run_asgi(
+            serve_register, as_config, method="POST", body=body,
+        )
+        assert status == 400
+        assert b"redirect_uris is required" in body_bytes
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_https_redirect(self, as_config):
+        from mnemon.oauth_as import serve_register
+
+        body = json.dumps({"redirect_uris": ["http://evil.example/cb"]}).encode()
+        status, _, body_bytes = await _run_asgi(
+            serve_register, as_config, method="POST", body=body,
+        )
+        assert status == 400
+        assert b"https" in body_bytes
+
+    @pytest.mark.asyncio
+    async def test_allows_localhost_http(self, as_config):
+        """Local development callbacks (http://localhost) are exempt from
+        the HTTPS requirement — matches RFC 8252 guidance for native apps."""
+        from mnemon.oauth_as import serve_register
+
+        body = json.dumps({
+            "redirect_uris": ["http://localhost:8080/cb", "http://127.0.0.1/cb"],
+        }).encode()
+        status, _, _ = await _run_asgi(
+            serve_register, as_config, method="POST", body=body,
+        )
+        assert status == 201
+
+    @pytest.mark.asyncio
+    async def test_rejects_unsupported_grant_type(self, as_config):
+        from mnemon.oauth_as import serve_register
+
+        body = json.dumps({
+            "redirect_uris": ["https://client/cb"],
+            "grant_types": ["password"],
+        }).encode()
+        status, _, body_bytes = await _run_asgi(
+            serve_register, as_config, method="POST", body=body,
+        )
+        assert status == 400
+        assert b"password" in body_bytes
+
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_client_id(self, as_config):
+        from mnemon.oauth_as import serve_register
+
+        body = json.dumps({
+            "redirect_uris": ["https://client.example/cb"],
+            "client_name": "Test",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        }).encode()
+        status, headers, body_bytes = await _run_asgi(
+            serve_register, as_config, method="POST", body=body,
+        )
+        assert status == 201
+        doc = json.loads(body_bytes)
+        # RFC 7591 mandates a client_id in the response.
+        assert "client_id" in doc
+        assert doc["client_id"]
+        # Public client — no secret returned.
+        assert "client_secret" not in doc
+        assert doc["token_endpoint_auth_method"] == "none"
+        assert doc["client_id_issued_at"] > 0
+        # Echoes the submitted metadata.
+        assert doc["redirect_uris"] == ["https://client.example/cb"]
+        assert doc["client_name"] == "Test"
+
+    @pytest.mark.asyncio
+    async def test_registered_client_persists_across_lookups(self, as_config):
+        """After DCR, the client_id must be usable by the authorize
+        endpoint — i.e., get_client() can find it on subsequent calls."""
+        from mnemon.oauth_as import get_client, serve_register
+
+        body = json.dumps({"redirect_uris": ["https://a/cb"]}).encode()
+        _, _, body_bytes = await _run_asgi(
+            serve_register, as_config, method="POST", body=body,
+        )
+        client_id = json.loads(body_bytes)["client_id"]
+        record = get_client(as_config, client_id)
+        assert record is not None
+        assert record["redirect_uris"] == ["https://a/cb"]
+
+    @pytest.mark.asyncio
+    async def test_each_registration_yields_unique_client_id(self, as_config):
+        from mnemon.oauth_as import serve_register
+
+        body = json.dumps({"redirect_uris": ["https://a/cb"]}).encode()
+        _, _, b1 = await _run_asgi(serve_register, as_config, method="POST", body=body)
+        _, _, b2 = await _run_asgi(serve_register, as_config, method="POST", body=body)
+        id1 = json.loads(b1)["client_id"]
+        id2 = json.loads(b2)["client_id"]
+        assert id1 != id2
+
+    @pytest.mark.asyncio
+    async def test_clients_persist_across_load(self, as_config):
+        """Persistence sanity: write via DCR, read via _load_clients
+        directly — proves clients.json is the durable store, not just
+        the in-process dict."""
+        from mnemon.oauth_as import _load_clients, serve_register
+
+        body = json.dumps({"redirect_uris": ["https://a/cb"]}).encode()
+        _, _, body_bytes = await _run_asgi(
+            serve_register, as_config, method="POST", body=body,
+        )
+        client_id = json.loads(body_bytes)["client_id"]
+
+        # Fresh load from disk — simulates a server restart.
+        clients = _load_clients(as_config)
+        assert client_id in clients
+
+
+# ── Middleware routing (sanity that /oauth/register goes to the handler) ────
+
+
+class TestRegisterRouting:
+    @pytest.mark.asyncio
+    async def test_middleware_dispatches_register_when_as_enabled(
+        self, as_config
+    ):
+        """End-to-end sanity: the OAuth middleware actually routes
+        /oauth/register to the DCR handler when as_config is wired."""
+        from mnemon.auth import OAuthConfig, OAuthMiddleware
+
+        async def downstream(scope, receive, send):
+            raise AssertionError("downstream must not be called for /oauth/register")
+
+        mw = OAuthMiddleware(downstream, OAuthConfig(), as_config=as_config)
+
+        sent = []
+
+        async def send(msg):
+            sent.append(msg)
+
+        body = json.dumps({"redirect_uris": ["https://c/cb"]}).encode()
+        body_done = {"done": False}
+
+        async def receive():
+            if body_done["done"]:
+                return {"type": "http.disconnect"}
+            body_done["done"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        scope = {
+            "type": "http", "method": "POST", "path": "/oauth/register",
+            "query_string": b"", "headers": [],
+        }
+        await mw(scope, receive, send)
+
+        status = next(m for m in sent if m["type"] == "http.response.start")["status"]
+        assert status == 201
