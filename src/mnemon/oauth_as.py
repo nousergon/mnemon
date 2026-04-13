@@ -377,6 +377,52 @@ def _new_random_token(nbytes: int = 32) -> str:
     return secrets.token_urlsafe(nbytes)
 
 
+# ── Resource-server verification side ───────────────────────────────────────
+
+
+def verify_self_hosted_token(
+    config: AuthorizationServerConfig, token: str
+) -> dict[str, Any]:
+    """Verify a JWT was issued by this AS and return its claims.
+
+    Used by the resource-server middleware (``auth.py``) when
+    ``MNEMON_AS_ENABLED=true`` to validate bearer tokens without any
+    network hop — keys come from the local filesystem, issuer/audience
+    from the local config. This is the read-path counterpart to
+    ``mint_access_token``; the two must agree on iss/aud/alg.
+
+    Raises:
+        ValueError: on any validation failure (expired, wrong issuer,
+            wrong audience, bad signature, missing required claim).
+            The message is safe to surface in error responses — it
+            describes the class of failure, not the token internals.
+    """
+    import jwt
+
+    jwk_dict = public_key_jwk(config.key_dir)
+    # PyJWK accepts the JWK directly; no PyJWKClient round-trip needed.
+    signing_key = jwt.PyJWK(jwk_dict)
+
+    expected_aud = f"{config.issuer}/mcp"
+    try:
+        return jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=[JWT_ALG],
+            audience=expected_aud,
+            issuer=config.issuer,
+            options={"require": ["exp", "iat", "iss", "aud", "sub"]},
+        )
+    except jwt.ExpiredSignatureError as e:
+        raise ValueError("token expired") from e
+    except jwt.InvalidAudienceError as e:
+        raise ValueError(f"audience mismatch (expected {expected_aud})") from e
+    except jwt.InvalidIssuerError as e:
+        raise ValueError(f"issuer mismatch (expected {config.issuer})") from e
+    except jwt.InvalidTokenError as e:
+        raise ValueError(f"invalid token: {e}") from e
+
+
 def _issue_token_pair(
     config: AuthorizationServerConfig,
     *,

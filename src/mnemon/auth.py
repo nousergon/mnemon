@@ -172,7 +172,7 @@ class OAuthMiddleware:
             return
 
         if path == "/.well-known/oauth-protected-resource":
-            if not self.config.enabled:
+            if not self._prm_enabled():
                 await _send_json(
                     send, 404, {"error": "oauth not configured on this server"}
                 )
@@ -243,9 +243,14 @@ class OAuthMiddleware:
             return
 
         # Unauthenticated mode — pass through only when NEITHER auth method
-        # is configured. If local_token is set but OAuth is not, we still
+        # is configured. If local_token or self-hosted AS is set, we still
         # enforce auth below.
-        if not self.config.enabled and not self.config.local_token:
+        as_enabled = self.as_config is not None and self.as_config.enabled
+        if (
+            not self.config.enabled
+            and not self.config.local_token
+            and not as_enabled
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -276,11 +281,29 @@ class OAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # If only local_token is configured (no OAuth), any non-matching
-        # token is invalid — do not fall through to JWT/userinfo because
-        # neither is configured and _validate_token would raise on missing
-        # jwks_url. This path also covers the self-hosted / Phase 2 world
-        # where the OAuth block may be absent entirely.
+        # Self-hosted AS path: when MNEMON_AS_ENABLED=true, validate the
+        # token against the local JWKS. No network hop. Checked before
+        # the Auth0 path so that after the Phase 2 cutover (PR #40), we
+        # don't waste a PyJWKClient roundtrip on tokens we'll reject
+        # anyway if the Auth0 config ends up unset.
+        if as_enabled:
+            from .oauth_as import verify_self_hosted_token
+
+            try:
+                verify_self_hosted_token(self.as_config, token)
+            except ValueError as e:
+                logger.info("Self-hosted token validation failed: %s", e)
+                await self._send_401(
+                    send, error="invalid_token", description=str(e),
+                )
+                return
+            await self.app(scope, receive, send)
+            return
+
+        # If only local_token is configured (no OAuth, no AS), any non-
+        # matching token is invalid — do not fall through to JWT/userinfo
+        # because neither is configured and _validate_token would raise on
+        # missing jwks_url.
         if not self.config.enabled:
             await self._send_401(
                 send,
@@ -289,7 +312,12 @@ class OAuthMiddleware:
             )
             return
 
-        # Try JWT validation first (spec-compliant path).
+        # Auth0 / external-AS path. Kept alongside the self-hosted path
+        # above so PR #40 can be the config flip (swap env vars on Fly +
+        # reconnect claude.ai) without a code change. Once cutover is
+        # validated and claude.ai is reconnected against the self-hosted
+        # AS, this block becomes dead code and can be deleted in a
+        # follow-up — but keeping it reversible costs us nothing.
         jwt_error: _OAuthError | None = None
         try:
             self._validate_token(token)
@@ -333,12 +361,36 @@ class OAuthMiddleware:
         # Token valid — forward to downstream app.
         await self.app(scope, receive, send)
 
+    def _prm_enabled(self) -> bool:
+        """Whether to serve Protected Resource Metadata at all.
+
+        Served when any OAuth-capable auth path is active — either the
+        external-AS (Auth0) path or the self-hosted AS. Not served when
+        only MNEMON_LOCAL_TOKEN is configured (headless-only auth has
+        no PRM because there's no browser flow to bootstrap)."""
+        if self.config.enabled:
+            return True
+        if self.as_config is not None and self.as_config.enabled:
+            return True
+        return False
+
     def _protected_resource_metadata(self) -> dict[str, Any]:
-        """Build the RFC 9728 Protected Resource Metadata JSON body."""
-        assert self.config.audience and self.config.issuer
+        """Build the RFC 9728 Protected Resource Metadata JSON body.
+
+        When the self-hosted AS is enabled, the authorization_servers
+        list points at this same server's issuer; otherwise it uses the
+        external-AS (Auth0) config.
+        """
+        if self.as_config is not None and self.as_config.enabled:
+            issuer = self.as_config.issuer
+            resource = f"{issuer}/mcp"
+        else:
+            assert self.config.audience and self.config.issuer
+            issuer = self.config.issuer
+            resource = self.config.audience
         return {
-            "resource": self.config.audience,
-            "authorization_servers": [self.config.issuer],
+            "resource": resource,
+            "authorization_servers": [issuer],
             "bearer_methods_supported": ["header"],
             "resource_documentation": "https://github.com/cipher813/mnemon",
         }
@@ -479,6 +531,21 @@ class OAuthMiddleware:
 
         return profile
 
+    def _resource_metadata_url(self) -> str:
+        """Resolve the PRM URL from whichever AS config is active.
+
+        When the self-hosted AS is enabled and the external-AS (Auth0)
+        config is absent, ``config.resource_metadata_url`` would fail
+        its ``audience``-derivation fallback. Use the AS config's
+        public_url in that case. Both configs share the same Fly app
+        URL in practice, so the result is identical when both are set.
+        """
+        if self.as_config is not None and self.as_config.enabled:
+            base = self.as_config.public_url or ""
+            if base:
+                return f"{base.rstrip('/')}/.well-known/oauth-protected-resource"
+        return self.config.resource_metadata_url
+
     async def _send_401(
         self,
         send: ASGISend,
@@ -489,7 +556,7 @@ class OAuthMiddleware:
         """Return 401 with RFC 6750 + RFC 9728 WWW-Authenticate header."""
         www_auth_parts = [
             'Bearer realm="mnemon"',
-            f'resource_metadata="{self.config.resource_metadata_url}"',
+            f'resource_metadata="{self._resource_metadata_url()}"',
             f'error="{error}"',
         ]
         if description:

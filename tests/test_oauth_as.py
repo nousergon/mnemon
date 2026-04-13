@@ -1080,3 +1080,112 @@ class TestRegisterRouting:
 
         status = next(m for m in sent if m["type"] == "http.response.start")["status"]
         assert status == 201
+
+
+# ── verify_self_hosted_token (resource-server side) ─────────────────────────
+
+
+class TestVerifySelfHostedToken:
+    def test_accepts_token_minted_by_this_as(self, as_config):
+        from mnemon.oauth_as import mint_access_token, verify_self_hosted_token
+
+        token = mint_access_token(as_config, subject="owner", scope="mcp")
+        claims = verify_self_hosted_token(as_config, token)
+        assert claims["sub"] == "owner"
+        assert claims["scope"] == "mcp"
+        assert claims["iss"] == as_config.issuer
+        assert claims["aud"] == f"{as_config.issuer}/mcp"
+
+    def test_rejects_expired_token(self, as_config):
+        from mnemon.oauth_as import mint_access_token, verify_self_hosted_token
+
+        token = mint_access_token(
+            as_config, subject="owner", scope="mcp", ttl_sec=-60
+        )
+        with pytest.raises(ValueError, match="expired"):
+            verify_self_hosted_token(as_config, token)
+
+    def test_rejects_wrong_audience(self, as_config):
+        from mnemon.oauth_as import mint_access_token, verify_self_hosted_token
+
+        token = mint_access_token(
+            as_config, subject="owner", scope="mcp",
+            audience="https://some-other-resource.example",
+        )
+        with pytest.raises(ValueError, match="audience"):
+            verify_self_hosted_token(as_config, token)
+
+    def test_rejects_token_signed_by_different_key(self, as_config, tmp_path):
+        """A token minted against a different keypair must fail — the
+        resource server must not accept tokens from any RS256 issuer,
+        only ours."""
+        import jwt
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        from mnemon.oauth_as import verify_self_hosted_token
+
+        foreign_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        foreign_pem = foreign_priv.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        import time as _time
+        payload = {
+            "iss": as_config.issuer,
+            "aud": f"{as_config.issuer}/mcp",
+            "sub": "owner",
+            "iat": int(_time.time()),
+            "exp": int(_time.time()) + 60,
+            "scope": "mcp",
+        }
+        fake_token = jwt.encode(payload, foreign_pem, algorithm="RS256")
+        with pytest.raises(ValueError):
+            verify_self_hosted_token(as_config, fake_token)
+
+    def test_rejects_token_with_wrong_issuer(self, as_config):
+        """Token signed by our key but claiming a different issuer —
+        the jwt library must catch the iss mismatch."""
+        import jwt
+        from mnemon.oauth_as import ensure_keypair, verify_self_hosted_token
+
+        private_pem, _ = ensure_keypair(as_config.key_dir)
+        import time as _time
+        payload = {
+            "iss": "https://someone-else.example",
+            "aud": f"{as_config.issuer}/mcp",
+            "sub": "owner",
+            "iat": int(_time.time()),
+            "exp": int(_time.time()) + 60,
+            "scope": "mcp",
+        }
+        token = jwt.encode(payload, private_pem, algorithm="RS256")
+        with pytest.raises(ValueError, match="issuer"):
+            verify_self_hosted_token(as_config, token)
+
+    def test_rejects_malformed_token(self, as_config):
+        from mnemon.oauth_as import verify_self_hosted_token
+
+        with pytest.raises(ValueError):
+            verify_self_hosted_token(as_config, "not.a.jwt")
+
+    def test_requires_sub_claim(self, as_config):
+        """All minted tokens include sub=owner. A token missing sub —
+        maliciously or from a bug — must be rejected, not silently
+        forwarded as anonymous."""
+        import jwt
+        from mnemon.oauth_as import ensure_keypair, verify_self_hosted_token
+
+        private_pem, _ = ensure_keypair(as_config.key_dir)
+        import time as _time
+        payload = {
+            "iss": as_config.issuer,
+            "aud": f"{as_config.issuer}/mcp",
+            "iat": int(_time.time()),
+            "exp": int(_time.time()) + 60,
+            # sub intentionally omitted
+        }
+        token = jwt.encode(payload, private_pem, algorithm="RS256")
+        with pytest.raises(ValueError):
+            verify_self_hosted_token(as_config, token)

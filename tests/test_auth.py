@@ -839,3 +839,136 @@ async def test_as_metadata_404_when_as_disabled_even_if_config_provided(oauth_co
         mw, "/.well-known/oauth-authorization-server"
     )
     assert status == 404
+
+
+# --- Self-hosted AS resource-server verification (Phase 2 PR #39) ----------
+
+
+@pytest.fixture
+def enabled_as_config(tmp_path):
+    from mnemon.oauth_as import AuthorizationServerConfig
+    return AuthorizationServerConfig(
+        enabled=True,
+        public_url="https://mnemon-test.example.com",
+        passphrase="x",
+        key_dir=tmp_path,
+    )
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_token_accepted(enabled_as_config):
+    """A token minted by the local AS must be accepted when AS is enabled,
+    with no Auth0 config present — the hard-cutover path."""
+    from mnemon.oauth_as import mint_access_token
+
+    token = mint_access_token(enabled_as_config, subject="owner", scope="mcp")
+    downstream_called = []
+    app = _stub_downstream_factory(downstream_called)
+    # No external-AS config — only self-hosted.
+    mw = OAuthMiddleware(app, OAuthConfig(), as_config=enabled_as_config)
+
+    status, _, _ = await _call_middleware(
+        mw, "/mcp",
+        headers=[(b"authorization", f"Bearer {token}".encode())],
+    )
+    assert status == 200
+    assert downstream_called == [True]
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_expired_token_returns_401(enabled_as_config):
+    from mnemon.oauth_as import mint_access_token
+
+    token = mint_access_token(
+        enabled_as_config, subject="owner", scope="mcp", ttl_sec=-60
+    )
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, OAuthConfig(), as_config=enabled_as_config)
+
+    status, headers, body = await _call_middleware(
+        mw, "/mcp",
+        headers=[(b"authorization", f"Bearer {token}".encode())],
+    )
+    assert status == 401
+    assert b"expired" in body
+    # WWW-Authenticate header points at the self-hosted PRM URL
+    auth_header = headers.get(b"www-authenticate", b"")
+    assert b"mnemon-test.example.com/.well-known/oauth-protected-resource" in auth_header
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_random_garbage_returns_401(enabled_as_config):
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, OAuthConfig(), as_config=enabled_as_config)
+
+    status, _, _ = await _call_middleware(
+        mw, "/mcp",
+        headers=[(b"authorization", b"Bearer not.a.jwt")],
+    )
+    assert status == 401
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_missing_bearer_returns_401(enabled_as_config):
+    """Even with self-hosted AS as the only auth method, missing bearer
+    must still return 401 (not pass through as unauthenticated)."""
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, OAuthConfig(), as_config=enabled_as_config)
+
+    status, _, _ = await _call_middleware(mw, "/mcp")
+    assert status == 401
+
+
+@pytest.mark.asyncio
+async def test_local_token_still_works_alongside_self_hosted(enabled_as_config):
+    """Claude Code hooks authenticate via MNEMON_LOCAL_TOKEN. That path
+    must keep working when AS is the primary OAuth path — hooks can't
+    do an OAuth flow, so local_token is the only option for them."""
+    app = _stub_downstream_factory([])
+    config = OAuthConfig(local_token="hooks-token-value")
+    mw = OAuthMiddleware(app, config, as_config=enabled_as_config)
+
+    status, _, _ = await _call_middleware(
+        mw, "/mcp",
+        headers=[(b"authorization", b"Bearer hooks-token-value")],
+    )
+    assert status == 200
+
+
+@pytest.mark.asyncio
+async def test_self_hosted_prm_points_at_local_issuer(enabled_as_config):
+    """When AS is enabled, /.well-known/oauth-protected-resource must
+    advertise the local issuer, not some external AS. Without this,
+    clients doing MCP auth discovery would send users back to a dead
+    Auth0 config."""
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(app, OAuthConfig(), as_config=enabled_as_config)
+
+    status, _, body = await _call_middleware(
+        mw, "/.well-known/oauth-protected-resource"
+    )
+    assert status == 200
+    doc = json.loads(body)
+    assert doc["authorization_servers"] == ["https://mnemon-test.example.com"]
+    assert doc["resource"] == "https://mnemon-test.example.com/mcp"
+
+
+@pytest.mark.asyncio
+async def test_external_as_still_works_when_self_hosted_disabled(
+    oauth_config, rsa_keypair, mock_signing_key
+):
+    """Auth0 path must keep working when MNEMON_AS_ENABLED=false —
+    that's how PR #39 deploys without breaking the live site. The
+    cutover to self-hosted happens by flipping MNEMON_AS_ENABLED on
+    Fly in PR #40, not by merging #39."""
+    token = _mint_token(rsa_keypair["private_key"])
+    downstream_called = []
+    app = _stub_downstream_factory(downstream_called)
+    mw = OAuthMiddleware(app, oauth_config)  # no as_config
+
+    status, _, _ = await _call_middleware(
+        mw, "/mcp",
+        headers=[(b"authorization", f"Bearer {token}".encode())],
+    )
+    assert status == 200
+    assert downstream_called == [True]
