@@ -150,6 +150,10 @@ def main() -> None:
         from .setup import run_setup
         print(run_setup(target, args[2:]))
 
+    elif command == "doctor":
+        from .doctor import run_doctor
+        sys.exit(run_doctor())
+
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         _print_usage()
@@ -161,6 +165,7 @@ def _print_usage() -> None:
 
 Setup (configure clients to use remote vault):
   mnemon setup <target>     Configure integration [--remote-url URL] [--token TOKEN]
+  mnemon doctor             Run diagnostics against the configured remote vault
 
 Server:
   mnemon serve              Start MCP server (stdio, local development)
