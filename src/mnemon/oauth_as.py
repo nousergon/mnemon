@@ -304,7 +304,8 @@ _refresh_tokens: dict[str, dict[str, Any]] = {}
 
 def _reset_state_for_tests() -> None:
     """Clear module-level state. Test-only helper — prevents cross-test
-    leakage since auth codes and refresh tokens live in module globals."""
+    leakage since auth codes and refresh tokens live in module globals.
+    Does NOT touch clients.json (that's per-tmp-path in tests)."""
     _auth_codes.clear()
     _refresh_tokens.clear()
 
@@ -538,6 +539,32 @@ def _validate_authorize_params(params: dict[str, str]) -> str | None:
     return None
 
 
+def _validate_registered_client(
+    config: AuthorizationServerConfig, client_id: str, redirect_uri: str
+) -> str | None:
+    """Return an error message if ``client_id`` is unknown or the given
+    ``redirect_uri`` is not one this client registered with.
+
+    Unknown-client rejection prevents a stranger from initiating an auth
+    flow with a made-up client_id. Redirect-URI pinning prevents an
+    attacker from hijacking a legitimate client_id and redirecting the
+    auth code to a URI the client's owner never registered.
+    """
+    client = get_client(config, client_id)
+    if client is None:
+        return (
+            "unknown client_id; clients must register via /oauth/register "
+            "before starting an authorize flow"
+        )
+    registered_uris = client.get("redirect_uris", [])
+    if redirect_uri not in registered_uris:
+        return (
+            f"redirect_uri not registered for this client; registered: "
+            f"{registered_uris}"
+        )
+    return None
+
+
 async def serve_authorize(
     config: AuthorizationServerConfig, scope: dict, receive, send
 ) -> None:
@@ -557,6 +584,14 @@ async def serve_authorize(
         if err:
             await _send_json(send, 400, {"error": "invalid_request", "error_description": err})
             return
+        client_err = _validate_registered_client(
+            config, params["client_id"], params["redirect_uri"]
+        )
+        if client_err:
+            await _send_json(send, 400, {
+                "error": "invalid_request", "error_description": client_err,
+            })
+            return
         await _send_html(send, 200, _render_login_form(params))
         return
 
@@ -570,6 +605,14 @@ async def serve_authorize(
     err = _validate_authorize_params(params)
     if err:
         await _send_json(send, 400, {"error": "invalid_request", "error_description": err})
+        return
+    client_err = _validate_registered_client(
+        config, params["client_id"], params["redirect_uri"]
+    )
+    if client_err:
+        await _send_json(send, 400, {
+            "error": "invalid_request", "error_description": client_err,
+        })
         return
 
     passphrase = params.get("passphrase", "")
@@ -747,3 +790,186 @@ async def _token_refresh(
         client_id=record["client_id"],
     )
     await _send_json(send, 200, tokens)
+
+
+# ── /oauth/register — Dynamic Client Registration (RFC 7591) ────────────────
+#
+# MCP clients (claude.ai web, Claude Desktop, Claude mobile) use DCR to
+# self-register without a human manually creating a client config. We
+# only support public clients (no client_secret) since all MCP clients
+# are public — authentication happens via PKCE on the token endpoint.
+#
+# Clients are persisted to ``{key_dir}/clients.json`` so a server
+# restart doesn't invalidate claude.ai's cached client_id. The file
+# starts empty; each DCR request appends one entry.
+
+
+_CLIENTS_FILENAME = "clients.json"
+
+
+def _clients_path(config: AuthorizationServerConfig) -> Path:
+    return config.key_dir / _CLIENTS_FILENAME
+
+
+def _load_clients(config: AuthorizationServerConfig) -> dict[str, dict[str, Any]]:
+    path = _clients_path(config)
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(
+            "oauth_as: clients.json unreadable (%s); treating as empty. "
+            "Registered clients will need to re-register.",
+            e,
+        )
+        return {}
+
+
+def _save_clients(
+    config: AuthorizationServerConfig, clients: dict[str, dict[str, Any]]
+) -> None:
+    path = _clients_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write then atomic-rename so a crash mid-write doesn't corrupt the
+    # clients file. Failing that write would force all registered
+    # clients to re-register on next use.
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(clients, indent=2))
+    tmp.replace(path)
+
+
+def get_client(config: AuthorizationServerConfig, client_id: str) -> dict[str, Any] | None:
+    """Look up a registered client by id. Returns None if not found.
+
+    Used by /authorize and /token to reject unknown client_ids (which
+    before DCR was implemented, were silently accepted — any string
+    worked). That check lands in this PR alongside the registry.
+    """
+    clients = _load_clients(config)
+    return clients.get(client_id)
+
+
+def register_client(
+    config: AuthorizationServerConfig, metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist a new client registration and return the RFC 7591 response.
+
+    Generates a new ``client_id``, stores the provided metadata, and
+    returns the registration response (which includes the client_id the
+    caller should use going forward). ``client_id_issued_at`` is set to
+    the current unix timestamp per RFC 7591.
+
+    No ``client_secret`` is returned because this AS only supports
+    public clients (PKCE). This matches the
+    ``token_endpoint_auth_methods_supported=["none"]`` advertised in
+    the AS metadata.
+    """
+    client_id = _new_random_token(16)
+    now = _now()
+    record = {
+        "client_id": client_id,
+        "client_id_issued_at": now,
+        "token_endpoint_auth_method": "none",  # public client
+        **metadata,
+    }
+    clients = _load_clients(config)
+    clients[client_id] = record
+    _save_clients(config, clients)
+    return record
+
+
+def _validate_registration_metadata(metadata: dict[str, Any]) -> str | None:
+    """Return an error description if the client metadata is invalid,
+    else None. Strict: reject anything that would let a later /authorize
+    or /token fail in a hard-to-debug way."""
+    redirect_uris = metadata.get("redirect_uris")
+    if not redirect_uris or not isinstance(redirect_uris, list):
+        return "redirect_uris is required and must be a non-empty array"
+    for uri in redirect_uris:
+        if not isinstance(uri, str) or not uri:
+            return "redirect_uris entries must be non-empty strings"
+        # RFC 7591 doesn't mandate HTTPS, but for public clients over
+        # the internet it's the only safe choice. Allow localhost for
+        # local dev (http://localhost, http://127.0.0.1). Reject all
+        # other http URIs — prevents claude.ai-ish clients from
+        # accidentally registering non-TLS callbacks.
+        if uri.startswith("http://") and not (
+            uri.startswith("http://localhost")
+            or uri.startswith("http://127.0.0.1")
+        ):
+            return f"redirect_uris must use https:// (not {uri!r})"
+
+    grant_types = metadata.get("grant_types")
+    if grant_types is not None:
+        if not isinstance(grant_types, list):
+            return "grant_types must be an array"
+        allowed = {"authorization_code", "refresh_token"}
+        unsupported = [g for g in grant_types if g not in allowed]
+        if unsupported:
+            return (
+                f"grant_types contains unsupported values: {unsupported}. "
+                f"Only {sorted(allowed)} are supported."
+            )
+
+    response_types = metadata.get("response_types")
+    if response_types is not None:
+        if not isinstance(response_types, list) or response_types != ["code"]:
+            return "response_types must be [\"code\"] (OAuth 2.1)"
+
+    return None
+
+
+async def serve_register(
+    config: AuthorizationServerConfig, scope: dict, receive, send
+) -> None:
+    """ASGI handler: POST /oauth/register (RFC 7591 DCR).
+
+    Accepts client metadata as JSON, generates a new client_id, persists
+    the registration, and returns the full registration response. No
+    client_secret issued — public clients with PKCE only.
+    """
+    from .auth import _send_json
+
+    if not config.enabled:
+        await _send_json(send, 404, {"error": "authorization server not enabled"})
+        return
+    if scope.get("method", "GET").upper() != "POST":
+        await _send_json(send, 405, {"error": "method_not_allowed"})
+        return
+
+    body = await _read_body(receive)
+    try:
+        metadata = json.loads(body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        await _send_json(send, 400, {
+            "error": "invalid_client_metadata",
+            "error_description": f"request body must be valid JSON: {e}",
+        })
+        return
+
+    if not isinstance(metadata, dict):
+        await _send_json(send, 400, {
+            "error": "invalid_client_metadata",
+            "error_description": "request body must be a JSON object",
+        })
+        return
+
+    err = _validate_registration_metadata(metadata)
+    if err:
+        await _send_json(send, 400, {
+            "error": "invalid_client_metadata",
+            "error_description": err,
+        })
+        return
+
+    try:
+        registration = register_client(config, metadata)
+    except OSError as e:
+        logger.exception("oauth_as: failed to persist client registration")
+        await _send_json(send, 500, {
+            "error": "server_error",
+            "error_description": f"could not persist registration: {e}",
+        })
+        return
+    await _send_json(send, 201, registration)
