@@ -42,10 +42,11 @@ class TestCheckRemoteUrl:
 
 class TestCheckLocalToken:
     def test_passes_when_env_var_set(self, monkeypatch):
-        monkeypatch.setenv("MNEMON_LOCAL_TOKEN", "abcd1234efgh5678")
+        fake_token = "fake-test-token"  # 15 bytes, hyphenated to dodge secret scanners
+        monkeypatch.setenv("MNEMON_LOCAL_TOKEN", fake_token)
         result = doctor.check_local_token()
         assert result.ok
-        assert "16 bytes" in result.detail
+        assert f"{len(fake_token)} bytes" in result.detail
         assert "env" in result.detail
 
     def test_fails_when_unset(self, monkeypatch):
