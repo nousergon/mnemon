@@ -199,6 +199,20 @@ Requires the AWS CLI (`aws`) on your PATH with valid credentials.
 - **Intelligence** (optional): Local 1.7B LLM (QMD-query-expansion) for query expansion, contradiction detection, session extraction — zero API cost
 - **Transport**: MCP stdio (local) and Streamable HTTP (remote)
 
+## Design decisions
+
+A small set of architectural choices shape the rest of the system. Documented here so self-host users know what they're signing up for and reviewers can evaluate the trade-offs.
+
+**Why SQLite + FTS5 (not Postgres, not a vector DB).** A single-file embedded database means no operational surface area — no connection pools, no migrations against a live DB, no standalone vector store to keep in sync. FTS5 gives production-grade BM25 without a separate Elasticsearch. A numpy-backed vector store sits alongside the SQLite file; brute-force cosine over a few thousand memories is faster than any network hop to a hosted vector DB. The single-file design also makes vault portability trivial — copy one file and you've moved your entire memory.
+
+**Why hybrid BM25 + vector (not pure semantic).** Pure vector search misses exact-identifier lookups; pure keyword misses paraphrase. Reciprocal Rank Fusion combines both rankings, then composite scoring folds in recency and confidence. In practice this catches both "find my note about bge-small-en-v1.5" (keyword wins) and "memory about embedding models" (vector wins) without tuning.
+
+**Why Fly.io (not AWS / GCP).** mnemon is designed to idle cheaply and wake on demand. Fly's `auto_stop_machines` + `min_machines_running=0` costs ~$0.50–0.90/mo for a personal vault; the closest AWS equivalent (ECS Fargate or App Runner) can't scale to zero and starts at ~$10/mo. Fly volumes are local-attached SSD, which matches SQLite's access pattern — AWS's equivalent (EFS) is slower and pricier. Deploy is one `fly.toml` and one command, vs. the VPC + ALB + ECS + IAM setup AWS requires — which matters for any future self-host user.
+
+**Why self-hosted OAuth 2.1 + PKCE + DCR (not Auth0 / Clerk / Logto).** Requiring users to register an Auth0 tenant before they can try mnemon is a near-guaranteed bounce. mnemon ships with its own Authorization Server (well-known endpoints, `/oauth/authorize`, `/oauth/token` with PKCE, `/oauth/register` per RFC 7591, JWT issuance) — anyone can `fly deploy` and have a working OAuth-protected MCP endpoint with no third-party signup. The trade-off is less battle-tested auth code; the mitigation is that browser clients are the only OAuth consumers, and headless clients (Claude Code, Cursor) use a simple static bearer.
+
+**Why MCP + a separate memory server (not Claude's native memory).** Claude's native memory is account-scoped and only reaches Anthropic products (claude.ai web/mobile/desktop). It doesn't reach Claude Code, Cursor, or any other MCP-speaking client. mnemon serves the cross-client case: a single vault that Claude Code hooks, Cursor, and claude.ai can all read and write. It's also self-hosted, exportable, and programmatically introspectable — the opposite of Anthropic's closed-box model. These systems are complementary, not competing.
+
 ## Configuration
 
 | Env var | Default | Description |

@@ -191,8 +191,13 @@ def check_round_trip() -> CheckResult:
     """
     import uuid
 
-    title = f"mnemon-doctor-probe-{uuid.uuid4().hex[:8]}"
-    content = "Probe memory created by `mnemon doctor`. Safe to delete."
+    # Use the UUID in both title AND content. store.save() dedups by SHA-256
+    # of content, so identical content across runs would return the original
+    # doc_id without actually inserting a new row — and the search for the
+    # run-specific title would then miss.
+    probe_id = uuid.uuid4().hex[:8]
+    title = f"mnemon-doctor-probe-{probe_id}"
+    content = f"Probe memory created by `mnemon doctor` (run {probe_id}). Safe to delete."
 
     # 1. Save
     try:

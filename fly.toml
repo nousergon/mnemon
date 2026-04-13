@@ -19,6 +19,17 @@ primary_region = "sjc"
   auto_start_machines = true
   min_machines_running = 0
 
+  # First request after a cold start loads the FastEmbed bge-small-en-v1.5
+  # ONNX model (~15–25s). grace_period must be longer than that to avoid
+  # false-positive "app not listening on 0.0.0.0:8080" warnings during
+  # rolling deploys and `fly secrets set` restarts.
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "40s"
+    method = "GET"
+    path = "/health"
+
 [mounts]
   source = "mnemon_data"
   destination = "/data"
