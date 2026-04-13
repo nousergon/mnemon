@@ -1,0 +1,10 @@
+# False positives allowlisted by fingerprint (commit:file:rule:line).
+# Each entry should have a comment explaining why it's not a real secret.
+
+# Fake test token literal in mnemon doctor test. The value
+# "abcd1234efgh5678" is 16 alphanumeric chars, which matches gitleaks'
+# generic-api-key heuristic because the surrounding variable name
+# contains MNEMON_LOCAL_TOKEN. Replaced in commit 176b367 with a
+# hyphenated obviously-fake value, but the finding on the original
+# commit 458a442 still shows up in PR-range scans.
+458a4428d6372339f942d1b2b14701c892cddde5:tests/test_doctor.py:generic-api-key:45
