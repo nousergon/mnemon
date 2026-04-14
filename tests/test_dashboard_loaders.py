@@ -222,3 +222,28 @@ class TestLoadVectorsCollapsed:
                                      "truncated": False, "items": []}),
         ):
             assert no_streamlit_cache.load_vectors_collapsed() is None
+
+
+class TestRemoteTimeout:
+    """The dashboard must override the hook client's 8s default — it's a
+    browser-facing surface, not a hook, so a cold Fly instance + a 87-vec
+    export would otherwise blow the timeout."""
+
+    def test_default_timeout_is_dashboard_not_hook(self, remote, no_streamlit_cache):
+        with patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=("{}", 0.01),
+        ) as mock_call:
+            no_streamlit_cache._call_remote("memory_status", {})
+        assert mock_call.call_args.kwargs["timeout"] == 30.0
+
+    def test_vector_export_uses_longer_timeout(self, remote, no_streamlit_cache):
+        with patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=(
+                json.dumps({"count": 0, "dim": 384, "truncated": False, "items": []}),
+                0.01,
+            ),
+        ) as mock_call:
+            no_streamlit_cache.load_vectors()
+        assert mock_call.call_args.kwargs["timeout"] == 60.0
