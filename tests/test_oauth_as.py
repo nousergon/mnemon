@@ -538,7 +538,7 @@ class TestServeAuthorizePost:
     async def test_correct_passphrase_redirects_with_code(
         self, as_config, registered_client
     ):
-        from mnemon.oauth_as import _auth_codes, serve_authorize
+        from mnemon.oauth_as import _load_auth_codes, serve_authorize
 
         cid = registered_client["client_id"]
         _, challenge = _pkce_pair()
@@ -557,8 +557,8 @@ class TestServeAuthorizePost:
         qs = parse_qs(parsed.query)
         assert "code" in qs
         assert qs["state"] == ["xyz"]
-        # Code stored server-side for later exchange
-        assert qs["code"][0] in _auth_codes
+        # Code persisted to auth_codes.json for later exchange
+        assert qs["code"][0] in _load_auth_codes(as_config)
 
 
 # ── /oauth/token ────────────────────────────────────────────────────────────
@@ -1189,3 +1189,152 @@ class TestVerifySelfHostedToken:
         token = jwt.encode(payload, private_pem, algorithm="RS256")
         with pytest.raises(ValueError):
             verify_self_hosted_token(as_config, token)
+
+
+# ── Volume-backed persistence of auth codes + refresh tokens ────────────────
+
+
+class TestStatePersistence:
+    """Auth codes and refresh tokens must survive process restarts so
+    Fly autostop wake doesn't force every claude.ai client to re-enter
+    the passphrase. File format: JSON at ``{key_dir}/auth_codes.json``
+    and ``{key_dir}/refresh_tokens.json``, mode 0600."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_survives_simulated_restart(
+        self, as_config, registered_client
+    ):
+        """Issue a refresh token, simulate a restart (drop in-memory
+        state by reimporting the module), then redeem via /token —
+        must succeed because the token was persisted to disk."""
+        import importlib
+        import mnemon.oauth_as as as_mod
+
+        issued = as_mod._issue_token_pair(
+            as_config,
+            subject="owner",
+            scope="mcp",
+            client_id=registered_client["client_id"],
+        )
+        refresh_token = issued["refresh_token"]
+
+        # Simulate restart: re-import the module so any module-level
+        # caches are dropped. The on-disk refresh_tokens.json must be
+        # the sole source of truth.
+        as_mod = importlib.reload(as_mod)
+
+        body = (
+            f"grant_type=refresh_token&refresh_token={refresh_token}"
+        ).encode()
+        status, _, resp_body = await _run_asgi(
+            as_mod.serve_token, as_config, method="POST", body=body
+        )
+        assert status == 200, resp_body
+        resp = json.loads(resp_body)
+        assert "access_token" in resp
+        assert "refresh_token" in resp
+        # Rotation: old token must no longer be redeemable.
+        assert resp["refresh_token"] != refresh_token
+
+    def test_refresh_tokens_file_is_mode_0600(
+        self, as_config, registered_client
+    ):
+        """Refresh tokens are bearer-equivalent secrets; file perms must
+        match the AS private key (0600)."""
+        from mnemon.oauth_as import _issue_token_pair, _refresh_tokens_path
+
+        _issue_token_pair(
+            as_config, subject="owner", scope="mcp",
+            client_id=registered_client["client_id"],
+        )
+        path = _refresh_tokens_path(as_config)
+        assert path.exists()
+        mode = path.stat().st_mode & 0o777
+        assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+
+    def test_expired_refresh_tokens_pruned_on_load(self, as_config):
+        """Entries past their expires_at must be dropped on load so the
+        file doesn't grow forever."""
+        from mnemon.oauth_as import (
+            _load_refresh_tokens,
+            _refresh_tokens_path,
+            _save_refresh_tokens,
+            _now,
+        )
+
+        _save_refresh_tokens(as_config, {
+            "fresh": {"subject": "owner", "scope": "mcp",
+                      "client_id": "c", "expires_at": _now() + 3600},
+            "stale": {"subject": "owner", "scope": "mcp",
+                      "client_id": "c", "expires_at": _now() - 1},
+        })
+        loaded = _load_refresh_tokens(as_config)
+        assert "fresh" in loaded
+        assert "stale" not in loaded
+
+    def test_corrupt_refresh_tokens_file_treated_as_empty(self, as_config):
+        """Unreadable JSON must not crash the server — affected clients
+        just re-auth, which is the same fallback as losing the dict."""
+        from mnemon.oauth_as import _load_refresh_tokens, _refresh_tokens_path
+
+        _refresh_tokens_path(as_config).write_text("{{not valid json")
+        assert _load_refresh_tokens(as_config) == {}
+
+    @pytest.mark.asyncio
+    async def test_auth_code_survives_simulated_restart(
+        self, as_config, registered_client
+    ):
+        """Issue an auth code via /authorize, simulate a restart, then
+        redeem at /token — must succeed. Covers the edge case where the
+        machine idles between authorize and token steps of an OAuth
+        flow."""
+        from mnemon.oauth_as import (
+            _load_auth_codes,
+            serve_authorize,
+            serve_token,
+        )
+
+        cid = registered_client["client_id"]
+        verifier, challenge = _pkce_pair()
+        form = (
+            f"client_id={cid}&redirect_uri=https://client/cb&"
+            f"response_type=code&code_challenge={challenge}&"
+            f"code_challenge_method=S256&passphrase=correct-horse-battery"
+        ).encode()
+        status, headers, _ = await _run_asgi(
+            serve_authorize, as_config, method="POST", body=form
+        )
+        assert status == 302
+        code = parse_qs(urlparse(headers["location"]).query)["code"][0]
+
+        # Confirm code persisted to disk, not just a dict.
+        assert code in _load_auth_codes(as_config)
+
+        # Simulate restart: in-memory state gone, but file survives.
+        token_body = (
+            f"grant_type=authorization_code&code={code}&"
+            f"redirect_uri=https://client/cb&client_id={cid}&"
+            f"code_verifier={verifier}"
+        ).encode()
+        status, _, resp_body = await _run_asgi(
+            serve_token, as_config, method="POST", body=token_body
+        )
+        assert status == 200, resp_body
+        resp = json.loads(resp_body)
+        assert "access_token" in resp
+
+    def test_auth_codes_file_is_mode_0600(self, as_config):
+        """Auth codes are short-lived but still authorization-grant
+        material; match private-key perms."""
+        from mnemon.oauth_as import _auth_codes_path, _save_auth_codes, _now
+
+        _save_auth_codes(as_config, {
+            "c": {"client_id": "x", "redirect_uri": "https://x/cb",
+                  "code_challenge": "x", "code_challenge_method": "S256",
+                  "scope": "mcp", "subject": "owner",
+                  "expires_at": _now() + 60},
+        })
+        mode = _auth_codes_path(as_config).stat().st_mode & 0o777
+        assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+
+
