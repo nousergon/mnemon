@@ -5,18 +5,20 @@ import streamlit as st
 st.set_page_config(page_title="Memory Graph — mnemon", layout="wide")
 st.title("Memory Graph")
 
-from mnemon.dashboard.loaders import load_vectors, load_umap_coords, build_vector_doc_map, load_related
+from mnemon.dashboard.loaders import load_vectors, load_umap_coords, load_related
 from mnemon.dashboard.charts import make_graph_scatter, add_relation_edges
 
 CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
 
-# Load vectors
+# Load vectors — post-0.5.0 loaders.load_vectors returns a 3-tuple with
+# the vec_id → doc map baked in (remote: from memory_export_vectors,
+# local: joined from SQLite).
 vec_data = load_vectors()
 if vec_data is None:
     st.warning("No vectors found. Save some memories with embeddings first.")
     st.stop()
 
-vec_ids, vectors = vec_data
+vec_ids, vectors, doc_map = vec_data
 
 if len(vec_ids) < 5:
     st.warning(f"Only {len(vec_ids)} vectors — need at least 5 for UMAP projection.")
@@ -36,8 +38,7 @@ show_edges = st.sidebar.checkbox("Show relation edges", value=True)
 with st.spinner("Computing UMAP projection..."):
     coords_2d = load_umap_coords(vectors, n_neighbors=n_neighbors)
 
-# Map vectors to documents
-doc_map = build_vector_doc_map(vec_ids)
+# doc_map is already populated by load_vectors() — no extra query needed.
 
 # Build scatter plot
 fig = make_graph_scatter(coords_2d, vec_ids, doc_map, visible_types=set(visible_types))

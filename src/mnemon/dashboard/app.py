@@ -33,8 +33,13 @@ def _render_sweep_candidates(sweep: dict) -> None:
 
 
 def main() -> None:
+    from mnemon.dashboard.loaders import _use_remote
+
     st.title("mnemon — Memory Vault")
-    st.caption("Long-term memory for AI agents")
+    st.caption(
+        "Long-term memory for AI agents"
+        + (" · remote" if _use_remote() else " · local")
+    )
 
     status = load_status()
     if not status or status["total_documents"] == 0:
