@@ -184,7 +184,7 @@ The real `fly.toml` is gitignored — it holds your specific app identity. `fly.
 
 ```bash
 fly launch --copy-config --no-deploy      # creates the app from your edited fly.toml; no deploy yet
-fly volume create mnemon_data --size 1 --region sjc   # 1GB is enough for thousands of memories; use the same region as primary_region
+fly volume create mnemon_data --size 1 --region sjc --yes   # 1GB fits thousands of memories; match primary_region; --yes skips the single-region-volume confirmation prompt
 ```
 
 Without the volume step, every restart wipes your vault — the `[mounts]` block in `fly.toml` expects `mnemon_data` to exist.
