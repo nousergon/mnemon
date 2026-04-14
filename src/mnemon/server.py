@@ -14,7 +14,6 @@ import os
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from .config import CONTENT_TYPE_VALUES
 from .search import search
 from .store import Store
 

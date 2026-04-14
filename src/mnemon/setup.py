@@ -175,7 +175,10 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
 
     if remote_url:
         _ensure_remote_url(remote_url)
-        local_token = _ensure_local_token(token)
+        # Call for side-effect only (writes ~/.mnemon/local_token); the
+        # Claude-Code path doesn't need the token string back — hooks
+        # read the file directly at invocation time.
+        _ensure_local_token(token)
         lines.append(f"  Remote URL: {remote_url}")
         lines.append(f"  Token file: {LOCAL_TOKEN_FILE} (chmod 600)")
 

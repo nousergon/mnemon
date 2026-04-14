@@ -1,6 +1,8 @@
 # Changelog
 
-## [0.4.2] - 2026-04-14
+## [0.4.3] - 2026-04-14
+
+Rolls up all 0.4.2 changes (which was built but never uploaded to PyPI) plus a final ruff-clean pass.
 
 ### Fixed
 - **`mnemon doctor` round-trip now actually forgets the probe memory.** Previously called `memory_forget` with wrong kwarg (`document_id` vs `id`); FastMCP returned a tool-error payload rather than raising, so the save/search/forget check always reported success while leaking probe memories into the vault on every run (PR #54).
@@ -8,9 +10,15 @@
 ### Changed
 - `MMR_DEMOTION_FACTOR`, `QUERY_EXPANSION_MAX_TOKENS`, `CONTRADICTION_OVERLAP_THRESHOLD` (renamed from `OVERLAP_THRESHOLD`), and `CONTRADICTION_CONTEXT_MAX_CHARS` moved from inline literals to `config.py`. Tunable surface now discoverable in one file (PR #54).
 - Hook error logging consolidated via `framework.log_hook_error(hook_name, context, exc)`. All three hooks (`context_surfacing`, `session_extractor`, `handoff_generator`) now emit a single greppable format: `mnemon {hook} {context}: {Type}: {message}`. Nine call sites replaced (PR #55).
-- `Store.save()` dropped the unused `path` kwarg. Path was auto-generated in every call; the parameter had no callers. **Minor API break** — removed in 0.4.2 rather than deferring to a major version since 0.4.1 was published for only a few hours with no known external adoption (PR #55).
+- `Store.save()` dropped the unused `path` kwarg. Path was auto-generated in every call; the parameter had no callers. **Minor API break** — removed rather than deferring to a major version since 0.4.1 was published for only a few hours with no known external adoption (PR #55).
 - `DEFAULT_CONFIDENCE` lookups in `contradiction.py` and `store.py` switched from `.get(ct, 0.5)` to strict `[ct]`. The enum has an explicit mapping for every value; the fallback was dead code that would mask future enum additions (PR #54).
 - `llm.try_generate` now logs a WARNING on LLM failure instead of silently returning `None`. LLM is optional infra but hidden crashes (OOM, llama-cpp version mismatch) previously had no operator signal (PR #54).
+
+### Removed (dead code / lint cleanup)
+- `contradiction.SearchResult` import, `server.CONTENT_TYPE_VALUES` import, `store.dataclasses.field` import, and a dead `local_token = _ensure_local_token(...)` assignment in `setup.py` — all caught by `ruff check --select F`.
+- Renamed ambiguous `l` loop variables to `label` / `line` in `charts.py` and `handoff_generator.py` (E741).
+- Added `[tool.ruff.lint.per-file-ignores]` suppressing E402 under `src/mnemon/dashboard/` — Streamlit pages require `st.set_page_config(...)` before other imports, legit convention.
+- Test-count claims switched from fixed "460 tests" to drift-tolerant "450+ tests" in `README.md` and `CLAUDE.md`.
 
 ## [0.4.1] - 2026-04-14
 
