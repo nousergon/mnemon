@@ -194,7 +194,7 @@ class Store:
         content_hash = _sha256(content)
         ct = ContentType(content_type)
         mt = MEMORY_TYPE_MAP.get(ct, MemoryType.SEMANTIC)
-        conf = confidence if confidence is not None else DEFAULT_CONFIDENCE.get(ct, 0.5)
+        conf = confidence if confidence is not None else DEFAULT_CONFIDENCE[ct]
 
         # Upsert content (idempotent)
         self.db.execute(

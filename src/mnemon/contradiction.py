@@ -17,10 +17,16 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
+from .config import (
+    CONTRADICTION_CONTEXT_MAX_CHARS,
+    CONTRADICTION_OVERLAP_THRESHOLD,
+    DEFAULT_CONFIDENCE,
+    HALF_LIVES,
+)
+
 if TYPE_CHECKING:
     from .store import SearchResult, Store
 
-OVERLAP_THRESHOLD = 0.7  # minimum vector similarity to consider overlapping
 UPDATE_DECAY = 0.15      # confidence reduction for superseded memories
 CONTRADICTION_DECAY = 0.25
 CONFIDENCE_FLOOR = 0.2
@@ -62,7 +68,7 @@ def check_contradictions(
     # Filter to genuinely overlapping results (exclude self)
     candidates = [
         r for r in overlapping
-        if r.doc_id != new_doc_id and r.score >= OVERLAP_THRESHOLD
+        if r.doc_id != new_doc_id and r.score >= CONTRADICTION_OVERLAP_THRESHOLD
     ]
 
     if not candidates:
@@ -78,9 +84,9 @@ def check_contradictions(
         try:
             prompt = (
                 f"Existing memory:\nTitle: {candidate.title}\n"
-                f"Content: {candidate.content[:500]}\n\n"
+                f"Content: {candidate.content[:CONTRADICTION_CONTEXT_MAX_CHARS]}\n\n"
                 f"New memory:\nTitle: {new_title}\n"
-                f"Content: {new_content[:500]}"
+                f"Content: {new_content[:CONTRADICTION_CONTEXT_MAX_CHARS]}"
             )
 
             response = generate(CLASSIFY_SYSTEM_PROMPT, prompt, max_tokens=10)
@@ -131,8 +137,6 @@ def check_contradictions(
 
 # ── Confidence Decay ────────────────────────────────────────────────────────
 
-from .config import DEFAULT_CONFIDENCE, HALF_LIVES  # noqa: E402
-
 
 def apply_confidence_decay(store: "Store") -> int:
     """Apply time-based confidence decay to all documents.
@@ -166,7 +170,11 @@ def apply_confidence_decay(store: "Store") -> int:
 
             # Exponential decay: base_confidence * 2^(-age/halflife)
             decay_factor = math.pow(2, -row["age_days"] / effective_half_life)
-            base_confidence = DEFAULT_CONFIDENCE.get(content_type, 0.5)
+            # Strict lookup — every ContentType has an explicit mapping in
+            # config.DEFAULT_CONFIDENCE, so a KeyError here means someone
+            # added an enum value without updating the map. Fail loud
+            # instead of silently falling back to a made-up 0.5.
+            base_confidence = DEFAULT_CONFIDENCE[content_type]
             decayed_confidence = max(CONFIDENCE_FLOOR, base_confidence * decay_factor)
 
             # Only update if confidence changed meaningfully

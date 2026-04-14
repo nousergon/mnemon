@@ -334,7 +334,7 @@ class TestCheckRoundTrip:
         assert not result.ok
         assert "search failed" in result.detail
         # Best-effort cleanup should still have fired
-        assert forget_calls == [{"document_id": 999}]
+        assert forget_calls == [{"id": 999}]
 
     def test_forget_failure_warns_but_passes(self):
         save_response = 'Saved memory #999: "mnemon-doctor-probe-xx"'
@@ -374,7 +374,7 @@ class TestCheckRoundTrip:
 
         assert not result.ok
         assert "not found by search" in result.detail
-        assert forget_calls == [{"document_id": 999}]
+        assert forget_calls == [{"id": 999}]
 
 
 # ── run_doctor end-to-end ───────────────────────────────────────────────────

@@ -8,12 +8,12 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 import pytest
 
+from mnemon.config import CONTRADICTION_OVERLAP_THRESHOLD as OVERLAP_THRESHOLD
 from mnemon.store import Store, SearchResult
 from mnemon.contradiction import (
     CONFIDENCE_FLOOR,
     CONTRADICTION_DECAY,
     UPDATE_DECAY,
-    OVERLAP_THRESHOLD,
     check_contradictions,
     apply_confidence_decay,
 )
