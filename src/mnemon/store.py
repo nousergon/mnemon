@@ -186,7 +186,6 @@ class Store:
         content: str,
         content_type: str = "note",
         collection: str = "default",
-        path: str | None = None,
         source_client: str | None = None,
         confidence: float | None = None,
     ) -> int:
@@ -215,9 +214,10 @@ class Store:
             self.db.commit()
             return row["id"]
 
-        # Generate path if not provided
-        if path is None:
-            path = f"{content_type}/{int(time.time() * 1000)}-{content_hash[:8]}"
+        # Auto-generate a stable path key — content-addressed, sortable by
+        # creation time. Callers have never needed to override this so the
+        # parameter was removed in 0.4.2.
+        path = f"{content_type}/{int(time.time() * 1000)}-{content_hash[:8]}"
 
         cur = self.db.execute(
             """INSERT INTO documents (collection, path, title, hash, content_type, memory_type, confidence, source_client)

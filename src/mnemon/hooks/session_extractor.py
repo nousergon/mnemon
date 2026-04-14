@@ -167,7 +167,7 @@ def is_duplicate_remote(title: str, content: str) -> bool:
 
 def main() -> None:
     try:
-        from .framework import read_stdin, read_transcript
+        from .framework import log_hook_error, read_stdin, read_transcript
         from ._remote_client import RemoteClientConfigError, call_tool_sync
 
         hook_input = read_stdin()
@@ -206,19 +206,16 @@ def main() -> None:
                 saved += 1
                 print(f'mnemon: saved [{content_type}] "{obs["title"]}"', file=sys.stderr)
             except RemoteClientConfigError as e:
-                print(f"mnemon session-extractor config error: {e}", file=sys.stderr)
+                log_hook_error("session-extractor", "config error", e)
                 return
             except Exception as e:
-                print(
-                    f"mnemon session-extractor save error: {type(e).__name__}: {e}",
-                    file=sys.stderr,
-                )
+                log_hook_error("session-extractor", "save error", e)
                 continue
 
         if saved > 0:
             print(f"mnemon: extracted {saved} observations from session", file=sys.stderr)
     except Exception as e:
-        print(f"mnemon session-extractor error: {e}", file=sys.stderr)
+        log_hook_error("session-extractor", "error", e)
 
 
 if __name__ == "__main__":

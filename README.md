@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-460_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
-[![PyPI](https://img.shields.io/badge/PyPI-v0.4.1-blue.svg)](https://pypi.org/project/mnemon-memory/)
+[![PyPI](https://img.shields.io/badge/PyPI-v0.4.2-blue.svg)](https://pypi.org/project/mnemon-memory/)
 
 > One memory vault. Every MCP client. Self-hosted, no third-party auth.
 

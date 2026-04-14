@@ -93,6 +93,7 @@ def main() -> None:
         from .framework import (
             is_duplicate,
             is_noise,
+            log_hook_error,
             mark_seen,
             read_stdin,
             write_output,
@@ -118,12 +119,13 @@ def main() -> None:
             # visible warning block so the user sees it in the prompt context,
             # not just buried in stderr. Do NOT mark_seen — the user can fix
             # the config and retry the same prompt immediately.
-            msg = f"⚠ mnemon config error: {e}"
-            print(f"mnemon context-surfacing config error: {e}", file=sys.stderr)
+            log_hook_error("context-surfacing", "config error", e)
             write_output({
                 "hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
-                    "additionalContext": build_warning_context(msg),
+                    "additionalContext": build_warning_context(
+                        f"⚠ mnemon config error: {e}"
+                    ),
                 },
             })
             return
@@ -132,15 +134,13 @@ def main() -> None:
             # Emit a visible warning block and log to stderr. Do NOT
             # mark_seen so the same prompt can retry after the transient
             # failure clears (e.g., wifi reconnect, Fly cold-start wakes).
-            msg = f"⚠ mnemon unavailable: {type(e).__name__}: {e}"
-            print(
-                f"mnemon context-surfacing remote error: {type(e).__name__}: {e}",
-                file=sys.stderr,
-            )
+            log_hook_error("context-surfacing", "remote error", e)
             write_output({
                 "hookSpecificOutput": {
                     "hookEventName": "UserPromptSubmit",
-                    "additionalContext": build_warning_context(msg),
+                    "additionalContext": build_warning_context(
+                        f"⚠ mnemon unavailable: {type(e).__name__}: {e}"
+                    ),
                 },
             })
             return
@@ -167,7 +167,13 @@ def main() -> None:
             },
         })
     except Exception as e:
-        print(f"mnemon context-surfacing error: {e}", file=sys.stderr)
+        # log_hook_error may not be importable if the hook crashed before
+        # the import block — write directly to sys.stderr in that tail path.
+        try:
+            from .framework import log_hook_error
+            log_hook_error("context-surfacing", "error", e)
+        except Exception:
+            sys.stderr.write(f"mnemon context-surfacing error: {e}\n")
 
 
 if __name__ == "__main__":

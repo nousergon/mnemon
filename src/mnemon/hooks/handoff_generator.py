@@ -104,7 +104,7 @@ def generate_with_regex(transcript: str) -> dict | None:
 
 def main() -> None:
     try:
-        from .framework import read_stdin, read_transcript
+        from .framework import log_hook_error, read_stdin, read_transcript
         from ._remote_client import RemoteClientConfigError, call_tool_sync
 
         hook_input = read_stdin()
@@ -133,14 +133,11 @@ def main() -> None:
             )
             print(f'mnemon: saved handoff "{handoff["title"]}"', file=sys.stderr)
         except RemoteClientConfigError as e:
-            print(f"mnemon handoff-generator config error: {e}", file=sys.stderr)
+            log_hook_error("handoff-generator", "config error", e)
         except Exception as e:
-            print(
-                f"mnemon handoff-generator save error: {type(e).__name__}: {e}",
-                file=sys.stderr,
-            )
+            log_hook_error("handoff-generator", "save error", e)
     except Exception as e:
-        print(f"mnemon handoff-generator error: {e}", file=sys.stderr)
+        log_hook_error("handoff-generator", "error", e)
 
 
 if __name__ == "__main__":

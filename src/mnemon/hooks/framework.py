@@ -99,6 +99,21 @@ def write_output(output: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+def log_hook_error(hook_name: str, context: str, exc: BaseException) -> None:
+    """Write a consistent hook-error line to stderr.
+
+    Format: ``mnemon {hook_name} {context}: {ExceptionType}: {message}``.
+    Used by all three hooks for RemoteClientConfigError, generic remote
+    failures, and outer catch-alls so log lines from different hooks are
+    greppable by a single pattern. Callers handle control flow (return /
+    continue / fallthrough) themselves — this only formats and emits.
+    """
+    sys.stderr.write(
+        f"mnemon {hook_name} {context}: {type(exc).__name__}: {exc}\n"
+    )
+    sys.stderr.flush()
+
+
 def read_transcript(transcript_path: str, max_chars: int = 8000) -> str:
     """Read the last N characters from the transcript JSONL file."""
     if not transcript_path:
