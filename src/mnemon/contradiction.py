@@ -25,7 +25,7 @@ from .config import (
 )
 
 if TYPE_CHECKING:
-    from .store import SearchResult, Store
+    from .store import Store
 
 UPDATE_DECAY = 0.15      # confidence reduction for superseded memories
 CONTRADICTION_DECAY = 0.25

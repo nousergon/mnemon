@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mnemon-memory"
-version = "0.4.2"
+version = "0.4.3"
 description = "Universal long-term memory layer for AI agents via MCP"
 readme = "README.md"
 license = "MIT"
@@ -76,3 +76,9 @@ asyncio_mode = "auto"
 markers = [
     "integration: end-to-end tests that spawn a real mnemon serve-remote subprocess (skip with -m 'not integration')",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# Streamlit convention: st.set_page_config(...) must precede any other
+# Streamlit command, so page modules import library code after the
+# call. Legit pattern, not refactoring.
+"src/mnemon/dashboard/**/*.py" = ["E402"]

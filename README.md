@@ -2,10 +2,10 @@
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-460_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-450%2B_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
-[![PyPI](https://img.shields.io/badge/PyPI-v0.4.2-blue.svg)](https://pypi.org/project/mnemon-memory/)
+[![PyPI](https://img.shields.io/badge/PyPI-v0.4.3-blue.svg)](https://pypi.org/project/mnemon-memory/)
 
 > One memory vault. Every MCP client. Self-hosted, no third-party auth.
 
@@ -353,7 +353,7 @@ Client-side behaviors that affect mnemon users but are not bugs in mnemon itself
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests (460 tests)
+# Run tests (450+ tests)
 pytest
 
 # Run tests with coverage

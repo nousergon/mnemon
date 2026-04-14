@@ -72,8 +72,8 @@ def generate_with_llm(transcript: str) -> dict | None:
 def generate_with_regex(transcript: str) -> dict | None:
     """Fallback: generate handoff using regex heuristics."""
     lines = transcript.split("\n")
-    user_lines = [l for l in lines if l.startswith("[user]:")]
-    assistant_lines = [l for l in lines if l.startswith("[assistant]:")]
+    user_lines = [line for line in lines if line.startswith("[user]:")]
+    assistant_lines = [line for line in lines if line.startswith("[assistant]:")]
 
     if len(user_lines) < 2:
         return None

@@ -36,7 +36,7 @@ def make_type_distribution_chart(by_type: list[dict]) -> go.Figure:
 
     labels = [t["content_type"] for t in by_type]
     values = [t["count"] for t in by_type]
-    colors = [CONTENT_TYPE_COLORS.get(l, "#999") for l in labels]
+    colors = [CONTENT_TYPE_COLORS.get(label, "#999") for label in labels]
 
     fig = go.Figure(data=[go.Pie(
         labels=labels,
