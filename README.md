@@ -2,10 +2,10 @@
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-327_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-460_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
-[![PyPI](https://img.shields.io/badge/PyPI-v0.3.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
+[![PyPI](https://img.shields.io/badge/PyPI-v0.4.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
 
 > Universal long-term memory layer for AI agents via [MCP](https://modelcontextprotocol.io).
 
@@ -19,9 +19,12 @@ mnemon gives AI agents persistent, searchable memory that survives across sessio
 - [Memory Types](#memory-types)
 - [Claude Code Hooks](#claude-code-hooks)
 - [Remote Server](#remote-server)
+  - [Self-host on Fly.io](#self-host-on-flyio)
+  - [Troubleshooting](#troubleshooting)
 - [S3 Vault Sync](#s3-vault-sync)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
+- [Known limitations](#known-limitations)
 - [Development](#development)
 
 ---
@@ -48,10 +51,15 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
+The recommended setup is a remote vault (one vault, all clients). You have two paths to `https://<your-app>.fly.dev/mcp`:
+
+- **Self-host** (~10 min, ~$1/mo): see [Self-host on Fly.io](#self-host-on-flyio) below for the end-to-end runbook.
+- **Local-only mode**: no remote server needed, useful for development.
+
 ### 1. Configure your client
 
 ```bash
-# Claude Code with remote vault (recommended — single vault across all clients)
+# Claude Code with remote vault
 mnemon setup claude-code --remote-url https://your-app.fly.dev/mcp
 
 # Cursor with remote vault
@@ -61,6 +69,8 @@ mnemon setup cursor --remote-url https://your-app.fly.dev/mcp
 mnemon setup claude-code
 mnemon setup cursor
 ```
+
+Verify with `mnemon doctor` — it runs 6 end-to-end checks against your configured remote (skip for local-only mode).
 
 ### 2. Use it
 
@@ -147,22 +157,100 @@ The extractor and handoff generator use LLM-based extraction when `mnemon[llm]` 
 
 Deploy mnemon as a remote Streamable HTTP server for a single vault shared across all MCP clients. This is the recommended production setup — Claude Code hooks, Claude Desktop, Cursor, and claude.ai all read and write the same memories.
 
-```bash
-# Start remote server (local testing)
-MNEMON_LOCAL_TOKEN=your-secret-token mnemon serve-remote
+### Run locally (development)
 
-# Custom port
-PORT=9000 mnemon serve-remote
+```bash
+MNEMON_LOCAL_TOKEN=your-secret-token mnemon serve-remote
+PORT=9000 mnemon serve-remote   # custom port
 ```
 
-For production, deploy to [Fly.io](https://fly.io) with a persistent volume (1GB minimum RAM required for FastEmbed model). See `fly.toml` and `Dockerfile` in the repo. Required Fly secrets:
+### Self-host on Fly.io
 
-- `MNEMON_LOCAL_TOKEN` — bearer token for headless clients (Claude Code hooks, Cursor)
-- `MNEMON_AS_ENABLED=true` — enable the self-hosted OAuth Authorization Server
-- `MNEMON_AS_PASSPHRASE` — single-user login passphrase for browser-based clients (claude.ai, Claude Desktop)
-- `MNEMON_PUBLIC_URL` — externally-reachable base URL, e.g. `https://your-mnemon.fly.dev`
+End-to-end deploy. You'll get an OAuth-protected MCP endpoint at `https://<your-app>.fly.dev/mcp` with no third-party auth vendor. Takes ~10 minutes the first time.
 
-Browser clients discover the AS via DCR (RFC 7591) at `POST /oauth/register`, then walk through the PKCE authorization code flow at `/oauth/authorize` + `/oauth/token`. No third-party auth vendor required.
+**Prerequisites.** A [Fly.io](https://fly.io) account, [`flyctl`](https://fly.io/docs/hands-on/install-flyctl/) on your `$PATH`, and this repo cloned locally. Budget ~$0.50–$2/mo for a personal vault (auto-stop idle, 1GB volume).
+
+**1. Pick an app name and copy the template.**
+
+```bash
+cp fly.toml.example fly.toml
+# Edit fly.toml: replace REPLACE_ME_fly_app_name (3 occurrences) with your chosen app name.
+# Pick something globally unique on Fly — e.g. "my-mnemon-vault".
+```
+
+The real `fly.toml` is gitignored — it holds your specific app identity. `fly.toml.example` stays in the repo as the template.
+
+**2. Create the app and the persistent volume.**
+
+```bash
+fly launch --copy-config --no-deploy      # creates the app from your edited fly.toml; no deploy yet
+fly volume create mnemon_data --size 1 --region sjc   # 1GB is enough for thousands of memories; use the same region as primary_region
+```
+
+Without the volume step, every restart wipes your vault — the `[mounts]` block in `fly.toml` expects `mnemon_data` to exist.
+
+**3. Generate and set secrets.**
+
+```bash
+# Generate two independent high-entropy secrets. Do not reuse credentials.
+python -c "import secrets; print('MNEMON_LOCAL_TOKEN   =', secrets.token_urlsafe(32))"
+python -c "import secrets; print('MNEMON_AS_PASSPHRASE =', secrets.token_urlsafe(32))"
+
+# Store both in your password manager, then:
+fly secrets set MNEMON_LOCAL_TOKEN=<value-1> \
+                MNEMON_AS_ENABLED=true \
+                MNEMON_AS_PASSPHRASE=<value-2>
+```
+
+`MNEMON_AS_PASSPHRASE` is the single-user login for browser clients (claude.ai, Claude Desktop). There is no complexity enforcement in code — use a high-entropy value. `MNEMON_LOCAL_TOKEN` is the static bearer for headless clients (Claude Code hooks, Cursor).
+
+**4. Deploy.**
+
+```bash
+fly deploy
+```
+
+First deploy pulls the FastEmbed model (~15–25s on first `memory_search`). Subsequent deploys reuse the cached layer.
+
+**5. Verify.**
+
+```bash
+# Write the remote URL + bearer token to your local client config.
+echo "https://<your-app>.fly.dev/mcp"          > ~/.mnemon/remote_url
+echo "<value-1 from step 3>"                   > ~/.mnemon/local_token
+chmod 600 ~/.mnemon/local_token
+
+mnemon doctor
+```
+
+`mnemon doctor` runs 6 checks: remote URL configured, local token configured + 0600 perms, `/health` reachable, authenticated MCP tool call round-trips, and save + search + forget cycle. All 6 should pass green. If any fail, the error message points at the specific misconfiguration.
+
+**6. Connect clients.**
+
+```bash
+# Claude Code hooks (uses MNEMON_LOCAL_TOKEN)
+mnemon setup claude-code --remote-url https://<your-app>.fly.dev/mcp
+
+# Cursor (uses MNEMON_LOCAL_TOKEN)
+mnemon setup cursor --remote-url https://<your-app>.fly.dev/mcp
+```
+
+For **claude.ai** (web/mobile) and **Claude Desktop** — no CLI needed, these use the OAuth browser flow:
+
+1. In the client, go to Settings → Connectors → Add custom connector.
+2. Paste `https://<your-app>.fly.dev/mcp` as the connector URL.
+3. Click Connect. Browser redirects to your server's login page.
+4. Enter `MNEMON_AS_PASSPHRASE` from step 3 above.
+5. You're in. The client now sees `memory_search`, `memory_save`, etc. alongside its built-in tools.
+
+Browser clients self-register via Dynamic Client Registration (RFC 7591) — no manual client-id provisioning. Authentication uses PKCE + RS256 JWTs signed by the AS's own keypair (auto-generated on first boot, stored in the Fly volume at `/data/oauth_keys/`).
+
+### Troubleshooting
+
+If `mnemon doctor` fails, check the specific failing line:
+- **Health endpoint unreachable** — app may be booting (cold start takes 15–25s for FastEmbed); retry after a moment. If persistent, check `fly logs -a <your-app>` and `fly status`.
+- **Auth + MCP tool call returns 401** — `MNEMON_LOCAL_TOKEN` on your machine doesn't match the Fly secret. Re-copy from your password manager into `~/.mnemon/local_token`.
+- **Round-trip fails** — `MNEMON_ALLOWED_HOSTS` in `fly.toml` doesn't include the hostname you're connecting through. It should match the host portion of `MNEMON_PUBLIC_URL`.
 
 ## S3 Vault Sync
 
@@ -259,7 +347,7 @@ Client-side behaviors that affect mnemon users but are not bugs in mnemon itself
 # Install with dev dependencies
 pip install -e ".[dev]"
 
-# Run tests (327 tests)
+# Run tests (460 tests)
 pytest
 
 # Run tests with coverage

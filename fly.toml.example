@@ -1,13 +1,25 @@
-app = "mnemon-memory"
-primary_region = "sjc"
+# Fly.io deployment template for mnemon.
+#
+# Setup:
+#   cp fly.toml.example fly.toml
+#   # Edit the three REPLACE_ME placeholders below, then:
+#   fly launch --copy-config --no-deploy   # creates the app, don't deploy yet
+#   fly volume create mnemon_data --size 1 --region <your-region>
+#   fly secrets set MNEMON_LOCAL_TOKEN=... MNEMON_AS_ENABLED=true MNEMON_AS_PASSPHRASE=...
+#   fly deploy
+#
+# See the "Self-host on Fly.io" section of README.md for the full runbook.
+
+app = "REPLACE_ME_fly_app_name"      # must be globally unique on Fly
+primary_region = "sjc"                # pick one close to you: fly platform regions
 
 [build]
 
 [env]
   PORT = "8080"
   MNEMON_VAULT_DIR = "/data"
-  MNEMON_PUBLIC_URL = "https://mnemon-memory.fly.dev"
-  MNEMON_ALLOWED_HOSTS = "mnemon-memory.fly.dev"
+  MNEMON_PUBLIC_URL = "https://REPLACE_ME_fly_app_name.fly.dev"
+  MNEMON_ALLOWED_HOSTS = "REPLACE_ME_fly_app_name.fly.dev"
 
 [http_service]
   internal_port = 8080
@@ -35,7 +47,7 @@ primary_region = "sjc"
 # the FastEmbed bge-small-en-v1.5 ONNX model (~130MB resident) into RAM
 # on top of Python, uvicorn, FastMCP, and the vector store. The Fly
 # default (shared-cpu-1x:256mb) OOM-kills the mnemon process on first
-# search — confirmed during work item 4 smoke testing 2026-04-11.
+# search.
 [[vm]]
   memory = "1gb"
   cpu_kind = "shared"

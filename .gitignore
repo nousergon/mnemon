@@ -42,3 +42,7 @@ node_modules/
 
 # Flow Doctor (testing artifact)
 flow_doctor.db
+
+# Fly deployment config — user-specific, must not be committed.
+# Template lives at fly.toml.example; copy + edit for your own deploy.
+fly.toml
