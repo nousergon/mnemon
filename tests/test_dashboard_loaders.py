@@ -16,6 +16,13 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+# Dashboard deps are in the ``[ui]`` extra. When running the core
+# ``[dev]`` test matrix these imports would crash the whole module at
+# collection time — skip cleanly instead so the rest of the suite stays
+# green.
+pytest.importorskip("streamlit")
+pytest.importorskip("umap", reason="umap-learn ships with [ui]")
+
 
 @pytest.fixture(autouse=True)
 def no_streamlit_cache(monkeypatch):
