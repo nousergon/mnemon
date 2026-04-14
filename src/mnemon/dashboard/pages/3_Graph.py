@@ -5,15 +5,15 @@ import streamlit as st
 st.set_page_config(page_title="Memory Graph — mnemon", layout="wide")
 st.title("Memory Graph")
 
-from mnemon.dashboard.loaders import load_vectors, load_umap_coords, load_related
+from mnemon.dashboard.loaders import load_vectors_collapsed, load_umap_coords, load_related
 from mnemon.dashboard.charts import make_graph_scatter, add_relation_edges
 
 CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
 
-# Load vectors — post-0.5.0 loaders.load_vectors returns a 3-tuple with
-# the vec_id → doc map baked in (remote: from memory_export_vectors,
-# local: joined from SQLite).
-vec_data = load_vectors()
+# One point per document. Multi-chunk docs are mean-pooled in the
+# loader — otherwise a long memory showed up as several near-identical
+# points, which read as duplicates.
+vec_data = load_vectors_collapsed()
 if vec_data is None:
     st.warning("No vectors found. Save some memories with embeddings first.")
     st.stop()
