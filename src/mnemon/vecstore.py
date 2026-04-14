@@ -68,6 +68,18 @@ class VecStore:
             for i in top_indices
         ]
 
+    def export_all(self) -> tuple[list[str], np.ndarray]:
+        """Return all stored (ids, vectors) as a snapshot.
+
+        Used by ``memory_export_vectors`` so the remote dashboard can
+        pull the full embedding matrix over MCP and project it with
+        UMAP client-side. The returned array is a copy — callers can
+        mutate freely without affecting the in-memory store.
+        """
+        if self._vectors is None or len(self._ids) == 0:
+            return [], np.zeros((0, self.dim), dtype=np.float32)
+        return list(self._ids), self._vectors.copy()
+
     def size(self) -> int:
         return len(self._ids)
 

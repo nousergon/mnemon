@@ -214,14 +214,24 @@ class TestReadTranscript:
 
 # ── context_surfacing.py: build_context ───────────────────────────────────────
 #
-# After Phase 3 unification, build_context takes the raw string output of
-# the remote memory_search tool and wraps it in mnemon-context tags — the
-# old HOT/WARM/COLD tiered logic moved to the server (which always returns
-# 300-char snippets per match). build_context is now a thin wrapper with
-# budget-enforcement as a safety net.
+# Post-0.5.0 the remote memory_search tool returns JSON; build_context
+# parses it and formats the markdown list client-side. Still wraps the
+# rendered block in mnemon-context tags and enforces a char budget as a
+# safety net against oversized payloads.
 
 
 class TestBuildContext:
+    def _json_result(self, **overrides):
+        """Build a memory_search JSON object (single result) for tests."""
+        defaults = {
+            "doc_id": 1, "title": "Title", "content": "content here",
+            "content_type": "note", "confidence": 0.8,
+            "composite_score": 0.8, "vector_similarity": None,
+            "created_at": "2026-04-08",
+        }
+        defaults.update(overrides)
+        return defaults
+
     def test_empty_input_returns_empty(self):
         from mnemon.hooks.context_surfacing import build_context
 
@@ -233,62 +243,83 @@ class TestBuildContext:
 
         assert build_context("   \n  \t  ") == ""
 
-    def test_no_results_sentinel_returns_empty(self):
-        """The server returns a specific sentinel when nothing matches —
-        we must not wrap it in mnemon-context tags and inject noise."""
-        from mnemon.hooks.context_surfacing import (
-            NO_RESULTS_SENTINEL,
-            build_context,
-        )
+    def test_empty_json_array_returns_empty(self):
+        """Post-0.5.0 the server returns [] when nothing matches — we
+        must not wrap an empty list in mnemon-context tags."""
+        from mnemon.hooks.context_surfacing import build_context
 
-        assert build_context(NO_RESULTS_SENTINEL) == ""
+        assert build_context("[]") == ""
+
+    def test_invalid_json_returns_empty(self):
+        """Server contract violation — don't inject garbage into the prompt."""
+        from mnemon.hooks.context_surfacing import build_context
+
+        assert build_context("not json at all") == ""
 
     def test_wraps_in_mnemon_context_tags(self):
         from mnemon.hooks.context_surfacing import build_context
 
-        raw = "1. [note] **Title** (score: 0.80)\n   content here"
+        raw = json.dumps([self._json_result()])
         ctx = build_context(raw)
         assert ctx.startswith("<mnemon-context>")
         assert ctx.endswith("</mnemon-context>")
         assert "Relevant memories from previous sessions:" in ctx
-        assert raw in ctx
+        assert "**Title**" in ctx
+        assert "content here" in ctx
 
-    def test_preserves_server_formatting_unchanged(self):
-        """The server's pre-formatted snippets should pass through
-        untouched — no regex re-parsing, no re-ranking."""
+    def test_formats_multiple_results_with_metadata(self):
+        """JSON array should render to the same prose format the pre-0.5.0
+        server emitted — score, confidence, id, created date all visible."""
         from mnemon.hooks.context_surfacing import build_context
 
-        raw = (
-            "1. [decision] **Use PostgreSQL** (score: 0.950, confidence: 0.90)\n"
-            "   Chose PostgreSQL for JSON support.\n"
-            "   _id: 1 | created: 2026-04-08_\n"
-            "\n"
-            "2. [preference] **Tabs over spaces** (score: 0.320, confidence: 0.70)\n"
-            "   User prefers tabs.\n"
-            "   _id: 2 | created: 2026-04-07_"
-        )
+        raw = json.dumps([
+            self._json_result(
+                doc_id=1, title="Use PostgreSQL", content="Chose PostgreSQL for JSON support.",
+                content_type="decision", composite_score=0.950, confidence=0.90,
+                created_at="2026-04-08",
+            ),
+            self._json_result(
+                doc_id=2, title="Tabs over spaces", content="User prefers tabs.",
+                content_type="preference", composite_score=0.320, confidence=0.70,
+                created_at="2026-04-07",
+            ),
+        ])
         ctx = build_context(raw)
-        # All score/confidence/id metadata preserved.
         assert "score: 0.950" in ctx
         assert "confidence: 0.70" in ctx
         assert "_id: 1" in ctx
         assert "_id: 2" in ctx
+        assert "[decision]" in ctx
+        assert "[preference]" in ctx
+
+    def test_truncates_long_content_per_result(self):
+        """Each result's content is capped at 300 chars (the ellipsis
+        behavior the server used to apply server-side)."""
+        from mnemon.hooks.context_surfacing import build_context
+
+        raw = json.dumps([self._json_result(content="x" * 1000)])
+        ctx = build_context(raw)
+        assert "x" * 300 in ctx
+        # 301st char should not appear inline (the formatter truncates + ...).
+        assert "x" * 301 not in ctx
+        assert "..." in ctx
 
     def test_truncates_at_char_budget(self):
         from mnemon.hooks.context_surfacing import CHAR_BUDGET, build_context
 
-        raw = "X" * (CHAR_BUDGET * 2)
-        ctx = build_context(raw)
-        # Output includes the wrapper + truncation marker, but the inner
-        # payload is capped at CHAR_BUDGET chars.
+        # Create enough results to blow past CHAR_BUDGET.
+        results = [
+            self._json_result(doc_id=i, title=f"T{i}", content="x" * 200)
+            for i in range(200)
+        ]
+        ctx = build_context(json.dumps(results))
         assert "[truncated]" in ctx
-        # Sanity: total length bounded (wrapper adds <200 chars).
         assert len(ctx) < CHAR_BUDGET + 300
 
     def test_no_truncation_when_within_budget(self):
         from mnemon.hooks.context_surfacing import build_context
 
-        raw = "1. [note] **Small** (score: 0.5)\n   Small content"
+        raw = json.dumps([self._json_result(title="Small", content="Small content")])
         ctx = build_context(raw)
         assert "[truncated]" not in ctx
 
@@ -300,11 +331,13 @@ class TestContextSurfacingMain:
     def test_full_pipeline_calls_remote_and_emits_context(self):
         from mnemon.hooks.context_surfacing import main
 
-        raw_tool_output = (
-            "1. [note] **Pipeline** (score: 0.750, confidence: 0.80)\n"
-            "   It works via Step Functions\n"
-            "   _id: 42 | created: 2026-04-08_"
-        )
+        raw_tool_output = json.dumps([{
+            "doc_id": 42, "title": "Pipeline",
+            "content": "It works via Step Functions",
+            "content_type": "note", "confidence": 0.80,
+            "composite_score": 0.750, "vector_similarity": None,
+            "created_at": "2026-04-08",
+        }])
         with patch(
             "mnemon.hooks.framework.read_stdin",
             return_value={"prompt": "how does the pipeline work?"},
@@ -379,15 +412,12 @@ class TestContextSurfacingMain:
         mock_call.assert_not_called()
 
     def test_no_results_still_marks_seen(self):
-        """Even when memory_search returns the no-results sentinel, we
-        mark the prompt as seen so an immediate identical resubmit does
-        not re-hit the network. The remote call succeeded — the prompt
-        just has no matches — and dedup is about suppressing redundant
-        work, not about gating on output."""
-        from mnemon.hooks.context_surfacing import (
-            NO_RESULTS_SENTINEL,
-            main,
-        )
+        """Even when memory_search returns an empty array, we mark the
+        prompt as seen so an immediate identical resubmit does not re-hit
+        the network. The remote call succeeded — the prompt just has no
+        matches — and dedup is about suppressing redundant work, not
+        about gating on output."""
+        from mnemon.hooks.context_surfacing import main
 
         with patch(
             "mnemon.hooks.framework.read_stdin",
@@ -402,7 +432,7 @@ class TestContextSurfacingMain:
             "mnemon.hooks.framework.write_output"
         ) as mock_write, patch(
             "mnemon.hooks._remote_client.call_tool_sync",
-            return_value=(NO_RESULTS_SENTINEL, 0.3),
+            return_value=("[]", 0.3),
         ):
             main()
         mock_write.assert_not_called()
@@ -520,11 +550,12 @@ class TestContextSurfacingMain:
         latency degradation without watching logs."""
         from mnemon.hooks.context_surfacing import SLOW_THRESHOLD_SEC, main
 
-        raw_tool_output = (
-            "1. [note] **Thing** (score: 0.80)\n"
-            "   Some content\n"
-            "   _id: 1 | created: 2026-04-11_"
-        )
+        raw_tool_output = json.dumps([{
+            "doc_id": 1, "title": "Thing", "content": "Some content",
+            "content_type": "note", "confidence": 0.80,
+            "composite_score": 0.80, "vector_similarity": None,
+            "created_at": "2026-04-11",
+        }])
         slow_elapsed = SLOW_THRESHOLD_SEC + 1.0
 
         with patch(
@@ -557,11 +588,12 @@ class TestContextSurfacingMain:
         the context block contains only the memories header and results."""
         from mnemon.hooks.context_surfacing import SLOW_THRESHOLD_SEC, main
 
-        raw_tool_output = (
-            "1. [note] **Fast** (score: 0.90)\n"
-            "   Quick response\n"
-            "   _id: 2 | created: 2026-04-11_"
-        )
+        raw_tool_output = json.dumps([{
+            "doc_id": 2, "title": "Fast", "content": "Quick response",
+            "content_type": "note", "confidence": 0.90,
+            "composite_score": 0.90, "vector_similarity": None,
+            "created_at": "2026-04-11",
+        }])
         fast_elapsed = SLOW_THRESHOLD_SEC - 0.5
 
         with patch(
@@ -705,10 +737,10 @@ class TestSessionExtractorIsDuplicateRemote:
         with patch("mnemon.hooks._remote_client.call_tool_sync", return_value=(raw, 0.3)):
             assert is_duplicate_remote("title", "content") is True
 
-    def test_calls_structured_tool_not_text(self):
-        """Guard against regression to text-parsing dedup. The hook must
-        use memory_search_structured so scores aren't parsed from
-        human-readable formatted output."""
+    def test_calls_memory_search_not_text_parser(self):
+        """Guard against regression to text-parsing dedup. Post-0.5.0
+        memory_search returns JSON directly — the hook must consume
+        it as JSON and not regex it."""
         from mnemon.hooks.session_extractor import is_duplicate_remote
 
         raw = json.dumps([])
@@ -717,7 +749,7 @@ class TestSessionExtractorIsDuplicateRemote:
             return_value=(raw, 0.1),
         ) as mock_call:
             is_duplicate_remote("title", "content")
-        assert mock_call.call_args[0][0] == "memory_search_structured"
+        assert mock_call.call_args[0][0] == "memory_search"
 
 
 # ── session_extractor.py: main ────────────────────────────────────────────────

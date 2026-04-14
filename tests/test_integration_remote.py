@@ -6,7 +6,7 @@ to point at it via ``MNEMON_REMOTE_URL`` + ``MNEMON_LOCAL_TOKEN``, and
 exercises the actual MCP Streamable HTTP round-trip:
 
 1. ``memory_save`` lands in the server's vault
-2. ``memory_search_structured`` retrieves the saved memory
+2. ``memory_search`` retrieves the saved memory
 3. Bearer token auth works end-to-end (wrong token returns 401-ish error)
 
 Unit tests in ``test_hooks_extended.py`` mock ``call_tool_sync``. Those
@@ -147,7 +147,7 @@ def remote_env(monkeypatch, remote_server):
 
 def test_save_and_search_round_trip(remote_env):
     """Full path: call memory_save via _remote_client, then retrieve it
-    via memory_search_structured. Proves the hook → MCP SDK → Streamable
+    via memory_search. Proves the hook → MCP SDK → Streamable
     HTTP → FastMCP → Store pipeline is intact end-to-end."""
     from mnemon.hooks._remote_client import call_tool_sync
 
@@ -169,7 +169,7 @@ def test_save_and_search_round_trip(remote_env):
     # Round-trip via structured search — verifies the save actually
     # landed and indexing worked.
     search_result, _ = call_tool_sync(
-        "memory_search_structured",
+        "memory_search",
         {"query": "integration test memory", "limit": 5},
         timeout=30.0,
         client_label="pytest-integration",
@@ -194,7 +194,7 @@ def test_wrong_token_is_rejected(monkeypatch, remote_server):
 
     with pytest.raises(Exception):
         call_tool_sync(
-            "memory_search_structured",
+            "memory_search",
             {"query": "anything", "limit": 1},
             timeout=10.0,
             client_label="pytest-integration",
@@ -223,7 +223,7 @@ def test_structured_search_parses_real_server_json(remote_env):
     )
 
     raw, _ = call_tool_sync(
-        "memory_search_structured",
+        "memory_search",
         {"query": "schema guard memory", "limit": 5},
         timeout=30.0,
     )
