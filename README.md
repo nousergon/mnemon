@@ -21,6 +21,10 @@ mnemon is a [Model Context Protocol](https://modelcontextprotocol.io) server wit
 
 - [Install](#install)
 - [Quick Start](#quick-start)
+  - [Try it locally (60 seconds)](#try-it-locally-60-seconds)
+  - [Self-host a remote vault (10 min, ~$1/mo)](#self-host-a-remote-vault-10-min-1mo)
+  - [Visualize your vault](#visualize-your-vault)
+  - [Use it](#use-it)
 - [MCP Tools](#mcp-tools)
 - [Memory Types](#memory-types)
 - [Claude Code Hooks](#claude-code-hooks)

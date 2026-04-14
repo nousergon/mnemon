@@ -42,6 +42,32 @@
   ``<mnemon-context>`` block is shape-identical to 0.4.x — Claude sees
   the same injected context, just formatted by the hook rather than
   the server.
+- **Dashboard is remote-aware.** The Streamlit dashboard detects
+  ``MNEMON_REMOTE_URL`` / ``~/.mnemon/remote_url`` and routes every
+  loader through the remote MCP server, so a browser-side user sees
+  the same vault their hooks write to. Local SQLite stays as the
+  development fallback. (PR #59)
+- **Graph page collapses chunks to one point per memory.** Long
+  documents produce multiple embedding chunks; previously each chunk
+  rendered as its own UMAP point, which read as duplicates. The graph
+  now mean-pools (L2-normalized) per document so point count matches
+  memory count. (PR #60)
+- **Dashboard remote-call timeouts raised.** The dashboard was
+  inheriting the 8s hook timeout, which is sized for Claude Code's
+  hook budget and could time out on Fly cold-start or on the heavier
+  ``memory_export_vectors`` call. Dashboard now uses 30s general / 60s
+  for vector export; hook callers unchanged. (PR #61)
+- **``mnemon doctor`` works in local mode.** Auto-detects config and
+  runs three parallel checks (vault reachable, embedder loadable,
+  save/search/forget round-trip via ``Store``) when no remote URL is
+  configured. Remote mode unchanged. No new flag — same command,
+  adaptive behavior. (PR #62)
+- **README onboarding rewrite.** Quick Start leads with the 60-second
+  local path instead of the 10-minute Fly self-host runbook; dashboard
+  visible in Install and Quick Start with an embedded screenshot;
+  self-host secret handling switched from ``echo "$SECRET" > file`` to
+  ``read -rs`` + ``printf %s`` so tokens don't land in shell history;
+  FastEmbed cold-start warning added to the first-run path. (PR #62)
 
 ## [0.4.3] - 2026-04-14
 
