@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mnemon-memory"
-version = "0.4.0"
+version = "0.4.1"
 description = "Universal long-term memory layer for AI agents via MCP"
 readme = "README.md"
 license = "MIT"

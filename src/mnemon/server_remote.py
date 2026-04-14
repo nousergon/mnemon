@@ -78,10 +78,11 @@ def run_remote() -> None:
 
     config = OAuthConfig.from_env()
 
-    # Self-hosted Authorization Server config (Phase 2 scaffolding). When
-    # MNEMON_AS_ENABLED=true, the well-known AS metadata + JWKS endpoints
-    # are served. The token-issuing endpoints themselves are not yet
-    # implemented — coming in PR #37.
+    # Self-hosted Authorization Server. When MNEMON_AS_ENABLED=true, the
+    # well-known AS metadata, JWKS, /authorize, /token, and /register
+    # endpoints are served. Browser MCP clients (claude.ai, Claude
+    # Desktop) authenticate via DCR + PKCE against these endpoints;
+    # headless clients (hooks, Cursor) use MNEMON_LOCAL_TOKEN instead.
     from .oauth_as import AuthorizationServerConfig
 
     as_config = AuthorizationServerConfig.from_env()

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.1] - 2026-04-14
+
+### Added
+- **`mnemon doctor` exercises the OAuth AS metadata endpoint** (PR #49). Fetches `/.well-known/oauth-authorization-server`, validates required RFC 8414 fields, asserts `issuer` matches deployment base URL. Catches silent browser-client breakage from `MNEMON_PUBLIC_URL` typos that the local-token path doesn't surface. Warns (not fails) when the AS isn't enabled — legitimate for local-token-only deploys.
+- **Per-IP rate limit on failed `/oauth/authorize` attempts** (PR #50). 10 failures per 5-minute sliding window returns HTTP 429 with `Retry-After`. Correct passphrase clears the counter. Client IP resolved from `Fly-Client-IP` → `X-Forwarded-For` → `scope["client"][0]`.
+
+### Changed
+- `CHANGELOG.md` backfilled with 0.3.0 and 0.4.0 entries (PR #48).
+- `fly volume create` command in README's self-host runbook now includes `--yes` to skip the single-region-volume confirmation prompt (PR #48).
+
 ## [0.4.0] - 2026-04-14
 
 ### Added
