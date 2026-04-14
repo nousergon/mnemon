@@ -7,9 +7,15 @@
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/badge/PyPI-v0.4.1-blue.svg)](https://pypi.org/project/mnemon-memory/)
 
-> Universal long-term memory layer for AI agents via [MCP](https://modelcontextprotocol.io).
+> One memory vault. Every MCP client. Self-hosted, no third-party auth.
 
-mnemon gives AI agents persistent, searchable memory that survives across sessions. It uses hybrid BM25 + vector search, automatic confidence decay, and contradiction detection via the Model Context Protocol. Deploy as a remote server on Fly.io for a unified vault across all your MCP clients (Claude Code, Claude Desktop, Cursor, claude.ai), or run locally for development.
+Claude Code remembers your architecture decisions. Cursor remembers your API conventions. claude.ai web/mobile/desktop remembers your project context. All from a single vault you own and run.
+
+mnemon is a [Model Context Protocol](https://modelcontextprotocol.io) server with hybrid BM25 + vector search, automatic confidence decay, and contradiction detection. Deploy as a remote server on Fly.io (~$1/mo for a personal vault) or run locally for development. Browser clients authenticate via self-hosted OAuth 2.1 + PKCE — no Auth0, Clerk, or other third-party auth vendor required.
+
+**Privacy:** mnemon sends no telemetry. Your vault never leaves your server. Embeddings run locally via FastEmbed. The optional LLM (1.7B params) runs on-device via llama.cpp. The only outbound calls are: (a) the FastEmbed model download on first run, (b) optional S3 vault sync if you configure it, and (c) `huggingface-hub` to fetch the optional LLM weights.
+
+**Platforms:** Tested on macOS 14+. Linux should work — Python + SQLite + FastEmbed are portable. Windows untested.
 
 ## Table of Contents
 
