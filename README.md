@@ -41,10 +41,12 @@ mnemon is a [Model Context Protocol](https://modelcontextprotocol.io) server wit
 pip install mnemon-memory
 ```
 
-With optional LLM support (local 1.7B model for query expansion, contradiction detection, and smarter session extraction):
+Optional extras:
 
 ```bash
-pip install "mnemon-memory[llm]"
+pip install "mnemon-memory[ui]"    # Streamlit dashboard (mnemon dashboard)
+pip install "mnemon-memory[llm]"   # local 1.7B model for query expansion + smarter extraction
+pip install "mnemon-memory[ui,llm]" # both
 ```
 
 From source:
@@ -57,28 +59,45 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-The recommended setup is a remote vault (one vault, all clients). You have two paths to `https://<your-app>.fly.dev/mcp`:
+Two paths, depending on how deep you want to go in the first sitting.
 
-- **Self-host** (~10 min, ~$1/mo): see [Self-host on Fly.io](#self-host-on-flyio) below for the end-to-end runbook.
-- **Local-only mode**: no remote server needed, useful for development.
+### Try it locally (60 seconds)
 
-### 1. Configure your client
+No Fly account, no secrets, no OAuth — a single-file SQLite vault at `~/.mnemon/default.sqlite`. Good for a first look and for offline development.
 
 ```bash
-# Claude Code with remote vault
-mnemon setup claude-code --remote-url https://your-app.fly.dev/mcp
-
-# Cursor with remote vault
-mnemon setup cursor --remote-url https://your-app.fly.dev/mcp
-
-# Local-only mode (development, no remote server needed)
-mnemon setup claude-code
-mnemon setup cursor
+pip install mnemon-memory
+mnemon setup claude-code        # or: cursor, gemini, hooks
+mnemon doctor                   # 3 green checks: vault, embedder, round-trip
 ```
 
-Verify with `mnemon doctor` — it runs 6 end-to-end checks against your configured remote (skip for local-only mode).
+Then use Claude Code / Cursor as usual — memories save and surface automatically.
 
-### 2. Use it
+**Heads-up:** the first `memory_search` after a fresh install takes ~10–20s while FastEmbed downloads the embedding model (one-time). Subsequent calls are fast.
+
+### Self-host a remote vault (10 min, ~$1/mo)
+
+One vault, all clients — Claude Code, Cursor, claude.ai web/mobile/desktop, Claude Desktop all read and write the same memories. See [Self-host on Fly.io](#self-host-on-flyio) for the end-to-end runbook.
+
+```bash
+# After you've deployed:
+mnemon setup claude-code --remote-url https://your-app.fly.dev/mcp
+mnemon setup cursor       --remote-url https://your-app.fly.dev/mcp
+mnemon doctor             # 6 green checks: URL, token, /health, OAuth AS, MCP round-trip
+```
+
+### Visualize your vault
+
+```bash
+pip install "mnemon-memory[ui]"
+mnemon dashboard
+```
+
+Opens a Streamlit UI at `http://localhost:8503` — Home stats, Search, Timeline, Graph (UMAP 2D projection of the vector space), Profile. Works against both local and remote vaults.
+
+![Memory Graph dashboard](docs/images/dashboard-graph.png)
+
+### Use it
 
 Once configured, mnemon works automatically:
 
@@ -198,11 +217,14 @@ Without the volume step, every restart wipes your vault — the `[mounts]` block
 **3. Generate and set secrets.**
 
 ```bash
-# Generate two independent high-entropy secrets. Do not reuse credentials.
+# Generate two independent high-entropy secrets. Copy both into your password
+# manager now — MNEMON_LOCAL_TOKEN is needed again on the client (step 5).
 python -c "import secrets; print('MNEMON_LOCAL_TOKEN   =', secrets.token_urlsafe(32))"
 python -c "import secrets; print('MNEMON_AS_PASSPHRASE =', secrets.token_urlsafe(32))"
 
-# Store both in your password manager, then:
+# Paste into Fly (values land in shell history — clear it after with
+# `history -d <n>` if that matters to you, or prefix the line with a
+# space if HISTCONTROL=ignorespace is set):
 fly secrets set MNEMON_LOCAL_TOKEN=<value-1> \
                 MNEMON_AS_ENABLED=true \
                 MNEMON_AS_PASSPHRASE=<value-2>
@@ -221,15 +243,21 @@ First deploy pulls the FastEmbed model (~15–25s on first `memory_search`). Sub
 **5. Verify.**
 
 ```bash
-# Write the remote URL + bearer token to your local client config.
-echo "https://<your-app>.fly.dev/mcp"          > ~/.mnemon/remote_url
-echo "<value-1 from step 3>"                   > ~/.mnemon/local_token
-chmod 600 ~/.mnemon/local_token
+# Write the remote URL (public — safe to echo).
+mkdir -p ~/.mnemon
+echo "https://<your-app>.fly.dev/mcp" > ~/.mnemon/remote_url
+
+# Write the token without leaking it to shell history. `read -rs` reads
+# silently; `printf %s` avoids a trailing newline in the file.
+read -rs -p "Paste MNEMON_LOCAL_TOKEN: " t && \
+  printf %s "$t" > ~/.mnemon/local_token && \
+  chmod 600 ~/.mnemon/local_token && \
+  unset t
 
 mnemon doctor
 ```
 
-`mnemon doctor` runs 6 checks: remote URL configured, local token configured + 0600 perms, `/health` reachable, authenticated MCP tool call round-trips, and save + search + forget cycle. All 6 should pass green. If any fail, the error message points at the specific misconfiguration.
+`mnemon doctor` runs 6 checks: remote URL configured, local token configured + 0600 perms, `/health` reachable, authenticated MCP tool call round-trips, and save + search + forget cycle. All 6 should pass green. If any fail, the error message points at the specific misconfiguration. (Without a configured remote, the same command switches to local mode and runs 3 equivalent checks against the on-disk SQLite vault.)
 
 **6. Connect clients.**
 
