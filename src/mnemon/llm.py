@@ -8,9 +8,12 @@ Phase 3: local LLM integration (replaces Phase 2 regex heuristics).
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 MODEL_REPO = "tobil/qmd-query-expansion-1.7B-gguf"
 MODEL_FILE = "qmd-query-expansion-1.7B-q4_k_m.gguf"
@@ -118,11 +121,11 @@ def try_generate(
 ) -> str | None:
     """Try to generate an LLM response, returning None if unavailable.
 
-    Unifies the try-import, check-available, generate-or-fail pattern
-    duplicated across ``session_extractor.extract_with_llm``,
-    ``handoff_generator.generate_with_llm``, and ``search.expand_query``.
-    Each caller still does its own parsing of the returned text; this
-    helper only covers the "is the LLM usable right now" plumbing.
+    Unifies the check-available / generate / fall-back plumbing shared
+    by the LLM-using callers (``search.expand_query``,
+    ``hooks.session_extractor``, ``hooks.handoff_generator``). Each
+    caller still does its own parsing of the returned text; this helper
+    only covers the "is the LLM usable right now" plumbing.
 
     Returns:
         The raw LLM output string, or None if the backend is unavailable
@@ -133,5 +136,10 @@ def try_generate(
         if not is_available():
             return None
         return generate(system_prompt, user_message, max_tokens=max_tokens)
-    except Exception:
+    except Exception as exc:
+        # LLM is optional infra — callers treat None as "fall back to
+        # regex/empty". But silent failure hides model crashes, OOMs,
+        # and llama-cpp version mismatches from the operator. Log once
+        # per failure so degradation is visible.
+        logger.warning("try_generate: LLM call failed (%s: %s)", type(exc).__name__, exc)
         return None

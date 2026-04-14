@@ -62,10 +62,18 @@ DEFAULT_CONFIDENCE: dict[ContentType, float] = {
 
 # Scoring constants
 RRF_K = 60
-MMR_THRESHOLD = 0.6
+MMR_THRESHOLD = 0.6                    # bigram Jaccard ≥ this → candidate is "too similar" to a selected result
+MMR_DEMOTION_FACTOR = 0.5              # composite-score multiplier applied to MMR-demoted results
 COMPOSITE_WEIGHTS = (0.5, 0.25, 0.25)  # (relevance, recency, confidence)
 RECENCY_HALF_LIFE_DAYS = 30
 PIN_BOOST = 0.3
+
+# Query expansion
+QUERY_EXPANSION_MAX_TOKENS = 200       # LLM token cap for alt-query generation
+
+# Contradiction detection
+CONTRADICTION_OVERLAP_THRESHOLD = 0.7  # minimum vector similarity to treat candidate as potentially conflicting
+CONTRADICTION_CONTEXT_MAX_CHARS = 500  # per-memory content truncation in the LLM classification prompt
 
 # Hook timeouts and budgets (seconds / chars)
 #

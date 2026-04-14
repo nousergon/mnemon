@@ -343,7 +343,7 @@ def check_round_trip() -> CheckResult:
     try:
         call_tool_sync(
             "memory_forget",
-            {"document_id": doc_id},
+            {"id": doc_id},
             timeout=MCP_TIMEOUT_SEC,
             client_label="mnemon-doctor",
         )
@@ -367,7 +367,7 @@ def _best_effort_forget(doc_id: int) -> None:
     try:
         call_tool_sync(
             "memory_forget",
-            {"document_id": doc_id},
+            {"id": doc_id},
             timeout=MCP_TIMEOUT_SEC,
             client_label="mnemon-doctor",
         )

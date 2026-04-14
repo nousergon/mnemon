@@ -13,7 +13,14 @@ import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from .config import COMPOSITE_WEIGHTS, MMR_THRESHOLD, RECENCY_HALF_LIFE_DAYS, RRF_K
+from .config import (
+    COMPOSITE_WEIGHTS,
+    MMR_DEMOTION_FACTOR,
+    MMR_THRESHOLD,
+    QUERY_EXPANSION_MAX_TOKENS,
+    RECENCY_HALF_LIFE_DAYS,
+    RRF_K,
+)
 from .store import SearchResult, Store
 
 logger = logging.getLogger(__name__)
@@ -110,9 +117,8 @@ def mmr_rerank(results: list[ScoredResult]) -> list[ScoredResult]:
         if too_similar:
             selected.append(ScoredResult(
                 **{k: getattr(candidate, k) for k in candidate.__dataclass_fields__},
-                # Demote by 50%
             ))
-            selected[-1].composite_score = candidate.composite_score * 0.5
+            selected[-1].composite_score = candidate.composite_score * MMR_DEMOTION_FACTOR
         else:
             selected.append(candidate)
 
@@ -166,7 +172,7 @@ def expand_query(query: str) -> list[str]:
         "Keep them short and diverse — include synonyms, related concepts, "
         "and different phrasings.",
         query,
-        max_tokens=200,
+        max_tokens=QUERY_EXPANSION_MAX_TOKENS,
     )
     if response is None:
         return []
