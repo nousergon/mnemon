@@ -281,33 +281,89 @@ async def serve_as_metadata(config: AuthorizationServerConfig, send) -> None:
     await _send_json(send, 200, authorization_server_metadata(config))
 
 
-# ── Authorization codes + refresh tokens (in-memory storage) ────────────────
+# ── Authorization codes + refresh tokens (volume-backed storage) ────────────
 #
-# In-memory storage is deliberate: auth codes live for 10 minutes and
-# refresh tokens are bound to a single user. A server restart invalidates
-# all outstanding codes (forces a re-login — acceptable friction for a
-# personal-use AS) and refresh tokens (forces re-auth on next use —
-# same). If you need durability across restarts, swap these dicts for
-# SQLite-backed tables in the Fly volume; the interface stays the same.
+# Persisted to JSON files in ``key_dir`` so Fly restarts (deploys,
+# autostop wake, secret rotation) don't invalidate outstanding refresh
+# tokens — which would force every connected MCP client to re-auth via
+# passphrase on every wake. Auth codes are persisted too for symmetry
+# and to cover the edge case of the machine idling during a 10-minute
+# OAuth flow.
+#
+# Files are mode 0600 (same as the AS private key). Writes go through
+# tmp + atomic rename so a crash mid-write can't corrupt the files.
+# Expired entries are dropped on load so the files don't grow forever.
 
 _AUTH_CODE_TTL_SEC = 600          # 10 min — RFC recommends ≤ 10 min
 _ACCESS_TOKEN_TTL_SEC = 3600      # 1 hour
 _REFRESH_TOKEN_TTL_SEC = 30 * 24 * 3600  # 30 days
 
-# auth_codes: code_value → {client_id, redirect_uri, code_challenge, scope,
-#                           subject, expires_at}
-_auth_codes: dict[str, dict[str, Any]] = {}
+_AUTH_CODES_FILENAME = "auth_codes.json"
+_REFRESH_TOKENS_FILENAME = "refresh_tokens.json"
 
-# refresh_tokens: refresh_token_value → {subject, scope, client_id, expires_at}
-_refresh_tokens: dict[str, dict[str, Any]] = {}
+
+def _load_token_file(path: Path, label: str) -> dict[str, dict[str, Any]]:
+    """Load a token JSON file, pruning expired entries. Returns {} on any
+    error — the cost is that clients re-auth, which is the same fallback
+    as losing the in-memory dict before this was persisted."""
+    if not path.exists():
+        return {}
+    try:
+        entries: dict[str, dict[str, Any]] = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(
+            "oauth_as: %s unreadable (%s); treating as empty. "
+            "Affected clients will need to re-auth.",
+            label, e,
+        )
+        return {}
+    now = _now()
+    return {k: v for k, v in entries.items() if v.get("expires_at", 0) > now}
+
+
+def _save_token_file(path: Path, entries: dict[str, dict[str, Any]]) -> None:
+    """Atomic-rename write of a token JSON file at mode 0600. These files
+    contain bearer-equivalent secrets, so perms must be as tight as the
+    AS private key."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, indent=2))
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
+def _auth_codes_path(config: AuthorizationServerConfig) -> Path:
+    return config.key_dir / _AUTH_CODES_FILENAME
+
+
+def _refresh_tokens_path(config: AuthorizationServerConfig) -> Path:
+    return config.key_dir / _REFRESH_TOKENS_FILENAME
+
+
+def _load_auth_codes(config: AuthorizationServerConfig) -> dict[str, dict[str, Any]]:
+    return _load_token_file(_auth_codes_path(config), "auth_codes.json")
+
+
+def _save_auth_codes(
+    config: AuthorizationServerConfig, codes: dict[str, dict[str, Any]]
+) -> None:
+    _save_token_file(_auth_codes_path(config), codes)
+
+
+def _load_refresh_tokens(config: AuthorizationServerConfig) -> dict[str, dict[str, Any]]:
+    return _load_token_file(_refresh_tokens_path(config), "refresh_tokens.json")
+
+
+def _save_refresh_tokens(
+    config: AuthorizationServerConfig, tokens: dict[str, dict[str, Any]]
+) -> None:
+    _save_token_file(_refresh_tokens_path(config), tokens)
 
 
 def _reset_state_for_tests() -> None:
-    """Clear module-level state. Test-only helper — prevents cross-test
-    leakage since auth codes and refresh tokens live in module globals.
-    Does NOT touch clients.json (that's per-tmp-path in tests)."""
-    _auth_codes.clear()
-    _refresh_tokens.clear()
+    """No-op — kept for backward compat with existing test fixtures.
+    State now lives per-``key_dir`` on disk, so each test's ``tmp_path``
+    fixture provides natural isolation."""
 
 
 def _now() -> int:
@@ -434,12 +490,14 @@ def _issue_token_pair(
     so it can be exchanged later via the refresh_token grant."""
     access_token = mint_access_token(config, subject=subject, scope=scope)
     refresh_token = _new_random_token()
-    _refresh_tokens[refresh_token] = {
+    tokens = _load_refresh_tokens(config)
+    tokens[refresh_token] = {
         "subject": subject,
         "scope": scope,
         "client_id": client_id,
         "expires_at": _now() + _REFRESH_TOKEN_TTL_SEC,
     }
+    _save_refresh_tokens(config, tokens)
     return {
         "access_token": access_token,
         "token_type": "Bearer",
@@ -676,7 +734,8 @@ async def serve_authorize(
 
     # Issue auth code and redirect to client's redirect_uri.
     code = _new_random_token()
-    _auth_codes[code] = {
+    codes = _load_auth_codes(config)
+    codes[code] = {
         "client_id": params["client_id"],
         "redirect_uri": params["redirect_uri"],
         "code_challenge": params["code_challenge"],
@@ -685,6 +744,7 @@ async def serve_authorize(
         "subject": "owner",  # single-user AS
         "expires_at": _now() + _AUTH_CODE_TTL_SEC,
     }
+    _save_auth_codes(config, codes)
 
     from urllib.parse import urlencode
     redirect_params = {"code": code}
@@ -759,13 +819,16 @@ async def _token_authorization_code(
             })
             return
 
-    record = _auth_codes.pop(code, None)  # one-time use — consume on lookup
+    # One-time use — consume on lookup.
+    codes = _load_auth_codes(config)
+    record = codes.pop(code, None)
     if record is None:
         await _send_json(send, 400, {
             "error": "invalid_grant",
             "error_description": "unknown, expired, or already-used code",
         })
         return
+    _save_auth_codes(config, codes)
     if record["expires_at"] < _now():
         await _send_json(send, 400, {
             "error": "invalid_grant",
@@ -815,13 +878,15 @@ async def _token_refresh(
 
     # Rotation: consume the old refresh token regardless of outcome so a
     # leaked token can only be used once.
-    record = _refresh_tokens.pop(refresh_token, None)
+    tokens = _load_refresh_tokens(config)
+    record = tokens.pop(refresh_token, None)
     if record is None:
         await _send_json(send, 400, {
             "error": "invalid_grant",
             "error_description": "unknown, expired, or already-rotated refresh token",
         })
         return
+    _save_refresh_tokens(config, tokens)
     if record["expires_at"] < _now():
         await _send_json(send, 400, {
             "error": "invalid_grant",
