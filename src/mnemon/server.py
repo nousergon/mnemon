@@ -73,52 +73,21 @@ def memory_search(
 ) -> str:
     """Search memories using hybrid BM25 + vector search with composite scoring.
 
-    This is the primary entry point for finding relevant memories.
-    Results are ranked by a composite of relevance, recency, and confidence.
+    Primary entry point for finding relevant memories. Results are ranked
+    by a composite of relevance, recency, and confidence.
+
+    Returns a JSON string — a list of result objects, empty when nothing
+    matches. Each object contains: ``doc_id``, ``title``, ``content``,
+    ``content_type``, ``confidence``, ``composite_score``,
+    ``vector_similarity``, ``created_at``. Score fields are floats.
+    ``vector_similarity`` is the raw cosine similarity (0.0–1.0) from the
+    vector store, preserved before RRF fusion; it is None for BM25-only
+    matches and is the right signal for dedup (``composite_score`` is a
+    weighted rank score, not a raw similarity).
     """
     store = _get_store()
     results = search(store, query, limit=limit, content_type=content_type)
-
-    if not results:
-        return "No memories found matching your query."
-
-    lines = []
-    for i, r in enumerate(results, 1):
-        snippet = r.content[:300]
-        ellipsis = "..." if len(r.content) > 300 else ""
-        lines.append(
-            f"{i}. [{r.content_type}] **{r.title}** "
-            f"(score: {r.composite_score:.3f}, confidence: {r.confidence:.2f})\n"
-            f"   {snippet}{ellipsis}\n"
-            f"   _id: {r.doc_id} | created: {r.created_at}_"
-        )
-    return "\n\n".join(lines)
-
-
-@mcp.tool()
-def memory_search_structured(
-    query: str,
-    limit: int = 10,
-    content_type: str | None = None,
-) -> str:
-    """Search memories and return results as a JSON array.
-
-    Machine-readable counterpart to ``memory_search``. Use this when a
-    client needs to act on score thresholds or individual fields rather
-    than present the results to a human. Returns a JSON string with one
-    object per result; empty array when nothing matches.
-
-    Each result object contains: doc_id, title, content, content_type,
-    confidence, composite_score, vector_similarity, created_at. Score
-    fields are floats — callers can compare against thresholds without
-    text parsing. ``vector_similarity`` is the raw cosine similarity
-    (0.0–1.0) from the vector store, preserved before RRF fusion; it
-    is None for BM25-only matches and is the right signal for dedup
-    (composite_score is a weighted rank score, not a similarity).
-    """
-    store = _get_store()
-    results = search(store, query, limit=limit, content_type=content_type)
-    payload = [
+    return json.dumps([
         {
             "doc_id": r.doc_id,
             "title": r.title,
@@ -130,24 +99,24 @@ def memory_search_structured(
             "created_at": r.created_at,
         }
         for r in results
-    ]
-    return json.dumps(payload)
+    ])
 
 
 @mcp.tool()
 def memory_get(id: int) -> str:
-    """Get a specific memory by its ID. Returns the full content."""
+    """Get a specific memory by its ID.
+
+    Returns a JSON string. On hit: the full document fields (``id``,
+    ``title``, ``content``, ``content_type``, ``confidence``,
+    ``created_at``, ``updated_at``, ``pinned``, ``access_count``, etc.).
+    On miss: ``{"error": "not_found", "id": <id>}``.
+    """
+    import dataclasses
     store = _get_store()
     doc = store.get(id)
     if not doc:
-        return f"Memory #{id} not found."
-
-    return (
-        f"# {doc.title}\n\n"
-        f"**Type:** {doc.content_type} | **Confidence:** {doc.confidence:.2f} | "
-        f"**Created:** {doc.created_at}\n\n"
-        f"{doc.content}"
-    )
+        return json.dumps({"error": "not_found", "id": id})
+    return json.dumps(dataclasses.asdict(doc))
 
 
 @mcp.tool()
@@ -155,17 +124,19 @@ def memory_timeline(
     limit: int = 20,
     content_type: str | None = None,
 ) -> str:
-    """Get recent memories in reverse chronological order."""
-    store = _get_store()
-    docs = store.timeline(limit, content_type)
-    if not docs:
-        return "No memories found."
+    """Recent memories in reverse chronological order as a JSON list.
 
-    lines = [
-        f"- **{d.title}** [{d.content_type}] (id: {d.id}, {d.created_at})"
-        for d in docs
-    ]
-    return "\n".join(lines)
+    Each item carries the full document shape (``id``, ``title``,
+    ``content``, ``content_type``, ``confidence``, ``pinned``,
+    ``created_at``, ``updated_at``, ``access_count``). Empty list when
+    no matches.
+    """
+    import dataclasses
+    store = _get_store()
+    return json.dumps([
+        dataclasses.asdict(d)
+        for d in store.timeline(limit, content_type)
+    ])
 
 
 # ── Mutation Tools ───────────────────────────────────────────────────────────
@@ -236,58 +207,125 @@ def memory_forget(id: int) -> str:
 
 @mcp.tool()
 def memory_status() -> str:
-    """Get vault health stats — document counts by type, pinned/invalidated counts."""
+    """Vault health stats as a JSON object.
+
+    Returns: ``{total_documents, total_vectors, invalidated, pinned,
+    by_type, vault_path}``. ``by_type`` is a list of
+    ``{content_type, count}`` ordered by count descending.
+    """
     store = _get_store()
-    stats = store.status()
-
-    by_type = "\n".join(
-        f"  {t['content_type']}: {t['count']}" for t in stats["by_type"]
-    )
-
-    return (
-        f"Vault: {stats['vault_path']}\n"
-        f"Total memories: {stats['total_documents']}\n"
-        f"Vectors: {stats['total_vectors']}\n"
-        f"Pinned: {stats['pinned']}\n"
-        f"Invalidated: {stats['invalidated']}\n\n"
-        f"By type:\n{by_type}"
-    )
+    return json.dumps(store.status())
 
 
 @mcp.tool()
 def memory_sweep(dry_run: bool = True) -> str:
     """Archive stale memories that have exceeded their half-life.
 
-    Runs in dry-run mode by default — pass dry_run=False to actually archive.
+    Runs in dry-run mode by default — pass ``dry_run=False`` to actually
+    archive. Returns JSON: ``{archived: int, candidates: [{id, title,
+    content_type, age_days}]}``. ``archived`` is 0 on dry-run.
     """
+    import dataclasses
     store = _get_store()
     result = store.sweep(dry_run)
-
-    if not result["candidates"]:
-        return "No stale memories to archive."
-
-    lines = [
-        f'- #{c.id} "{c.title}" [{c.content_type}] — {c.age_days} days old'
-        for c in result["candidates"]
-    ]
-
-    action = "Would archive" if dry_run else "Archived"
-    return f"{action} {len(result['candidates'])} memories:\n" + "\n".join(lines)
+    result["candidates"] = [dataclasses.asdict(c) for c in result["candidates"]]
+    return json.dumps(result)
 
 
 @mcp.tool()
 def memory_related(id: int, limit: int = 10) -> str:
-    """Find memories related to a given memory via the relationship graph."""
-    store = _get_store()
-    related = store.get_related(id, limit)
-    if not related:
-        return f"No related memories found for #{id}."
+    """Related memories via the relationship graph, as a JSON list.
 
-    lines = [
-        f"- [{r.relation_type}] **{r.title}** (id: {r.id}, weight: {r.weight:.2f})"
-        for r in related
-    ]
-    return "\n".join(lines)
+    Each entry is the full document shape plus ``relation_type`` and
+    ``weight``. Empty list when nothing is related.
+    """
+    import dataclasses
+    store = _get_store()
+    return json.dumps([
+        dataclasses.asdict(r) for r in store.get_related(id, limit)
+    ])
+
+
+# Vector-export cap: 5000 vectors × 384 floats ≈ 7-10 MB JSON at the
+# float representation we emit. Enough for any personal vault; explicit
+# cap so a runaway vault size doesn't OOM the server process silently.
+_VECTOR_EXPORT_MAX = 5000
+
+
+@mcp.tool()
+def memory_export_vectors() -> str:
+    """Export all stored embedding vectors joined to document metadata.
+
+    Used by the mnemon dashboard's Graph page to pull the full embedding
+    matrix over MCP and run UMAP projection client-side. Avoids exposing
+    a filesystem path or bulk-SQL interface while keeping the dashboard
+    remote-aware.
+
+    Returns a JSON object ``{count, dim, truncated, items}``:
+
+    - ``count``: number of vectors returned (may be ≤ stored count if
+      capped).
+    - ``dim``: vector dimensionality (384 for bge-small-en-v1.5).
+    - ``truncated``: True if the vault exceeds the server's export cap
+      and results were truncated.
+    - ``items``: list of ``{doc_id, vec_id, title, content_type,
+      confidence, created_at, pinned, vector}``. ``vector`` is a list
+      of floats of length ``dim``. Invalidated docs are excluded.
+
+    Cap is ``_VECTOR_EXPORT_MAX`` (5000) vectors.
+    """
+    store = _get_store()
+    vec_ids, vectors = store.vec_store.export_all()
+
+    if not vec_ids:
+        return json.dumps({"count": 0, "dim": store.vec_store.dim,
+                           "truncated": False, "items": []})
+
+    truncated = len(vec_ids) > _VECTOR_EXPORT_MAX
+    if truncated:
+        vec_ids = vec_ids[:_VECTOR_EXPORT_MAX]
+        vectors = vectors[:_VECTOR_EXPORT_MAX]
+
+    # vec_id format is "{content_hash}_{seq}" — split once from the right
+    # since content_hash is a hex SHA-256 (no underscores).
+    hashes = [vid.rsplit("_", 1)[0] for vid in vec_ids]
+    unique_hashes = list(dict.fromkeys(hashes))
+
+    # One query for all hashes; take the first non-invalidated doc per hash.
+    placeholders = ",".join("?" * len(unique_hashes))
+    rows = store.db.execute(
+        f"""SELECT hash, id, title, content_type, confidence, created_at, pinned
+            FROM documents
+            WHERE hash IN ({placeholders})
+              AND invalidated_at IS NULL""",
+        unique_hashes,
+    ).fetchall()
+    hash_to_doc = {r["hash"]: dict(r) for r in rows}
+
+    items = []
+    for vec_id, content_hash, vector in zip(vec_ids, hashes, vectors):
+        doc = hash_to_doc.get(content_hash)
+        if doc is None:
+            # Vector exists but its source document is gone (invalidated
+            # or deleted). Skip — dashboard can't render it usefully.
+            continue
+        items.append({
+            "doc_id": doc["id"],
+            "vec_id": vec_id,
+            "title": doc["title"],
+            "content_type": doc["content_type"],
+            "confidence": doc["confidence"],
+            "created_at": doc["created_at"],
+            "pinned": bool(doc["pinned"]),
+            "vector": vector.tolist(),
+        })
+
+    return json.dumps({
+        "count": len(items),
+        "dim": store.vec_store.dim,
+        "truncated": truncated,
+        "items": items,
+    })
 
 
 @mcp.tool()
@@ -318,31 +356,22 @@ def memory_rebuild() -> str:
 
 @mcp.tool()
 def profile_get() -> str:
-    """Get a synthesized user profile from stored preferences and decisions.
+    """Synthesized user profile from stored preferences and decisions.
 
-    Shows what mnemon knows about the user's habits, preferences, and key decisions.
+    Returns JSON: ``{preferences: [doc_dict, ...], decisions: [doc_dict, ...]}``.
+    Each list holds the most recent 50 items of its content type, with
+    the full document shape per entry. Both lists may be empty.
     """
+    import dataclasses
     store = _get_store()
-    preferences = store.timeline(50, "preference")
-    decisions = store.timeline(50, "decision")
-
-    if not preferences and not decisions:
-        return (
-            "No profile data yet. Preferences and decisions will be "
-            "collected automatically over time."
-        )
-
-    sections: list[str] = []
-
-    if preferences:
-        lines = [f"- **{d.title}**: {d.content[:200]}" for d in preferences]
-        sections.append("## Preferences\n" + "\n".join(lines))
-
-    if decisions:
-        lines = [f"- **{d.title}**: {d.content[:200]}" for d in decisions]
-        sections.append("## Key Decisions\n" + "\n".join(lines))
-
-    return "\n\n".join(sections)
+    return json.dumps({
+        "preferences": [
+            dataclasses.asdict(d) for d in store.timeline(50, "preference")
+        ],
+        "decisions": [
+            dataclasses.asdict(d) for d in store.timeline(50, "decision")
+        ],
+    })
 
 
 @mcp.tool()

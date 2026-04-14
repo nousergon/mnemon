@@ -22,6 +22,7 @@ All memory reads flow to the Fly vault via :mod:`mnemon.hooks._remote_client`.
 
 from __future__ import annotations
 
+import json
 import sys
 
 from ..config import (
@@ -40,40 +41,66 @@ SLOW_THRESHOLD_SEC = HOOK_SLOW_THRESHOLD_SEC
 CLIENT_LABEL = "claude-code-context-surfacing"
 SEARCH_LIMIT = 8
 
-# Sentinel string the server returns when memory_search finds nothing.
-# Kept in sync with src/mnemon/server.py memory_search().
-NO_RESULTS_SENTINEL = "No memories found matching your query."
+# Snippet size injected per result — matches the pre-0.5.0 server-side
+# truncation so context block size stays bounded independent of vault
+# content length.
+_SNIPPET_CHARS = 300
+
+
+def _format_results(results: list[dict]) -> str:
+    """Render a memory_search JSON response as a markdown list for prompt
+    injection. Mirrors the pre-0.5.0 server-side prose format so the
+    shape Claude sees in ``<mnemon-context>`` blocks is unchanged."""
+    lines: list[str] = []
+    for i, r in enumerate(results, 1):
+        content = r.get("content", "")
+        snippet = content[:_SNIPPET_CHARS]
+        ellipsis = "..." if len(content) > _SNIPPET_CHARS else ""
+        lines.append(
+            f"{i}. [{r.get('content_type', 'note')}] **{r.get('title', '')}** "
+            f"(score: {r.get('composite_score', 0):.3f}, "
+            f"confidence: {r.get('confidence', 0):.2f})\n"
+            f"   {snippet}{ellipsis}\n"
+            f"   _id: {r.get('doc_id', '?')} | "
+            f"created: {r.get('created_at', '')}_"
+        )
+    return "\n\n".join(lines)
 
 
 def build_context(raw_text: str, *, prefix: str = "") -> str:
-    """Wrap the ``memory_search`` response in a ``<mnemon-context>`` block.
+    """Wrap a ``memory_search`` JSON response in a ``<mnemon-context>`` block.
 
-    The server returns a pre-formatted markdown list of matches, each
-    already truncated to a 300-char snippet. We pass it through unchanged
-    and wrap it in a containing tag so Claude can recognise it as mnemon
-    context. A character budget is enforced as a safety net in case the
-    server ever returns an unexpectedly long payload.
+    Post-0.5.0 the server returns JSON instead of pre-formatted prose; we
+    parse it and format client-side so the block the LLM sees is stable
+    and token-efficient. A character budget caps the rendered output as
+    a safety net against unexpectedly large payloads.
 
     ``prefix`` is prepended inside the block before the memories header —
     used to surface latency warnings on slow-but-successful calls.
 
     Returns an empty string when there's nothing worth injecting — empty
-    input, the server's no-results sentinel, or whitespace-only content.
+    input, an empty result list, or unparseable JSON.
     """
     if not raw_text:
         return ""
     trimmed = raw_text.strip()
     if not trimmed:
         return ""
-    if NO_RESULTS_SENTINEL in trimmed:
+    try:
+        results = json.loads(trimmed)
+    except json.JSONDecodeError:
+        # Server contract violation — don't inject garbage into the prompt.
         return ""
-    if len(trimmed) > CHAR_BUDGET:
-        trimmed = trimmed[:CHAR_BUDGET].rstrip() + "\n...[truncated]"
+    if not isinstance(results, list) or not results:
+        return ""
+    rendered = _format_results(results)
+    if len(rendered) > CHAR_BUDGET:
+        rendered = rendered[:CHAR_BUDGET].rstrip() + "\n...[truncated]"
     lines = []
     if prefix:
         lines.append(prefix)
     lines.append("Relevant memories from previous sessions:")
-    lines.append(trimmed)
+    lines.append(rendered)
     inner = "\n".join(lines)
     return f"<mnemon-context>\n{inner}\n</mnemon-context>"
 

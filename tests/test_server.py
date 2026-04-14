@@ -1,5 +1,6 @@
 """Tests for the MCP server tool handlers."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 import mnemon.server as server_mod
 from mnemon.server import (
     memory_check_contradictions,
+    memory_export_vectors,
     memory_forget,
     memory_get,
     memory_pin,
@@ -14,7 +16,6 @@ from mnemon.server import (
     memory_related,
     memory_save,
     memory_search,
-    memory_search_structured,
     memory_status,
     memory_sweep,
     memory_timeline,
@@ -52,59 +53,48 @@ def _make_search_result(**overrides):
 
 
 def _make_document(**overrides):
-    """Build a mock Document."""
+    """Build a real Document dataclass instance. Post-0.5.0 the JSON-returning
+    tools serialize docs via ``dataclasses.asdict``, so test fixtures must be
+    real dataclasses rather than MagicMocks."""
+    from mnemon.store import Document
     defaults = {
-        "id": 1,
-        "collection": "default",
-        "path": None,
-        "title": "Test Doc",
-        "hash": "abc123",
-        "content_type": "note",
-        "memory_type": "explicit",
-        "confidence": 0.80,
-        "access_count": 1,
-        "is_pinned": False,
-        "is_invalidated": False,
-        "created_at": "2026-04-01T00:00:00Z",
+        "id": 1, "collection": "default", "path": None, "title": "Test Doc",
+        "hash": "abc123", "content_type": "note", "memory_type": "semantic",
+        "confidence": 0.80, "quality_score": 0.0, "access_count": 1,
+        "pinned": 0, "source_client": None, "invalidated_at": None,
+        "invalidated_by": None, "created_at": "2026-04-01T00:00:00Z",
         "updated_at": "2026-04-01T00:00:00Z",
         "content": "Full document content here.",
-        "source_client": None,
     }
     defaults.update(overrides)
-    m = MagicMock()
-    for k, v in defaults.items():
-        setattr(m, k, v)
-    return m
+    return Document(**defaults)
 
 
 def _make_sweep_candidate(**overrides):
-    """Build a mock SweepCandidate."""
+    """Build a real SweepCandidate dataclass instance."""
+    from mnemon.store import SweepCandidate
     defaults = {
-        "id": 5,
-        "title": "Old Memory",
-        "content_type": "note",
-        "age_days": 120,
+        "id": 5, "title": "Old Memory",
+        "content_type": "note", "age_days": 120,
     }
     defaults.update(overrides)
-    m = MagicMock()
-    for k, v in defaults.items():
-        setattr(m, k, v)
-    return m
+    return SweepCandidate(**defaults)
 
 
 def _make_related(**overrides):
-    """Build a mock RelatedDocument."""
+    """Build a real RelatedDocument dataclass instance."""
+    from mnemon.store import RelatedDocument
     defaults = {
-        "id": 2,
-        "title": "Related Doc",
-        "relation_type": "supports",
-        "weight": 0.85,
+        "id": 2, "collection": "default", "path": None, "title": "Related Doc",
+        "hash": "def456", "content_type": "note", "memory_type": "semantic",
+        "confidence": 0.80, "quality_score": 0.0, "access_count": 0,
+        "pinned": 0, "source_client": None, "invalidated_at": None,
+        "invalidated_by": None, "created_at": "2026-04-01T00:00:00Z",
+        "updated_at": "2026-04-01T00:00:00Z", "content": "",
+        "relation_type": "supports", "weight": 0.85,
     }
     defaults.update(overrides)
-    m = MagicMock()
-    for k, v in defaults.items():
-        setattr(m, k, v)
-    return m
+    return RelatedDocument(**defaults)
 
 
 # ── _get_store ───────────────────────────────────────────────────────────────
@@ -129,88 +119,29 @@ class TestGetStore:
 
 
 class TestMemorySearch:
+    """Post-0.5.0 memory_search returns a JSON array directly (the old
+    paired prose tool is gone). Clients needing human-facing output
+    format the JSON themselves — e.g., context_surfacing hook."""
+
     @patch("mnemon.server.search")
     @patch("mnemon.server.Store")
-    def test_no_results(self, MockStore, mock_search):
+    def test_no_results_returns_empty_array(self, MockStore, mock_search):
         mock_search.return_value = []
-        result = memory_search("test query")
-        assert result == "No memories found matching your query."
-
-    @patch("mnemon.server.search")
-    @patch("mnemon.server.Store")
-    def test_with_results(self, MockStore, mock_search):
-        r1 = _make_search_result(doc_id=1, title="Alpha", composite_score=0.9, confidence=0.85)
-        r2 = _make_search_result(doc_id=2, title="Beta", composite_score=0.7, confidence=0.60)
-        mock_search.return_value = [r1, r2]
-
-        result = memory_search("test query", limit=5)
-        assert "1. [note] **Alpha**" in result
-        assert "2. [note] **Beta**" in result
-        assert "score: 0.900" in result
-        assert "confidence: 0.85" in result
-        assert "id: 1" in result
-        assert "id: 2" in result
-
-    @patch("mnemon.server.search")
-    @patch("mnemon.server.Store")
-    def test_long_content_truncated(self, MockStore, mock_search):
-        long_content = "x" * 500
-        r = _make_search_result(content=long_content)
-        mock_search.return_value = [r]
-
-        result = memory_search("query")
-        assert "..." in result
-        # Only first 300 chars of content should appear
-        assert "x" * 300 in result
-        assert "x" * 301 not in result
-
-    @patch("mnemon.server.search")
-    @patch("mnemon.server.Store")
-    def test_short_content_no_ellipsis(self, MockStore, mock_search):
-        r = _make_search_result(content="short")
-        mock_search.return_value = [r]
-
-        result = memory_search("query")
-        assert "..." not in result
-
-    @patch("mnemon.server.search")
-    @patch("mnemon.server.Store")
-    def test_passes_content_type(self, MockStore, mock_search):
-        mock_search.return_value = []
-        memory_search("query", content_type="decision")
-        mock_search.assert_called_once_with(
-            MockStore.return_value, "query", limit=10, content_type="decision"
-        )
-
-
-# ── memory_search_structured ─────────────────────────────────────────────────
-
-
-class TestMemorySearchStructured:
-    @patch("mnemon.server.search")
-    @patch("mnemon.server.Store")
-    def test_empty_results_returns_empty_json_array(self, MockStore, mock_search):
-        import json
-        mock_search.return_value = []
-        result = memory_search_structured("q")
-        assert json.loads(result) == []
+        assert json.loads(memory_search("test query")) == []
 
     @patch("mnemon.server.search")
     @patch("mnemon.server.Store")
     def test_results_are_json_objects_with_numeric_scores(self, MockStore, mock_search):
-        import json
-        r1 = _make_search_result(doc_id=1, title="Alpha", composite_score=0.9, confidence=0.85)
-        r2 = _make_search_result(doc_id=2, title="Beta", composite_score=0.7, confidence=0.60)
+        r1 = _make_search_result(doc_id=1, title="Alpha",
+                                 composite_score=0.9, confidence=0.85)
+        r2 = _make_search_result(doc_id=2, title="Beta",
+                                 composite_score=0.7, confidence=0.60)
         mock_search.return_value = [r1, r2]
 
-        result = memory_search_structured("q", limit=5)
-        parsed = json.loads(result)
-
+        parsed = json.loads(memory_search("q", limit=5))
         assert len(parsed) == 2
         assert parsed[0]["doc_id"] == 1
         assert parsed[0]["title"] == "Alpha"
-        # Scores are native floats — callers can compare against thresholds
-        # without parsing any string format.
         assert isinstance(parsed[0]["composite_score"], float)
         assert parsed[0]["composite_score"] == 0.9
         assert parsed[1]["composite_score"] == 0.7
@@ -218,14 +149,12 @@ class TestMemorySearchStructured:
     @patch("mnemon.server.search")
     @patch("mnemon.server.Store")
     def test_includes_all_expected_fields(self, MockStore, mock_search):
-        import json
         mock_search.return_value = [_make_search_result(
             doc_id=42, title="T", content="C", content_type="decision",
             confidence=0.9, composite_score=0.5, vector_similarity=0.87,
             created_at="2026-04-12T00:00:00Z",
         )]
-        result = memory_search_structured("q")
-        parsed = json.loads(result)[0]
+        parsed = json.loads(memory_search("q"))[0]
         expected = {"doc_id", "title", "content", "content_type",
                     "confidence", "composite_score", "vector_similarity",
                     "created_at"}
@@ -236,9 +165,9 @@ class TestMemorySearchStructured:
     @patch("mnemon.server.Store")
     def test_passes_content_type(self, MockStore, mock_search):
         mock_search.return_value = []
-        memory_search_structured("q", content_type="preference")
+        memory_search("query", content_type="decision")
         mock_search.assert_called_once_with(
-            MockStore.return_value, "q", limit=10, content_type="preference"
+            MockStore.return_value, "query", limit=10, content_type="decision"
         )
 
 
@@ -257,17 +186,18 @@ class TestMemoryGet:
         )
         MockStore.return_value.get.return_value = doc
 
-        result = memory_get(1)
-        assert result.startswith("# My Decision")
-        assert "decision" in result
-        assert "0.90" in result
-        assert "We chose option A." in result
+        parsed = json.loads(memory_get(1))
+        assert parsed["id"] == 1
+        assert parsed["title"] == "My Decision"
+        assert parsed["content_type"] == "decision"
+        assert parsed["confidence"] == 0.90
+        assert parsed["content"] == "We chose option A."
 
     @patch("mnemon.server.Store")
     def test_not_found(self, MockStore):
         MockStore.return_value.get.return_value = None
-        result = memory_get(999)
-        assert result == "Memory #999 not found."
+        parsed = json.loads(memory_get(999))
+        assert parsed == {"error": "not_found", "id": 999}
 
 
 # ── memory_timeline ──────────────────────────────────────────────────────────
@@ -277,8 +207,7 @@ class TestMemoryTimeline:
     @patch("mnemon.server.Store")
     def test_empty(self, MockStore):
         MockStore.return_value.timeline.return_value = []
-        result = memory_timeline()
-        assert result == "No memories found."
+        assert json.loads(memory_timeline()) == []
 
     @patch("mnemon.server.Store")
     def test_populated(self, MockStore):
@@ -286,11 +215,12 @@ class TestMemoryTimeline:
         d2 = _make_document(id=11, title="Second", content_type="decision", created_at="2026-04-02")
         MockStore.return_value.timeline.return_value = [d1, d2]
 
-        result = memory_timeline(limit=5, content_type="note")
-        assert "**First** [note]" in result
-        assert "**Second** [decision]" in result
-        assert "id: 10" in result
-        assert "id: 11" in result
+        parsed = json.loads(memory_timeline(limit=5, content_type="note"))
+        assert len(parsed) == 2
+        assert parsed[0]["id"] == 10
+        assert parsed[0]["title"] == "First"
+        assert parsed[1]["id"] == 11
+        assert parsed[1]["content_type"] == "decision"
 
     @patch("mnemon.server.Store")
     def test_passes_args(self, MockStore):
@@ -391,8 +321,8 @@ class TestMemoryForget:
 
 class TestMemoryStatus:
     @patch("mnemon.server.Store")
-    def test_returns_formatted_status(self, MockStore):
-        MockStore.return_value.status.return_value = {
+    def test_returns_raw_status_dict(self, MockStore):
+        status = {
             "vault_path": "/home/user/.mnemon/default.sqlite",
             "total_documents": 42,
             "total_vectors": 38,
@@ -403,30 +333,18 @@ class TestMemoryStatus:
                 {"content_type": "decision", "count": 12},
             ],
         }
-
-        result = memory_status()
-        assert "Vault: /home/user/.mnemon/default.sqlite" in result
-        assert "Total memories: 42" in result
-        assert "Vectors: 38" in result
-        assert "Pinned: 3" in result
-        assert "Invalidated: 1" in result
-        assert "note: 30" in result
-        assert "decision: 12" in result
+        MockStore.return_value.status.return_value = status
+        assert json.loads(memory_status()) == status
 
     @patch("mnemon.server.Store")
     def test_empty_vault(self, MockStore):
-        MockStore.return_value.status.return_value = {
+        status = {
             "vault_path": "/tmp/test.sqlite",
-            "total_documents": 0,
-            "total_vectors": 0,
-            "pinned": 0,
-            "invalidated": 0,
-            "by_type": [],
+            "total_documents": 0, "total_vectors": 0,
+            "pinned": 0, "invalidated": 0, "by_type": [],
         }
-
-        result = memory_status()
-        assert "Total memories: 0" in result
-        assert "By type:" in result
+        MockStore.return_value.status.return_value = status
+        assert json.loads(memory_status()) == status
 
 
 # ── memory_sweep ─────────────────────────────────────────────────────────────
@@ -435,34 +353,38 @@ class TestMemoryStatus:
 class TestMemorySweep:
     @patch("mnemon.server.Store")
     def test_no_candidates(self, MockStore):
-        MockStore.return_value.sweep.return_value = {"candidates": []}
-        result = memory_sweep()
-        assert result == "No stale memories to archive."
+        MockStore.return_value.sweep.return_value = {"archived": 0, "candidates": []}
+        assert json.loads(memory_sweep()) == {"archived": 0, "candidates": []}
 
     @patch("mnemon.server.Store")
     def test_dry_run_with_candidates(self, MockStore):
-        c1 = _make_sweep_candidate(id=10, title="Old Note", content_type="note", age_days=90)
-        c2 = _make_sweep_candidate(id=11, title="Stale Obs", content_type="observation", age_days=200)
-        MockStore.return_value.sweep.return_value = {"candidates": [c1, c2]}
-
-        result = memory_sweep(dry_run=True)
-        assert "Would archive 2 memories:" in result
-        assert '#10 "Old Note" [note]' in result
-        assert '#11 "Stale Obs" [observation]' in result
-        assert "90 days old" in result
+        c1 = _make_sweep_candidate(id=10, title="Old Note",
+                                   content_type="note", age_days=90)
+        c2 = _make_sweep_candidate(id=11, title="Stale Obs",
+                                   content_type="observation", age_days=200)
+        MockStore.return_value.sweep.return_value = {
+            "archived": 0, "candidates": [c1, c2],
+        }
+        parsed = json.loads(memory_sweep(dry_run=True))
+        assert parsed["archived"] == 0
+        assert len(parsed["candidates"]) == 2
+        assert parsed["candidates"][0]["id"] == 10
+        assert parsed["candidates"][1]["age_days"] == 200
 
     @patch("mnemon.server.Store")
     def test_real_sweep(self, MockStore):
-        c = _make_sweep_candidate(id=5, title="Gone", content_type="note", age_days=365)
-        MockStore.return_value.sweep.return_value = {"candidates": [c]}
-
-        result = memory_sweep(dry_run=False)
-        assert "Archived 1 memories:" in result
-        assert "Would archive" not in result
+        c = _make_sweep_candidate(id=5, title="Gone",
+                                  content_type="note", age_days=365)
+        MockStore.return_value.sweep.return_value = {
+            "archived": 1, "candidates": [c],
+        }
+        parsed = json.loads(memory_sweep(dry_run=False))
+        assert parsed["archived"] == 1
+        assert len(parsed["candidates"]) == 1
 
     @patch("mnemon.server.Store")
     def test_passes_dry_run_arg(self, MockStore):
-        MockStore.return_value.sweep.return_value = {"candidates": []}
+        MockStore.return_value.sweep.return_value = {"archived": 0, "candidates": []}
         memory_sweep(dry_run=False)
         MockStore.return_value.sweep.assert_called_once_with(False)
 
@@ -474,21 +396,22 @@ class TestMemoryRelated:
     @patch("mnemon.server.Store")
     def test_empty(self, MockStore):
         MockStore.return_value.get_related.return_value = []
-        result = memory_related(1)
-        assert result == "No related memories found for #1."
+        assert json.loads(memory_related(1)) == []
 
     @patch("mnemon.server.Store")
     def test_populated(self, MockStore):
-        r1 = _make_related(id=2, title="Supporting Doc", relation_type="supports", weight=0.90)
-        r2 = _make_related(id=3, title="Contradicting Doc", relation_type="contradicts", weight=0.70)
+        r1 = _make_related(id=2, title="Supporting Doc",
+                           relation_type="supports", weight=0.90)
+        r2 = _make_related(id=3, title="Contradicting Doc",
+                           relation_type="contradicts", weight=0.70)
         MockStore.return_value.get_related.return_value = [r1, r2]
 
-        result = memory_related(1, limit=5)
-        assert "[supports] **Supporting Doc**" in result
-        assert "weight: 0.90" in result
-        assert "[contradicts] **Contradicting Doc**" in result
-        assert "id: 2" in result
-        assert "id: 3" in result
+        parsed = json.loads(memory_related(1, limit=5))
+        assert len(parsed) == 2
+        assert parsed[0]["id"] == 2
+        assert parsed[0]["relation_type"] == "supports"
+        assert parsed[0]["weight"] == 0.90
+        assert parsed[1]["relation_type"] == "contradicts"
 
     @patch("mnemon.server.Store")
     def test_passes_args(self, MockStore):
@@ -582,63 +505,58 @@ class TestProfileGet:
     @patch("mnemon.server.Store")
     def test_no_data(self, MockStore):
         MockStore.return_value.timeline.return_value = []
-
-        result = profile_get()
-        assert "No profile data yet" in result
+        assert json.loads(profile_get()) == {"preferences": [], "decisions": []}
 
     @patch("mnemon.server.Store")
     def test_only_preferences(self, MockStore):
-        pref = _make_document(title="Dark Mode", content="User prefers dark mode in all editors.")
-        mock_store = MockStore.return_value
-        mock_store.timeline.side_effect = lambda limit, ct: (
+        pref = _make_document(title="Dark Mode",
+                              content="User prefers dark mode in all editors.")
+        MockStore.return_value.timeline.side_effect = lambda limit, ct: (
             [pref] if ct == "preference" else []
         )
-
-        result = profile_get()
-        assert "## Preferences" in result
-        assert "**Dark Mode**" in result
-        assert "## Key Decisions" not in result
+        parsed = json.loads(profile_get())
+        assert len(parsed["preferences"]) == 1
+        assert parsed["preferences"][0]["title"] == "Dark Mode"
+        assert parsed["decisions"] == []
 
     @patch("mnemon.server.Store")
     def test_only_decisions(self, MockStore):
-        dec = _make_document(title="Use Python", content="Decided to use Python over TypeScript.")
-        mock_store = MockStore.return_value
-        mock_store.timeline.side_effect = lambda limit, ct: (
+        dec = _make_document(title="Use Python",
+                             content="Decided to use Python over TypeScript.")
+        MockStore.return_value.timeline.side_effect = lambda limit, ct: (
             [dec] if ct == "decision" else []
         )
-
-        result = profile_get()
-        assert "## Key Decisions" in result
-        assert "**Use Python**" in result
-        assert "## Preferences" not in result
+        parsed = json.loads(profile_get())
+        assert parsed["preferences"] == []
+        assert len(parsed["decisions"]) == 1
+        assert parsed["decisions"][0]["title"] == "Use Python"
 
     @patch("mnemon.server.Store")
     def test_both_preferences_and_decisions(self, MockStore):
         pref = _make_document(title="Vim Keys", content="Prefers vim keybindings.")
-        dec = _make_document(title="Chose SQLite", content="SQLite over Postgres for simplicity.")
-        mock_store = MockStore.return_value
-        mock_store.timeline.side_effect = lambda limit, ct: (
+        dec = _make_document(title="Chose SQLite",
+                             content="SQLite over Postgres for simplicity.")
+        MockStore.return_value.timeline.side_effect = lambda limit, ct: (
             [pref] if ct == "preference" else [dec] if ct == "decision" else []
         )
-
-        result = profile_get()
-        assert "## Preferences" in result
-        assert "## Key Decisions" in result
-        assert "**Vim Keys**" in result
-        assert "**Chose SQLite**" in result
+        parsed = json.loads(profile_get())
+        assert len(parsed["preferences"]) == 1
+        assert len(parsed["decisions"]) == 1
+        assert parsed["preferences"][0]["title"] == "Vim Keys"
+        assert parsed["decisions"][0]["title"] == "Chose SQLite"
 
     @patch("mnemon.server.Store")
-    def test_long_content_truncated(self, MockStore):
+    def test_content_not_truncated(self, MockStore):
+        """Post-0.5.0 the tool returns raw document content — any truncation
+        is the client's responsibility (e.g., the dashboard or the LLM
+        formatter). This test locks that in so we don't silently truncate
+        on the server again."""
         pref = _make_document(title="Long Pref", content="z" * 500)
-        mock_store = MockStore.return_value
-        mock_store.timeline.side_effect = lambda limit, ct: (
+        MockStore.return_value.timeline.side_effect = lambda limit, ct: (
             [pref] if ct == "preference" else []
         )
-
-        result = profile_get()
-        # Content should be truncated to 200 chars
-        assert "z" * 200 in result
-        assert "z" * 201 not in result
+        parsed = json.loads(profile_get())
+        assert parsed["preferences"][0]["content"] == "z" * 500
 
 
 # ── profile_update ───────────────────────────────────────────────────────────
@@ -739,3 +657,85 @@ class TestMemoryCheckContradictions:
             result = memory_check_contradictions(1)
 
         assert "0 memories had their confidence decayed." in result
+
+
+# ── memory_export_vectors ────────────────────────────────────────────────────
+
+
+class TestMemoryExportVectors:
+    @patch("mnemon.server.Store")
+    def test_empty_vault(self, MockStore):
+        import numpy as np
+        MockStore.return_value.vec_store.export_all.return_value = (
+            [], np.zeros((0, 384))
+        )
+        MockStore.return_value.vec_store.dim = 384
+        assert json.loads(memory_export_vectors()) == {
+            "count": 0, "dim": 384, "truncated": False, "items": [],
+        }
+
+    @patch("mnemon.server.Store")
+    def test_joins_vectors_to_docs(self, MockStore):
+        import numpy as np
+        vec_ids = ["abc_0", "def_0"]
+        vectors = np.array([[0.1] * 384, [0.2] * 384], dtype=np.float32)
+        MockStore.return_value.vec_store.export_all.return_value = (vec_ids, vectors)
+        MockStore.return_value.vec_store.dim = 384
+        rows = [
+            {"hash": "abc", "id": 1, "title": "First",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": 0},
+            {"hash": "def", "id": 2, "title": "Second",
+             "content_type": "decision", "confidence": 0.85,
+             "created_at": "2026-01-02", "pinned": 1},
+        ]
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = rows
+
+        parsed = json.loads(memory_export_vectors())
+        assert parsed["count"] == 2
+        assert parsed["dim"] == 384
+        assert parsed["truncated"] is False
+        first = next(i for i in parsed["items"] if i["doc_id"] == 1)
+        assert first["title"] == "First"
+        assert first["pinned"] is False
+        assert len(first["vector"]) == 384
+        second = next(i for i in parsed["items"] if i["doc_id"] == 2)
+        assert second["pinned"] is True
+
+    @patch("mnemon.server.Store")
+    def test_skips_vectors_with_invalidated_docs(self, MockStore):
+        """Vectors whose source doc was invalidated/deleted are skipped."""
+        import numpy as np
+        MockStore.return_value.vec_store.export_all.return_value = (
+            ["abc_0", "orphan_0"],
+            np.array([[0.1] * 384, [0.3] * 384], dtype=np.float32),
+        )
+        MockStore.return_value.vec_store.dim = 384
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = [
+            {"hash": "abc", "id": 1, "title": "Kept",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": 0},
+        ]
+        parsed = json.loads(memory_export_vectors())
+        assert parsed["count"] == 1
+        assert parsed["items"][0]["doc_id"] == 1
+
+    @patch("mnemon.server.Store")
+    def test_truncates_at_cap(self, MockStore):
+        import numpy as np
+        from mnemon.server import _VECTOR_EXPORT_MAX
+        n = _VECTOR_EXPORT_MAX + 50
+        vec_ids = [f"hash{i}_0" for i in range(n)]
+        vectors = np.zeros((n, 384), dtype=np.float32)
+        MockStore.return_value.vec_store.export_all.return_value = (vec_ids, vectors)
+        MockStore.return_value.vec_store.dim = 384
+        rows = [
+            {"hash": f"hash{i}", "id": i, "title": f"T{i}",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": 0}
+            for i in range(_VECTOR_EXPORT_MAX)
+        ]
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = rows
+        parsed = json.loads(memory_export_vectors())
+        assert parsed["truncated"] is True
+        assert parsed["count"] == _VECTOR_EXPORT_MAX

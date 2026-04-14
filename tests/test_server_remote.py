@@ -59,10 +59,11 @@ class TestMcpServer:
         from mnemon.server import mcp
         tool_names = set(mcp._tool_manager._tools.keys())
         expected = {
-            "memory_search", "memory_search_structured",
+            "memory_search",
             "memory_get", "memory_timeline",
             "memory_save", "memory_pin", "memory_forget",
             "memory_status", "memory_sweep", "memory_related",
+            "memory_export_vectors",
             "memory_rebuild", "memory_check_contradictions",
             "profile_get", "profile_update",
         }

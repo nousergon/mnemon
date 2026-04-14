@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.5.0] - 2026-04-14
+
+### Breaking
+
+- **MCP tools now return JSON instead of pre-formatted prose.** The
+  ``_structured`` paired variant (``memory_search_structured``) is gone
+  — ``memory_search`` itself returns the JSON array directly. Same
+  treatment for ``memory_get``, ``memory_timeline``, ``memory_status``,
+  ``memory_sweep``, ``memory_related``, ``profile_get``. The motivation:
+  a single clean-format contract beats paired tools with the same
+  concern but different shapes, and modern LLM clients (claude.ai,
+  Claude Code, Cursor, Claude Desktop) all parse JSON cleanly.
+  Mutation/side-effect tools (``memory_save``, ``memory_pin``,
+  ``memory_forget``, ``memory_rebuild``, ``memory_check_contradictions``,
+  ``profile_update``) still return short confirmation strings.
+- **Breaking for direct MCP consumers** that regex the old prose
+  output. The ``context_surfacing`` hook was the main such consumer
+  in-tree and has been migrated to JSON parsing + client-side
+  formatting. Migration for your own consumers: call the same tool
+  name, ``json.loads()`` the result, format or filter as you need.
+  Empty result is now ``"[]"`` (not a prose sentinel).
+
+### Added
+
+- ``memory_export_vectors`` — new tool exposing the full embedding
+  matrix joined to document metadata, for remote-aware clients that
+  want to run UMAP / visualization / similarity work client-side. JSON
+  only; capped at 5000 vectors per response with a ``truncated`` flag
+  for vaults past that size.
+- ``VecStore.export_all()`` — internal helper returning a snapshot
+  copy of (ids, vectors) so ``memory_export_vectors`` callers can
+  mutate the returned array safely.
+
+### Changed
+
+- Total tool count: 14 (was 14 in 0.4.3 — ``memory_search_structured``
+  was removed and ``memory_export_vectors`` added; net zero).
+- ``context_surfacing`` hook now parses JSON from ``memory_search`` and
+  formats the markdown context block client-side. Output in the
+  ``<mnemon-context>`` block is shape-identical to 0.4.x — Claude sees
+  the same injected context, just formatted by the hook rather than
+  the server.
+
 ## [0.4.3] - 2026-04-14
 
 Rolls up all 0.4.2 changes (which was built but never uploaded to PyPI) plus a final ruff-clean pass.

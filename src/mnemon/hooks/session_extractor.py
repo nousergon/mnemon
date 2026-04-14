@@ -132,7 +132,7 @@ def is_duplicate_remote(title: str, content: str) -> bool:
     """Check if an observation is too similar to existing memories via remote search.
 
     Searches the Fly vault for content matching the combined title+content
-    using ``memory_search_structured``, then compares the
+    using ``memory_search`` (which returns JSON), then compares the
     ``vector_similarity`` (true cosine similarity from the vector store)
     against ``HOOK_DEDUP_SIMILARITY_THRESHOLD``. Composite score is
     deliberately NOT used — it's a rank-fusion weighted score, not a
@@ -148,7 +148,7 @@ def is_duplicate_remote(title: str, content: str) -> bool:
 
         query = f"{title}: {content}"
         raw, _elapsed = call_tool_sync(
-            "memory_search_structured",
+            "memory_search",
             {"query": query, "limit": 3},
             timeout=HOOK_DEDUP_TIMEOUT_SEC,
             client_label=CLIENT_LABEL,
