@@ -35,16 +35,28 @@ def _use_remote() -> bool:
     return False
 
 
-def _call_remote(tool: str, args: dict) -> str:
+DASHBOARD_REMOTE_TIMEOUT_SEC = 30.0
+VECTOR_EXPORT_TIMEOUT_SEC = 60.0
+
+
+def _call_remote(tool: str, args: dict, *, timeout: float = DASHBOARD_REMOTE_TIMEOUT_SEC) -> str:
     """Call an MCP tool via the shared remote client. Raises on error —
     callers decide whether to surface via ``st.error`` or silently fall
-    back."""
+    back.
+
+    The default 30s timeout is dashboard-appropriate: the hook client
+    defaults to 8s (to stay inside Claude Code's hook budget), but a
+    browser page can reasonably wait longer, especially on Fly
+    cold-start. ``load_vectors`` overrides to 60s because the vector
+    export is the heaviest single tool call.
+    """
     from mnemon.hooks._remote_client import call_tool_sync
 
     raw, _elapsed = call_tool_sync(
         tool,
         args,
         client_label="mnemon-dashboard",
+        timeout=timeout,
     )
     return raw
 
@@ -161,7 +173,10 @@ def load_vectors() -> tuple[list[str], np.ndarray, dict[str, dict]] | None:
     before first embedding).
     """
     if _use_remote():
-        payload = json.loads(_call_remote("memory_export_vectors", {}))
+        payload = json.loads(_call_remote(
+            "memory_export_vectors", {},
+            timeout=VECTOR_EXPORT_TIMEOUT_SEC,
+        ))
         items = payload.get("items", [])
         if not items:
             return None
