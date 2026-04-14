@@ -381,19 +381,23 @@ class TestCheckRoundTrip:
 
 
 class TestRunDoctor:
+    """Remote-mode runner behavior — the list patched here is
+    ``REMOTE_CHECKS`` because ``run_doctor`` dispatches on
+    ``_has_remote_config``; each test pins that to True."""
+
     def test_all_pass_returns_zero(self):
         def ok(name: str) -> doctor.CheckResult:
             return doctor.CheckResult(name, True, "fine")
 
-        fake_checks = [
-            lambda: ok("A"),
-            lambda: ok("B"),
-        ]
+        fake_checks = [lambda: ok("A"), lambda: ok("B")]
         buf = io.StringIO()
-        with patch("mnemon.doctor.CHECKS", fake_checks):
+        with patch("mnemon.doctor._has_remote_config", return_value=True), \
+             patch("mnemon.doctor.get_remote_url", return_value="https://x/mcp"), \
+             patch("mnemon.doctor.REMOTE_CHECKS", fake_checks):
             code = doctor.run_doctor(out=buf)
         assert code == 0
         output = buf.getvalue()
+        assert "remote mode" in output
         assert "All 2 checks passed" in output
         assert doctor.PASS in output
 
@@ -403,7 +407,9 @@ class TestRunDoctor:
             lambda: doctor.CheckResult("B", False, "broken"),
         ]
         buf = io.StringIO()
-        with patch("mnemon.doctor.CHECKS", fake_checks):
+        with patch("mnemon.doctor._has_remote_config", return_value=True), \
+             patch("mnemon.doctor.get_remote_url", return_value="https://x/mcp"), \
+             patch("mnemon.doctor.REMOTE_CHECKS", fake_checks):
             code = doctor.run_doctor(out=buf)
         assert code == 1
         output = buf.getvalue()
@@ -416,11 +422,110 @@ class TestRunDoctor:
             lambda: doctor.CheckResult("B", True, "heads-up", warn=True),
         ]
         buf = io.StringIO()
-        with patch("mnemon.doctor.CHECKS", fake_checks):
+        with patch("mnemon.doctor._has_remote_config", return_value=True), \
+             patch("mnemon.doctor.get_remote_url", return_value="https://x/mcp"), \
+             patch("mnemon.doctor.REMOTE_CHECKS", fake_checks):
             code = doctor.run_doctor(out=buf)
         assert code == 0
         output = buf.getvalue()
         assert "1 warning" in output
+
+
+class TestRunDoctorLocalMode:
+    """Without any remote config, ``run_doctor`` should run LOCAL_CHECKS
+    and advertise local mode in the banner — no code from the remote
+    path should execute."""
+
+    def test_local_banner_and_checks_fire(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("MNEMON_REMOTE_URL", raising=False)
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+
+        fake_local = [
+            lambda: doctor.CheckResult("LocalA", True, "ok"),
+            lambda: doctor.CheckResult("LocalB", True, "also ok"),
+        ]
+        buf = io.StringIO()
+        with patch("mnemon.doctor._has_remote_config", return_value=False), \
+             patch("mnemon.doctor.LOCAL_CHECKS", fake_local):
+            code = doctor.run_doctor(out=buf)
+        assert code == 0
+        output = buf.getvalue()
+        assert "local mode" in output
+        assert "LocalA" in output
+        assert "All 2 checks passed" in output
+
+    def test_local_failure_returns_one(self):
+        fake_local = [
+            lambda: doctor.CheckResult("LocalA", False, "broken"),
+        ]
+        buf = io.StringIO()
+        with patch("mnemon.doctor._has_remote_config", return_value=False), \
+             patch("mnemon.doctor.LOCAL_CHECKS", fake_local):
+            code = doctor.run_doctor(out=buf)
+        assert code == 1
+
+
+class TestHasRemoteConfig:
+    def test_env_var_wins(self, monkeypatch):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://x/mcp")
+        assert doctor._has_remote_config() is True
+
+    def test_empty_env_var_ignored(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "   ")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert doctor._has_remote_config() is False
+
+    def test_file_fallback(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("MNEMON_REMOTE_URL", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".mnemon").mkdir()
+        (tmp_path / ".mnemon" / "remote_url").write_text("https://x/mcp")
+        assert doctor._has_remote_config() is True
+
+    def test_neither_source_set(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("MNEMON_REMOTE_URL", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert doctor._has_remote_config() is False
+
+
+class TestLocalChecks:
+    """The three local-mode check functions. Embedder is mocked to avoid
+    pulling the FastEmbed model during the test run."""
+
+    def test_check_local_vault_passes(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+        result = doctor.check_local_vault()
+        assert result.ok
+        assert "0 documents" in result.detail
+
+    def test_check_local_embedder_passes(self):
+        import numpy as np
+        fake_vec = np.zeros(384, dtype=np.float32)
+        with patch("mnemon.embedder.embed", return_value=fake_vec):
+            result = doctor.check_local_embedder()
+        assert result.ok
+        assert "384d" in result.detail
+
+    def test_check_local_embedder_fails_on_wrong_shape(self):
+        import numpy as np
+        wrong = np.zeros(128, dtype=np.float32)
+        with patch("mnemon.embedder.embed", return_value=wrong):
+            result = doctor.check_local_embedder()
+        assert not result.ok
+        assert "(128,)" in result.detail
+
+    def test_check_local_round_trip_passes(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+        import numpy as np
+        fake_vec = np.zeros(384, dtype=np.float32)
+        # Stub the embedder so save() + search() don't pull FastEmbed;
+        # the doc round-trip exercises the SQLite/FTS5 path which is
+        # what we care about in local mode.
+        with patch("mnemon.embedder.embed", return_value=fake_vec), \
+             patch("mnemon.embedder.embed_batch", return_value=[fake_vec]):
+            result = doctor.check_local_round_trip()
+        assert result.ok
+        assert "saved, found, and forgotten" in result.detail
 
     def test_cli_dispatches_to_doctor(self, monkeypatch):
         """`mnemon doctor` on the CLI should call run_doctor and exit with its code."""
