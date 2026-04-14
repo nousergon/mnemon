@@ -315,6 +315,17 @@ _REFRESH_TOKEN_TTL_SEC = 30 * 24 * 3600  # 30 days
 _AUTH_CODES_FILENAME = "auth_codes.json"
 _REFRESH_TOKENS_FILENAME = "refresh_tokens.json"
 
+# Per-IP rate limit on failed /oauth/authorize passphrase attempts.
+# Deliberately in-memory (resets on restart) — this is best-effort
+# brute-force hygiene, not a lockout mechanism that needs to persist.
+# A passphrase generated via `secrets.token_urlsafe(32)` has ~256 bits of
+# entropy so this is belt-and-suspenders, but at 10 tries per 5 minutes
+# per IP it raises the cost of even a 16-char low-entropy passphrase
+# from "seconds on one box" to "years across a distributed botnet."
+_FAILED_ATTEMPT_WINDOW_SEC = 300
+_MAX_FAILED_ATTEMPTS = 10
+_failed_attempts: dict[str, list[float]] = {}
+
 
 def _load_token_file(path: Path, label: str) -> dict[str, dict[str, Any]]:
     """Load a token JSON file, pruning expired entries. Returns {} on any
@@ -608,15 +619,23 @@ def _render_login_form(params: dict[str, str], error: str | None = None) -> byte
     return body
 
 
-async def _send_html(send, status: int, body: bytes) -> None:
+async def _send_html(
+    send,
+    status: int,
+    body: bytes,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
+) -> None:
+    headers = [
+        (b"content-type", b"text/html; charset=utf-8"),
+        (b"content-length", str(len(body)).encode("ascii")),
+        (b"cache-control", b"no-store"),
+    ]
+    if extra_headers:
+        headers.extend(extra_headers)
     await send({
         "type": "http.response.start",
         "status": status,
-        "headers": [
-            (b"content-type", b"text/html; charset=utf-8"),
-            (b"content-length", str(len(body)).encode("ascii")),
-            (b"cache-control", b"no-store"),
-        ],
+        "headers": headers,
     })
     await send({"type": "http.response.body", "body": body, "more_body": False})
 
@@ -733,8 +752,28 @@ async def serve_authorize(
         })
         return
 
+    # Rate-limit check before examining the passphrase — a brute-forcer
+    # must not be able to drive CPU into constant-time comparison while
+    # over the failure cap.
+    client_ip = _client_ip_from_scope(scope)
+    retry_after = _check_rate_limit(client_ip)
+    if retry_after is not None:
+        from math import ceil
+        headers = [(b"retry-after", str(ceil(retry_after)).encode("ascii"))]
+        await _send_html(
+            send, 429,
+            _render_login_form(
+                {k: v for k, v in params.items() if k != "passphrase"},
+                error=f"Too many failed attempts. Try again in "
+                      f"{ceil(retry_after)}s.",
+            ),
+            extra_headers=headers,
+        )
+        return
+
     passphrase = params.get("passphrase", "")
     if not _verify_passphrase(passphrase, config.passphrase or ""):
+        _record_failed_attempt(client_ip)
         # Re-render form with error — don't redirect back to client with
         # an error code, because that would leak "this URL is a valid
         # OAuth init" to anyone who can read network logs. A re-rendered
@@ -745,6 +784,8 @@ async def serve_authorize(
             _render_login_form(form_params, error="Invalid passphrase.")
         )
         return
+
+    _clear_failed_attempts(client_ip)
 
     # Issue auth code and redirect to client's redirect_uri.
     code = _new_random_token()
@@ -777,6 +818,63 @@ def _verify_passphrase(submitted: str, configured: str) -> bool:
     if not configured:
         return False
     return hmac.compare_digest(submitted, configured)
+
+
+def _client_ip_from_scope(scope: dict) -> str:
+    """Extract best-effort client IP for rate-limit keying.
+
+    On Fly, requests come through fly-proxy and the true client IP is
+    in the ``Fly-Client-IP`` header. Behind other reverse proxies,
+    ``X-Forwarded-For`` is the convention (first entry = original
+    client). Falls back to the ASGI scope's ``client`` tuple for local
+    dev where no proxy is in front.
+
+    Returns ``"unknown"`` if no IP can be determined — still a valid
+    rate-limit key, just lumps all such requests together.
+    """
+    headers = {k.lower(): v for k, v in scope.get("headers", [])}
+    fly_ip = headers.get(b"fly-client-ip")
+    if fly_ip:
+        return fly_ip.decode("latin-1", errors="replace")
+    xff = headers.get(b"x-forwarded-for")
+    if xff:
+        return xff.decode("latin-1", errors="replace").split(",")[0].strip()
+    client = scope.get("client")
+    if client and isinstance(client, (list, tuple)) and client:
+        return str(client[0])
+    return "unknown"
+
+
+def _check_rate_limit(ip: str) -> float | None:
+    """Return seconds-until-retry if ``ip`` is over the failure limit,
+    else None. Prunes stale timestamps inline."""
+    import time
+    now = time.monotonic()
+    cutoff = now - _FAILED_ATTEMPT_WINDOW_SEC
+    attempts = [t for t in _failed_attempts.get(ip, []) if t > cutoff]
+    if not attempts:
+        _failed_attempts.pop(ip, None)
+        return None
+    _failed_attempts[ip] = attempts
+    if len(attempts) >= _MAX_FAILED_ATTEMPTS:
+        # Oldest attempt in the window pins when the oldest will age out.
+        return (attempts[0] + _FAILED_ATTEMPT_WINDOW_SEC) - now
+    return None
+
+
+def _record_failed_attempt(ip: str) -> None:
+    import time
+    _failed_attempts.setdefault(ip, []).append(time.monotonic())
+
+
+def _clear_failed_attempts(ip: str) -> None:
+    """Called on successful passphrase — legitimate users shouldn't
+    carry penalty state from prior typos."""
+    _failed_attempts.pop(ip, None)
+
+
+def _reset_rate_limit_for_tests() -> None:
+    _failed_attempts.clear()
 
 
 # ── /oauth/token ────────────────────────────────────────────────────────────
