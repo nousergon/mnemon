@@ -223,6 +223,16 @@ A small set of architectural choices shape the rest of the system. Documented he
 | `MNEMON_MODEL_DIR` | `~/.mnemon/models` | Directory for LLM model files |
 | `PORT` | `8502` | Remote server port |
 
+## Known limitations
+
+Client-side behaviors that affect mnemon users but are not bugs in mnemon itself. Upstream tracking linked where applicable.
+
+**Claude Code: MCP session invalidated after server restart.** When the remote mnemon server restarts (via `fly deploy`, `fly secrets set`, or Fly auto-stop/auto-start), Claude Code's cached MCP session ID becomes stale. Subsequent tool calls from within an active Claude Code session return `Session not found`, and the client does not auto-reinitialize. Workaround: quit and re-launch Claude Code. Hooks are unaffected — they use the static bearer path and bypass the MCP session layer. Upstream: [anthropics/claude-code#46533](https://github.com/anthropics/claude-code/issues/46533).
+
+**Claude Code: `/mcp authenticate` CLI hang after browser OAuth success.** When authenticating a new OAuth-protected MCP connector via `/mcp`, the browser passphrase flow succeeds and the server issues a JWT, but the CLI prompt that should confirm completion does not respond to Enter (only Escape). Workaround: press Escape, then quit and re-launch Claude Code; the connector state persists. Upstream: [anthropics/claude-code#42707](https://github.com/anthropics/claude-code/issues/42707).
+
+**FastEmbed cold start.** The first MCP tool call after a Fly machine auto-stop takes 15–25s while the FastEmbed ONNX model loads into memory. Subsequent calls are fast. Mitigated by a polling SessionStart hook and an eager initialization step in `mnemon serve-remote`; Fly's `http_service.checks.grace_period` is set accordingly.
+
 ## Development
 
 ```bash
