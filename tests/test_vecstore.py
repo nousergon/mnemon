@@ -78,3 +78,20 @@ class TestVecStore:
     def test_dim_validation(self, vecstore):
         with pytest.raises(ValueError):
             vecstore.set("a_0", np.array([1, 0, 0], dtype=np.float32))
+
+    def test_export_all_empty(self, vecstore):
+        ids, vectors = vecstore.export_all()
+        assert ids == []
+        assert vectors.shape == (0, vecstore.dim)
+
+    def test_export_all_returns_snapshot(self, vecstore):
+        vecstore.set("a_0", np.array([1, 0, 0, 0], dtype=np.float32))
+        vecstore.set("b_0", np.array([0, 1, 0, 0], dtype=np.float32))
+
+        ids, vectors = vecstore.export_all()
+        assert ids == ["a_0", "b_0"]
+        assert vectors.shape == (2, 4)
+        # Mutations on the returned array must not affect the in-memory store.
+        vectors[0][0] = 99.0
+        _, vectors2 = vecstore.export_all()
+        assert vectors2[0][0] == 1.0

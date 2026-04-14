@@ -168,6 +168,24 @@ def memory_timeline(
     return "\n".join(lines)
 
 
+@mcp.tool()
+def memory_timeline_structured(
+    limit: int = 20,
+    content_type: str | None = None,
+) -> str:
+    """Recent memories as a JSON list of document objects.
+
+    Machine-readable counterpart to ``memory_timeline``. Used by the
+    mnemon dashboard's Timeline page. Each object carries the full
+    document shape (id, title, content, content_type, memory_type,
+    confidence, pinned, created_at, updated_at, access_count).
+    """
+    import dataclasses
+    store = _get_store()
+    docs = store.timeline(limit, content_type)
+    return json.dumps([dataclasses.asdict(d) for d in docs])
+
+
 # ── Mutation Tools ───────────────────────────────────────────────────────────
 
 
@@ -255,6 +273,21 @@ def memory_status() -> str:
 
 
 @mcp.tool()
+def memory_status_structured() -> str:
+    """Vault health stats as a JSON object.
+
+    Machine-readable counterpart to ``memory_status``. Used by the
+    mnemon dashboard's Home page to render counts without parsing prose.
+
+    Returns a JSON object: ``{total_documents, total_vectors, invalidated,
+    pinned, by_type, vault_path}`` where ``by_type`` is a list of
+    ``{content_type, count}``.
+    """
+    store = _get_store()
+    return json.dumps(store.status())
+
+
+@mcp.tool()
 def memory_sweep(dry_run: bool = True) -> str:
     """Archive stale memories that have exceeded their half-life.
 
@@ -276,6 +309,21 @@ def memory_sweep(dry_run: bool = True) -> str:
 
 
 @mcp.tool()
+def memory_sweep_structured(dry_run: bool = True) -> str:
+    """Sweep results as a JSON object.
+
+    Machine-readable counterpart to ``memory_sweep``. Used by the
+    mnemon dashboard to render stale-candidate tables. Returns
+    ``{archived: int, candidates: [{id, title, content_type, age_days}]}``.
+    """
+    import dataclasses
+    store = _get_store()
+    result = store.sweep(dry_run)
+    result["candidates"] = [dataclasses.asdict(c) for c in result["candidates"]]
+    return json.dumps(result)
+
+
+@mcp.tool()
 def memory_related(id: int, limit: int = 10) -> str:
     """Find memories related to a given memory via the relationship graph."""
     store = _get_store()
@@ -288,6 +336,104 @@ def memory_related(id: int, limit: int = 10) -> str:
         for r in related
     ]
     return "\n".join(lines)
+
+
+@mcp.tool()
+def memory_related_structured(id: int, limit: int = 10) -> str:
+    """Related memories as a JSON list.
+
+    Machine-readable counterpart to ``memory_related``. Each entry is
+    the full document shape extended with ``relation_type`` and
+    ``weight`` fields.
+    """
+    import dataclasses
+    store = _get_store()
+    return json.dumps([dataclasses.asdict(r) for r in store.get_related(id, limit)])
+
+
+# Vector-export cap: 5000 vectors × 384 floats ≈ 7-10 MB JSON at the
+# float representation we emit. Enough for any personal vault; explicit
+# cap so a runaway vault size doesn't OOM the server process silently.
+_VECTOR_EXPORT_MAX = 5000
+
+
+@mcp.tool()
+def memory_export_vectors() -> str:
+    """Export all stored embedding vectors joined to document metadata.
+
+    Used by the mnemon dashboard's Graph page to pull the full embedding
+    matrix over MCP and run UMAP projection client-side. Avoids exposing
+    a filesystem path or a bulk-SQL interface while keeping the dashboard
+    remote-aware.
+
+    Returns a JSON object ``{count, dim, truncated, items}``:
+
+    - ``count``: number of vectors returned (may be ≤ stored count if
+      capped).
+    - ``dim``: vector dimensionality (384 for bge-small-en-v1.5).
+    - ``truncated``: True if the vault exceeds the server's export cap
+      and results were truncated.
+    - ``items``: list of ``{doc_id, vec_id, title, content_type,
+      confidence, created_at, pinned, vector}``. ``vector`` is a list
+      of floats of length ``dim``. Invalidated docs are excluded.
+
+    Cap is ``_VECTOR_EXPORT_MAX`` (5000) vectors. Larger vaults need a
+    paginated API — file an issue if you hit this.
+    """
+    store = _get_store()
+    vec_ids, vectors = store.vec_store.export_all()
+
+    if not vec_ids:
+        return json.dumps({"count": 0, "dim": store.vec_store.dim,
+                           "truncated": False, "items": []})
+
+    truncated = len(vec_ids) > _VECTOR_EXPORT_MAX
+    if truncated:
+        vec_ids = vec_ids[:_VECTOR_EXPORT_MAX]
+        vectors = vectors[:_VECTOR_EXPORT_MAX]
+
+    # vec_id format is "{content_hash}_{seq}" — split once from the right
+    # since content_hash is a hex SHA-256 (no underscores).
+    hashes = [vid.rsplit("_", 1)[0] for vid in vec_ids]
+    unique_hashes = list(dict.fromkeys(hashes))
+
+    # One query for all hashes — cheaper than N queries. Take the first
+    # non-invalidated doc per hash (there may be multiple rows sharing a
+    # content hash after supersedes/updates).
+    placeholders = ",".join("?" * len(unique_hashes))
+    rows = store.db.execute(
+        f"""SELECT hash, id, title, content_type, confidence, created_at, pinned
+            FROM documents
+            WHERE hash IN ({placeholders})
+              AND invalidated_at IS NULL""",
+        unique_hashes,
+    ).fetchall()
+    hash_to_doc = {r["hash"]: dict(r) for r in rows}
+
+    items = []
+    for vec_id, content_hash, vector in zip(vec_ids, hashes, vectors):
+        doc = hash_to_doc.get(content_hash)
+        if doc is None:
+            # Vector exists but its source document is gone (invalidated
+            # or deleted). Skip — dashboard can't render it usefully.
+            continue
+        items.append({
+            "doc_id": doc["id"],
+            "vec_id": vec_id,
+            "title": doc["title"],
+            "content_type": doc["content_type"],
+            "confidence": doc["confidence"],
+            "created_at": doc["created_at"],
+            "pinned": bool(doc["pinned"]),
+            "vector": vector.tolist(),
+        })
+
+    return json.dumps({
+        "count": len(items),
+        "dim": store.vec_store.dim,
+        "truncated": truncated,
+        "items": items,
+    })
 
 
 @mcp.tool()

@@ -2,22 +2,29 @@
 
 from unittest.mock import MagicMock, patch
 
+import json
+
 import pytest
 
 import mnemon.server as server_mod
 from mnemon.server import (
     memory_check_contradictions,
+    memory_export_vectors,
     memory_forget,
     memory_get,
     memory_pin,
     memory_rebuild,
     memory_related,
+    memory_related_structured,
     memory_save,
     memory_search,
     memory_search_structured,
     memory_status,
+    memory_status_structured,
     memory_sweep,
+    memory_sweep_structured,
     memory_timeline,
+    memory_timeline_structured,
     profile_get,
     profile_update,
 )
@@ -739,3 +746,187 @@ class TestMemoryCheckContradictions:
             result = memory_check_contradictions(1)
 
         assert "0 memories had their confidence decayed." in result
+
+
+# ── Structured (JSON) tool variants ─────────────────────────────────────────
+
+
+class TestMemoryStatusStructured:
+    @patch("mnemon.server.Store")
+    def test_returns_raw_status_dict(self, MockStore):
+        status = {
+            "vault_path": "/x/y.sqlite",
+            "total_documents": 5,
+            "total_vectors": 3,
+            "pinned": 1,
+            "invalidated": 2,
+            "by_type": [{"content_type": "note", "count": 5}],
+        }
+        MockStore.return_value.status.return_value = status
+        assert json.loads(memory_status_structured()) == status
+
+
+def _real_document(**overrides):
+    """Build a real Document dataclass instance (asdict-compatible)."""
+    from mnemon.store import Document
+    defaults = {
+        "id": 1, "collection": "default", "path": None, "title": "T",
+        "hash": "abc", "content_type": "note", "memory_type": "semantic",
+        "confidence": 0.5, "quality_score": 0.0, "access_count": 0,
+        "pinned": 0, "source_client": None, "invalidated_at": None,
+        "invalidated_by": None, "created_at": "2026-01-01",
+        "updated_at": "2026-01-01", "content": "",
+    }
+    defaults.update(overrides)
+    return Document(**defaults)
+
+
+def _real_sweep_candidate(**overrides):
+    from mnemon.store import SweepCandidate
+    defaults = {"id": 1, "title": "T", "content_type": "note", "age_days": 90}
+    defaults.update(overrides)
+    return SweepCandidate(**defaults)
+
+
+def _real_related(**overrides):
+    from mnemon.store import RelatedDocument
+    doc_defaults = {
+        "id": 1, "collection": "default", "path": None, "title": "R",
+        "hash": "abc", "content_type": "note", "memory_type": "semantic",
+        "confidence": 0.5, "quality_score": 0.0, "access_count": 0,
+        "pinned": 0, "source_client": None, "invalidated_at": None,
+        "invalidated_by": None, "created_at": "2026-01-01",
+        "updated_at": "2026-01-01", "content": "",
+        "relation_type": "related", "weight": 1.0,
+    }
+    doc_defaults.update(overrides)
+    return RelatedDocument(**doc_defaults)
+
+
+class TestMemoryTimelineStructured:
+    @patch("mnemon.server.Store")
+    def test_empty(self, MockStore):
+        MockStore.return_value.timeline.return_value = []
+        assert json.loads(memory_timeline_structured()) == []
+
+    @patch("mnemon.server.Store")
+    def test_returns_docs_as_json(self, MockStore):
+        docs = [_real_document(id=7, title="T")]
+        MockStore.return_value.timeline.return_value = docs
+        parsed = json.loads(memory_timeline_structured(limit=5))
+        assert len(parsed) == 1
+        assert parsed[0]["id"] == 7
+        assert parsed[0]["title"] == "T"
+
+
+class TestMemorySweepStructured:
+    @patch("mnemon.server.Store")
+    def test_no_candidates(self, MockStore):
+        MockStore.return_value.sweep.return_value = {"archived": 0, "candidates": []}
+        parsed = json.loads(memory_sweep_structured())
+        assert parsed == {"archived": 0, "candidates": []}
+
+    @patch("mnemon.server.Store")
+    def test_with_candidates(self, MockStore):
+        c = _real_sweep_candidate(id=11, title="Stale", content_type="note", age_days=90)
+        MockStore.return_value.sweep.return_value = {"archived": 0, "candidates": [c]}
+        parsed = json.loads(memory_sweep_structured(dry_run=True))
+        assert parsed["archived"] == 0
+        assert len(parsed["candidates"]) == 1
+        assert parsed["candidates"][0]["id"] == 11
+
+
+class TestMemoryRelatedStructured:
+    @patch("mnemon.server.Store")
+    def test_empty(self, MockStore):
+        MockStore.return_value.get_related.return_value = []
+        assert json.loads(memory_related_structured(1)) == []
+
+    @patch("mnemon.server.Store")
+    def test_returns_related_docs(self, MockStore):
+        rel = _real_related(id=99, relation_type="supersedes", weight=0.8)
+        MockStore.return_value.get_related.return_value = [rel]
+        parsed = json.loads(memory_related_structured(5, limit=10))
+        assert len(parsed) == 1
+        assert parsed[0]["id"] == 99
+        assert parsed[0]["relation_type"] == "supersedes"
+        assert parsed[0]["weight"] == 0.8
+
+
+class TestMemoryExportVectors:
+    @patch("mnemon.server.Store")
+    def test_empty_vault(self, MockStore):
+        MockStore.return_value.vec_store.export_all.return_value = ([], __import__("numpy").zeros((0, 384)))
+        MockStore.return_value.vec_store.dim = 384
+        parsed = json.loads(memory_export_vectors())
+        assert parsed == {"count": 0, "dim": 384, "truncated": False, "items": []}
+
+    @patch("mnemon.server.Store")
+    def test_joins_vectors_to_docs(self, MockStore):
+        import numpy as np
+        vec_ids = ["abc_0", "def_0"]
+        vectors = np.array([[0.1] * 384, [0.2] * 384], dtype=np.float32)
+        MockStore.return_value.vec_store.export_all.return_value = (vec_ids, vectors)
+        MockStore.return_value.vec_store.dim = 384
+        # Simulate the sqlite join: return one row for each hash.
+        row1 = {"hash": "abc", "id": 1, "title": "First",
+                "content_type": "note", "confidence": 0.5,
+                "created_at": "2026-01-01", "pinned": 0}
+        row2 = {"hash": "def", "id": 2, "title": "Second",
+                "content_type": "decision", "confidence": 0.85,
+                "created_at": "2026-01-02", "pinned": 1}
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = [row1, row2]
+
+        parsed = json.loads(memory_export_vectors())
+        assert parsed["count"] == 2
+        assert parsed["dim"] == 384
+        assert parsed["truncated"] is False
+        assert len(parsed["items"]) == 2
+        first = next(i for i in parsed["items"] if i["doc_id"] == 1)
+        assert first["title"] == "First"
+        assert first["pinned"] is False
+        assert len(first["vector"]) == 384
+        second = next(i for i in parsed["items"] if i["doc_id"] == 2)
+        assert second["pinned"] is True
+
+    @patch("mnemon.server.Store")
+    def test_skips_vectors_with_invalidated_docs(self, MockStore):
+        """If a vec_id's document has been invalidated/deleted, the hash
+        won't come back in the join — the item should be skipped, not
+        crash."""
+        import numpy as np
+        vec_ids = ["abc_0", "orphan_0"]
+        vectors = np.array([[0.1] * 384, [0.3] * 384], dtype=np.float32)
+        MockStore.return_value.vec_store.export_all.return_value = (vec_ids, vectors)
+        MockStore.return_value.vec_store.dim = 384
+        # Only "abc" exists in the docs table; "orphan" is gone.
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = [
+            {"hash": "abc", "id": 1, "title": "Kept",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": 0},
+        ]
+        parsed = json.loads(memory_export_vectors())
+        assert parsed["count"] == 1
+        assert parsed["items"][0]["doc_id"] == 1
+
+    @patch("mnemon.server.Store")
+    def test_truncates_at_cap(self, MockStore):
+        """Over-cap vaults get the flag set and a bounded response."""
+        import numpy as np
+        from mnemon.server import _VECTOR_EXPORT_MAX
+        n = _VECTOR_EXPORT_MAX + 50
+        vec_ids = [f"hash{i}_0" for i in range(n)]
+        vectors = np.zeros((n, 384), dtype=np.float32)
+        MockStore.return_value.vec_store.export_all.return_value = (vec_ids, vectors)
+        MockStore.return_value.vec_store.dim = 384
+        # Pretend every hash resolves — the count we get back should be capped.
+        rows = [
+            {"hash": f"hash{i}", "id": i, "title": f"T{i}",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": 0}
+            for i in range(_VECTOR_EXPORT_MAX)
+        ]
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = rows
+        parsed = json.loads(memory_export_vectors())
+        assert parsed["truncated"] is True
+        assert parsed["count"] == _VECTOR_EXPORT_MAX
