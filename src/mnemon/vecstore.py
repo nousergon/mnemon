@@ -6,9 +6,12 @@ Sub-millisecond search for <10k documents. No native extensions needed.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class VecStore:
@@ -105,11 +108,24 @@ class VecStore:
             data = np.load(str(npz_path), allow_pickle=True)
             dim = int(data["dim"])
             if dim != self.dim:
+                logger.warning(
+                    "vecstore: %s has dim=%d, expected %d — ignoring file. "
+                    "Run `mnemon rebuild` after a model dimension change.",
+                    npz_path, dim, self.dim,
+                )
                 return
             ids = data["ids"].tolist()
             vectors = data["vectors"]
             if len(ids) > 0 and vectors.shape[0] == len(ids):
                 self._ids = ids
                 self._vectors = vectors.astype(np.float32)
-        except Exception:
-            pass
+        except Exception as exc:
+            # File exists but is corrupt or unreadable. Silently proceeding
+            # with an empty store would mean every memory loses semantic
+            # search until the user notices results are degraded — log
+            # loudly so a fresh server boot makes the cause obvious.
+            logger.warning(
+                "vecstore: failed to load %s (%s: %s); starting with empty "
+                "in-memory store. Run `mnemon rebuild` to re-embed.",
+                npz_path, type(exc).__name__, exc,
+            )
