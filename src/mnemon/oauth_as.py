@@ -56,6 +56,13 @@ ENV_AS_PASSPHRASE = "MNEMON_AS_PASSPHRASE"
 ENV_PUBLIC_URL = "MNEMON_PUBLIC_URL"
 ENV_KEY_DIR = "MNEMON_AS_KEY_DIR"
 
+# Minimum passphrase length. 16 chars is well below what
+# `secrets.token_urlsafe(32)` produces (43 chars) but above most
+# casually-chosen passwords. The AS has no rate limiting and the
+# passphrase is the only credential gating the entire vault — a
+# brute-force-friendly passphrase defeats the whole self-hosted story.
+_MIN_PASSPHRASE_LEN = 16
+
 # RS256 is the default for OIDC/OAuth 2.1 JWT signing. Don't add alg
 # negotiation — pick one and stick with it.
 JWT_ALG = "RS256"
@@ -127,6 +134,13 @@ class AuthorizationServerConfig:
             problems.append(
                 f"{ENV_AS_PASSPHRASE} must be set when AS is enabled "
                 "(single-user login credential)"
+            )
+        elif len(self.passphrase) < _MIN_PASSPHRASE_LEN:
+            problems.append(
+                f"{ENV_AS_PASSPHRASE} is too short "
+                f"({len(self.passphrase)} chars, minimum {_MIN_PASSPHRASE_LEN}). "
+                "Generate a high-entropy value: "
+                "python -c \"import secrets; print(secrets.token_urlsafe(32))\""
             )
         return problems
 

@@ -48,12 +48,12 @@ class TestAuthorizationServerConfig:
     def test_enabled_with_full_config_validates(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MNEMON_AS_ENABLED", "true")
         monkeypatch.setenv("MNEMON_PUBLIC_URL", "https://example.fly.dev")
-        monkeypatch.setenv("MNEMON_AS_PASSPHRASE", "secret")
+        monkeypatch.setenv("MNEMON_AS_PASSPHRASE", "correct-horse-battery-staple")
         monkeypatch.setenv("MNEMON_AS_KEY_DIR", str(tmp_path))
         config = AuthorizationServerConfig.from_env()
         assert config.enabled is True
         assert config.issuer == "https://example.fly.dev"
-        assert config.passphrase == "secret"
+        assert config.passphrase == "correct-horse-battery-staple"
         assert config.key_dir == tmp_path
         assert config.validate() == []
 
@@ -61,6 +61,31 @@ class TestAuthorizationServerConfig:
         """When disabled, the AS has nothing to validate — don't block
         server startup because optional AS vars happen to be empty."""
         config = AuthorizationServerConfig(enabled=False)
+        assert config.validate() == []
+
+    def test_short_passphrase_rejected(self, tmp_path):
+        """The passphrase is the sole credential gating the vault and the
+        AS has no rate limiting. A 6-char passphrase is brute-forceable;
+        require 16+ chars and point users at secrets.token_urlsafe(32)
+        in the error message so they know what to do."""
+        config = AuthorizationServerConfig(
+            enabled=True,
+            public_url="https://example.fly.dev",
+            passphrase="short",  # 5 chars
+            key_dir=tmp_path,
+        )
+        problems = config.validate()
+        assert any("too short" in p for p in problems)
+        assert any("secrets.token_urlsafe" in p for p in problems)
+
+    def test_exactly_16_char_passphrase_accepted(self, tmp_path):
+        """Boundary: 16 chars is the minimum, not 17."""
+        config = AuthorizationServerConfig(
+            enabled=True,
+            public_url="https://example.fly.dev",
+            passphrase="x" * 16,
+            key_dir=tmp_path,
+        )
         assert config.validate() == []
 
     def test_issuer_strips_trailing_slash(self):
