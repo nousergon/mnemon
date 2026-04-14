@@ -347,10 +347,10 @@ def _pkce_pair():
     return verifier, challenge
 
 
-async def _run_asgi(handler, config, method="GET", query=b"", body=b""):
+async def _run_asgi(handler, config, method="GET", query=b"", body=b"", headers=None):
     """Invoke an AS ASGI handler and return (status, headers_dict, body_bytes)."""
     scope = {"type": "http", "method": method, "path": "/oauth/test",
-             "query_string": query, "headers": []}
+             "query_string": query, "headers": headers or []}
     sent = []
 
     async def send(msg):
@@ -1361,5 +1361,178 @@ class TestStatePersistence:
         })
         mode = _auth_codes_path(as_config).stat().st_mode & 0o777
         assert mode == 0o600, f"expected 0600, got {oct(mode)}"
+
+
+# ── Rate limiting on /oauth/authorize ───────────────────────────────────────
+
+
+class TestAuthorizeRateLimit:
+    """Per-IP rate limit on failed passphrase attempts.
+
+    The passphrase is single-user and has no second factor, so a bad
+    actor who discovers a deployment URL can brute-force offline-infeasibly-
+    slowly against a wide-open endpoint. 10 failures per 5 min per IP
+    is generous for a legit user fat-fingering while making automated
+    guessing infeasible without a distributed botnet."""
+
+    @pytest.fixture(autouse=True)
+    def reset_rate_limit(self):
+        from mnemon.oauth_as import _reset_rate_limit_for_tests
+        _reset_rate_limit_for_tests()
+        yield
+        _reset_rate_limit_for_tests()
+
+    def _bad_passphrase_form(self, cid, challenge):
+        return (
+            f"client_id={cid}&redirect_uri=https://client/cb&"
+            f"response_type=code&code_challenge={challenge}&"
+            f"code_challenge_method=S256&passphrase=wrong"
+        ).encode()
+
+    def _ip_headers(self, ip):
+        return [(b"fly-client-ip", ip.encode("ascii"))]
+
+    @pytest.mark.asyncio
+    async def test_blocks_after_10_failures_from_same_ip(
+        self, as_config, registered_client
+    ):
+        from mnemon.oauth_as import serve_authorize
+
+        cid = registered_client["client_id"]
+        _, challenge = _pkce_pair()
+        form = self._bad_passphrase_form(cid, challenge)
+        headers = self._ip_headers("198.51.100.1")
+
+        # First 10 return 401 (wrong passphrase, under the cap).
+        for _ in range(10):
+            status, _, _ = await _run_asgi(
+                serve_authorize, as_config,
+                method="POST", body=form, headers=headers,
+            )
+            assert status == 401
+
+        # 11th attempt from same IP hits the cap.
+        status, resp_headers, body = await _run_asgi(
+            serve_authorize, as_config,
+            method="POST", body=form, headers=headers,
+        )
+        assert status == 429
+        assert "retry-after" in resp_headers
+        # Retry-After is a non-negative integer count of seconds.
+        assert resp_headers["retry-after"].isdigit()
+        assert b"Too many failed attempts" in body
+
+    @pytest.mark.asyncio
+    async def test_different_ips_tracked_independently(
+        self, as_config, registered_client
+    ):
+        """One bad actor must not lock out a legit user on a different IP."""
+        from mnemon.oauth_as import serve_authorize
+
+        cid = registered_client["client_id"]
+        _, challenge = _pkce_pair()
+        form = self._bad_passphrase_form(cid, challenge)
+
+        # Exhaust IP A.
+        for _ in range(10):
+            await _run_asgi(
+                serve_authorize, as_config, method="POST",
+                body=form, headers=self._ip_headers("198.51.100.1"),
+            )
+        status, _, _ = await _run_asgi(
+            serve_authorize, as_config, method="POST",
+            body=form, headers=self._ip_headers("198.51.100.1"),
+        )
+        assert status == 429
+
+        # IP B still gets a normal 401 (wrong passphrase).
+        status, _, _ = await _run_asgi(
+            serve_authorize, as_config, method="POST",
+            body=form, headers=self._ip_headers("198.51.100.2"),
+        )
+        assert status == 401
+
+    @pytest.mark.asyncio
+    async def test_successful_login_clears_penalty(
+        self, as_config, registered_client
+    ):
+        """A legit user who fat-fingered a few times and then got it right
+        should not still be counting toward the cap — otherwise the next
+        day they're penalized for something they've already fixed."""
+        from mnemon.oauth_as import serve_authorize, _failed_attempts
+
+        cid = registered_client["client_id"]
+        _, challenge = _pkce_pair()
+        ip = "198.51.100.5"
+        headers = self._ip_headers(ip)
+
+        # Two wrong attempts.
+        for _ in range(2):
+            await _run_asgi(
+                serve_authorize, as_config, method="POST",
+                body=self._bad_passphrase_form(cid, challenge),
+                headers=headers,
+            )
+        assert len(_failed_attempts.get(ip, [])) == 2
+
+        # One correct attempt clears the counter.
+        good_form = (
+            f"client_id={cid}&redirect_uri=https://client/cb&"
+            f"response_type=code&code_challenge={challenge}&"
+            f"code_challenge_method=S256&passphrase=correct-horse-battery"
+        ).encode()
+        status, _, _ = await _run_asgi(
+            serve_authorize, as_config, method="POST",
+            body=good_form, headers=headers,
+        )
+        assert status == 302
+        assert ip not in _failed_attempts
+
+    @pytest.mark.asyncio
+    async def test_old_attempts_age_out(self, as_config, registered_client):
+        """After the window elapses, prior failures don't count any more."""
+        from mnemon.oauth_as import (
+            serve_authorize,
+            _failed_attempts,
+            _FAILED_ATTEMPT_WINDOW_SEC,
+        )
+
+        cid = registered_client["client_id"]
+        _, challenge = _pkce_pair()
+        ip = "198.51.100.9"
+        headers = self._ip_headers(ip)
+
+        # Manually seed 10 stale failures (older than the window).
+        import time
+        stale_ts = time.monotonic() - (_FAILED_ATTEMPT_WINDOW_SEC + 10)
+        _failed_attempts[ip] = [stale_ts] * 10
+
+        # Next attempt should succeed to 401 (wrong passphrase) not 429,
+        # because the prior failures aged out of the window.
+        status, _, _ = await _run_asgi(
+            serve_authorize, as_config, method="POST",
+            body=self._bad_passphrase_form(cid, challenge),
+            headers=headers,
+        )
+        assert status == 401
+
+    @pytest.mark.asyncio
+    async def test_x_forwarded_for_falls_back_when_fly_header_absent(
+        self, as_config, registered_client
+    ):
+        """Deploys not behind Fly should still get per-IP tracking via XFF."""
+        from mnemon.oauth_as import serve_authorize, _failed_attempts
+
+        cid = registered_client["client_id"]
+        _, challenge = _pkce_pair()
+        # XFF can hold multiple hops — first is the original client.
+        headers = [(b"x-forwarded-for", b"203.0.113.7, 10.0.0.1")]
+
+        await _run_asgi(
+            serve_authorize, as_config, method="POST",
+            body=self._bad_passphrase_form(cid, challenge),
+            headers=headers,
+        )
+        assert "203.0.113.7" in _failed_attempts
 
 
