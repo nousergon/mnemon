@@ -16,13 +16,9 @@ What's implemented
   server-side for later verification.
 - ``/oauth/token`` — authorization_code and refresh_token grants. RS256
   JWT access tokens, opaque refresh tokens with rotation.
+- ``/register`` — Dynamic Client Registration per RFC 7591. Browser
+  clients self-register; no manual client provisioning.
 - Feature flag ``MNEMON_AS_ENABLED``. Off by default.
-
-Out of scope (future PRs)
--------------------------
-- ``/register`` (DCR, RFC 7591) — PR #38
-- Switch resource-server middleware to verify self-hosted tokens — PR #39
-- Remove Auth0 env vars from production config — PR #40
 
 Design notes
 ------------
@@ -31,8 +27,7 @@ Design notes
   setup-time passphrase (``MNEMON_AS_PASSPHRASE``). No signup UI, no
   password reset, no account recovery — intentional scope reduction for
   personal self-host. Multi-user is explicitly out of scope indefinitely.
-- **RS256 signing.** Standard for OIDC/OAuth 2.1; matches what Auth0 was
-  doing, so Phase 2 cutover doesn't break existing client assumptions.
+- **RS256 signing.** Standard for OIDC/OAuth 2.1.
 - **Key storage on Fly volume.** ``/data/oauth_keys/private.pem`` persists
   across deploys because the volume does. If the volume is destroyed,
   all issued tokens become invalid — acceptable for personal use; in
@@ -49,8 +44,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Environment variable names — keep these provider-agnostic so Phase 2
-# swap from Auth0 to self-hosted is env-var-only, no code changes.
+# Environment variable names.
 ENV_AS_ENABLED = "MNEMON_AS_ENABLED"
 ENV_AS_PASSPHRASE = "MNEMON_AS_PASSPHRASE"
 ENV_PUBLIC_URL = "MNEMON_PUBLIC_URL"
@@ -75,7 +69,9 @@ class AuthorizationServerConfig:
     Attributes:
         enabled: whether the AS is active. When False, all AS endpoints
             (well-known metadata, JWKS, /authorize, /token, /register)
-            return 404 and the resource server stays on Auth0.
+            return 404. Browser clients cannot authenticate; the
+            resource server still accepts ``MNEMON_LOCAL_TOKEN`` bearer
+            auth for headless clients.
         public_url: externally-reachable base URL (e.g.,
             ``https://mnemon-memory.fly.dev``). Used to build issuer
             claim and endpoint URLs in metadata documents.

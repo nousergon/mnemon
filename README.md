@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-460_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
-[![PyPI](https://img.shields.io/badge/PyPI-v0.4.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
+[![PyPI](https://img.shields.io/badge/PyPI-v0.4.1-blue.svg)](https://pypi.org/project/mnemon-memory/)
 
 > Universal long-term memory layer for AI agents via [MCP](https://modelcontextprotocol.io).
 
