@@ -155,7 +155,14 @@ MNEMON_LOCAL_TOKEN=your-secret-token mnemon serve-remote
 PORT=9000 mnemon serve-remote
 ```
 
-For production, deploy to [Fly.io](https://fly.io) with a persistent volume (1GB minimum RAM required for FastEmbed model). See `fly.toml` and `Dockerfile` in the repo. Set `MNEMON_LOCAL_TOKEN` as a Fly secret for hook authentication. OAuth (Auth0 or self-hosted) is supported for browser-based clients like claude.ai.
+For production, deploy to [Fly.io](https://fly.io) with a persistent volume (1GB minimum RAM required for FastEmbed model). See `fly.toml` and `Dockerfile` in the repo. Required Fly secrets:
+
+- `MNEMON_LOCAL_TOKEN` — bearer token for headless clients (Claude Code hooks, Cursor)
+- `MNEMON_AS_ENABLED=true` — enable the self-hosted OAuth Authorization Server
+- `MNEMON_AS_PASSPHRASE` — single-user login passphrase for browser-based clients (claude.ai, Claude Desktop)
+- `MNEMON_PUBLIC_URL` — externally-reachable base URL, e.g. `https://your-mnemon.fly.dev`
+
+Browser clients discover the AS via DCR (RFC 7591) at `POST /oauth/register`, then walk through the PKCE authorization code flow at `/oauth/authorize` + `/oauth/token`. No third-party auth vendor required.
 
 ## S3 Vault Sync
 
@@ -215,12 +222,25 @@ A small set of architectural choices shape the rest of the system. Documented he
 
 ## Configuration
 
+**Client-side (hooks, CLI)**
+
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `MNEMON_REMOTE_URL` | (none) | Remote server URL (or `~/.mnemon/remote_url` file) |
 | `MNEMON_LOCAL_TOKEN` | (none) | Bearer token for remote auth (or `~/.mnemon/local_token` file) |
 | `MNEMON_VAULT_DIR` | `~/.mnemon` | Local vault directory |
 | `MNEMON_MODEL_DIR` | `~/.mnemon/models` | Directory for LLM model files |
+
+**Server-side (`mnemon serve-remote`)**
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `MNEMON_AS_ENABLED` | `false` | Enable the self-hosted OAuth Authorization Server |
+| `MNEMON_AS_PASSPHRASE` | (none) | Single-user login passphrase (required when AS enabled) |
+| `MNEMON_AS_KEY_DIR` | `$MNEMON_VAULT_DIR/oauth_keys` | RSA keypair storage directory |
+| `MNEMON_PUBLIC_URL` | (none) | Externally-reachable base URL (required when AS enabled) |
+| `MNEMON_LOCAL_TOKEN` | (none) | Static bearer for headless clients (hooks, Cursor) |
+| `MNEMON_ALLOWED_HOSTS` | (none) | Comma-separated host allowlist for DNS-rebinding protection |
 | `PORT` | `8502` | Remote server port |
 
 ## Known limitations

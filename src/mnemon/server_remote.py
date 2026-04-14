@@ -7,21 +7,19 @@ Desktop, Claude mobile apps via custom connectors, Claude Code via
 
 Authentication
 --------------
-When ``MNEMON_OAUTH_ISSUER``, ``MNEMON_OAUTH_JWKS_URL``, and
-``MNEMON_OAUTH_AUDIENCE`` are set, the server operates as an OAuth 2.1
-resource server per the MCP authorization spec (2025-06-18): it validates
-JWT bearer tokens from an external authorization server and serves RFC 9728
-Protected Resource Metadata for client discovery.
+When ``MNEMON_AS_ENABLED=true`` (with ``MNEMON_AS_PASSPHRASE`` and
+``MNEMON_PUBLIC_URL``), the server runs a self-hosted OAuth 2.1
+Authorization Server (see ``oauth_as.py``) alongside the Resource Server
+and verifies bearer JWTs against the local keypair. No external auth
+vendor required.
 
 ``MNEMON_LOCAL_TOKEN`` enables a secondary static-bearer auth path for
-headless clients (Claude Code hooks, Cursor, scripts) that cannot complete
-a browser OAuth flow. The value must match exactly — the middleware does
-a constant-time comparison and skips JWT/userinfo validation on match.
-Can be combined with OAuth or used alone.
+headless clients (Claude Code hooks, Cursor, scripts) that cannot
+complete a browser OAuth flow. Constant-time compared, no network hop.
+Can be combined with the self-hosted AS or used alone.
 
-When none of these env vars are set, the server runs without auth (local
-development only — do NOT expose an unauthenticated server to the public
-internet).
+When neither is set, the server runs without auth (local development
+only — do NOT expose an unauthenticated server to the public internet).
 
 Usage
 -----
@@ -29,12 +27,12 @@ Local, no auth::
 
     mnemon serve-remote
 
-Cloud, with external AS (e.g., Auth0)::
+Production (self-hosted AS)::
 
-    export MNEMON_OAUTH_ISSUER=https://your-tenant.us.auth0.com/
-    export MNEMON_OAUTH_JWKS_URL=https://your-tenant.us.auth0.com/.well-known/jwks.json
-    export MNEMON_OAUTH_AUDIENCE=https://your-mnemon.fly.dev/mcp
+    export MNEMON_AS_ENABLED=true
+    export MNEMON_AS_PASSPHRASE=<your-passphrase>
     export MNEMON_PUBLIC_URL=https://your-mnemon.fly.dev
+    export MNEMON_LOCAL_TOKEN=<random-bearer-for-hooks>
     mnemon serve-remote
 """
 
@@ -100,12 +98,6 @@ def run_remote() -> None:
         f"mnemon remote server starting on http://0.0.0.0:{PORT}/mcp",
         file=sys.stderr,
     )
-    if config.enabled:
-        print(
-            f"Auth: OAuth 2.1 resource server (issuer={config.issuer}, "
-            f"audience={config.audience})",
-            file=sys.stderr,
-        )
     if as_config.enabled:
         print(
             f"Auth: self-hosted Authorization Server enabled "
@@ -117,12 +109,12 @@ def run_remote() -> None:
             "Auth: local static bearer token enabled (MNEMON_LOCAL_TOKEN set)",
             file=sys.stderr,
         )
-    if not config.enabled and not config.local_token:
+    if not as_config.enabled and not config.local_token:
         print(
             "Auth: DISABLED — do not expose this server to the public internet. "
-            "Set MNEMON_OAUTH_ISSUER, MNEMON_OAUTH_JWKS_URL, and "
-            "MNEMON_OAUTH_AUDIENCE to enable OAuth, or MNEMON_LOCAL_TOKEN "
-            "to enable local static bearer auth.",
+            "Set MNEMON_AS_ENABLED=true (with MNEMON_AS_PASSPHRASE + "
+            "MNEMON_PUBLIC_URL) to enable the self-hosted Authorization "
+            "Server, or MNEMON_LOCAL_TOKEN for headless bearer auth.",
             file=sys.stderr,
         )
 

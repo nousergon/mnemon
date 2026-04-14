@@ -23,28 +23,29 @@ class TestRemoteConfig:
             importlib.reload(sr)
             assert sr.PORT == 9000
 
-    def test_oauth_config_enabled_from_env(self):
+    def test_as_config_enabled_from_env(self, tmp_path):
         env = {
-            "MNEMON_OAUTH_ISSUER": "https://issuer.example.com/",
-            "MNEMON_OAUTH_JWKS_URL": "https://issuer.example.com/.well-known/jwks.json",
-            "MNEMON_OAUTH_AUDIENCE": "https://mnemon.example.com/mcp",
+            "MNEMON_AS_ENABLED": "true",
+            "MNEMON_PUBLIC_URL": "https://mnemon.example.com",
+            "MNEMON_AS_PASSPHRASE": "x",
+            "MNEMON_AS_KEY_DIR": str(tmp_path),
         }
         with patch.dict(os.environ, env):
-            from mnemon.auth import OAuthConfig
-            config = OAuthConfig.from_env()
+            from mnemon.oauth_as import AuthorizationServerConfig
+            config = AuthorizationServerConfig.from_env()
             assert config.enabled
-            assert config.issuer == "https://issuer.example.com/"
+            assert config.issuer == "https://mnemon.example.com"
 
-    def test_oauth_config_disabled_by_default(self):
+    def test_as_config_disabled_by_default(self):
         with patch.dict(os.environ, {}, clear=False):
             for var in (
-                "MNEMON_OAUTH_ISSUER",
-                "MNEMON_OAUTH_JWKS_URL",
-                "MNEMON_OAUTH_AUDIENCE",
+                "MNEMON_AS_ENABLED",
+                "MNEMON_AS_PASSPHRASE",
+                "MNEMON_PUBLIC_URL",
             ):
                 os.environ.pop(var, None)
-            from mnemon.auth import OAuthConfig
-            config = OAuthConfig.from_env()
+            from mnemon.oauth_as import AuthorizationServerConfig
+            config = AuthorizationServerConfig.from_env()
             assert not config.enabled
 
 

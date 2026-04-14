@@ -3,17 +3,23 @@
 Implements the MCP authorization specification (2025-06-18) resource-server
 side: serves RFC 9728 Protected Resource Metadata, returns RFC 6750 compliant
 401 responses with WWW-Authenticate header on missing/invalid tokens, and
-validates JWT bearer tokens against an external OAuth 2.1 authorization server.
+validates JWT bearer tokens against mnemon's self-hosted Authorization
+Server (see ``oauth_as.py``).
 
-This is Phase 1 of the mnemon OAuth build — the AS (authorization server) is
-external (e.g., Auth0, Logto). Phase 2 will implement a self-hosted AS inside
-mnemon. See private/mnemon-plan-optimized-260410.md for context.
+Two auth paths:
+
+1. **Self-hosted AS JWTs** — for browser-capable MCP clients (claude.ai
+   web/mobile, Claude Desktop) that complete a DCR + PKCE flow against
+   our own /oauth/authorize + /oauth/token endpoints. Tokens are
+   RS256-signed by our local keypair and verified with no network hop.
+
+2. **Local static bearer** (``MNEMON_LOCAL_TOKEN``) — for headless
+   clients (Claude Code hooks, Cursor, scripts) that cannot complete a
+   browser OAuth flow. Compared constant-time against the env secret.
 
 The middleware is pure ASGI (not Starlette BaseHTTPMiddleware) because
 BaseHTTPMiddleware has known compatibility issues with mounted ASGI sub-apps
-and streaming responses — the original c5828c2 commit's bearer middleware
-had a bug where it did not actually enforce auth for requests reaching the
-mounted FastMCP app.
+and streaming responses.
 """
 
 from __future__ import annotations
@@ -39,46 +45,17 @@ ASGIApp = Callable[[ASGIScope, ASGIReceive, ASGISend], Awaitable[None]]
 class OAuthConfig:
     """Resource-server auth configuration loaded from environment.
 
-    All fields are optional. Two auth paths are supported and can be enabled
-    independently or together:
+    Post–Phase 2 this class only carries the local bearer token used by
+    headless clients. Browser-based OAuth is handled entirely by the
+    self-hosted Authorization Server in ``oauth_as.py`` (wired as a
+    separate ``AuthorizationServerConfig`` passed to the middleware).
 
-    1. **OAuth 2.1 JWT / userinfo** — when ``issuer``, ``jwks_url``, and
-       ``audience`` are set, the server accepts JWT bearer tokens from the
-       configured authorization server. Intended for browser-capable MCP
-       clients (claude.ai web/mobile, Claude Desktop) that can complete a
-       DCR + PKCE flow.
-    2. **Local static bearer** — when ``local_token`` is set, the server
-       accepts a specific bearer token value directly, without any network
-       roundtrip to the authorization server. Intended for headless clients
-       that cannot complete a browser OAuth flow (Claude Code hooks, Cursor,
-       scripts).
-
-    If both are configured, the local token is checked first. If neither is
-    configured, the server runs without auth (intended for local development
-    only — do not expose an unauthenticated server to the public internet).
+    Retained as a distinct config type rather than merged into
+    ``AuthorizationServerConfig`` because the local-token path is
+    orthogonal to OAuth — a deployment can enable one without the other.
     """
 
-    def __init__(
-        self,
-        issuer: str | None = None,
-        jwks_url: str | None = None,
-        audience: str | None = None,
-        public_url: str | None = None,
-        userinfo_url: str | None = None,
-        local_token: str | None = None,
-    ) -> None:
-        self.issuer = issuer
-        self.jwks_url = jwks_url
-        self.audience = audience
-        # public_url is the externally-reachable base URL, used to build the
-        # resource_metadata URL in WWW-Authenticate headers. Falls back to
-        # audience's scheme+host if unset.
-        self.public_url = public_url
-        # userinfo_url is an optional fallback for token introspection when
-        # JWT validation fails. Needed because some OAuth providers issue
-        # opaque tokens for OIDC-only flows instead of JWTs bound to the
-        # requested audience. If unset, no fallback is used.
-        self.userinfo_url = userinfo_url
+    def __init__(self, local_token: str | None = None) -> None:
         # local_token is a static bearer accepted for headless clients that
         # cannot complete a browser OAuth flow. When set, the middleware
         # accepts requests whose bearer matches this value exactly (using a
@@ -88,54 +65,30 @@ class OAuthConfig:
 
     @classmethod
     def from_env(cls) -> OAuthConfig:
-        return cls(
-            issuer=os.environ.get("MNEMON_OAUTH_ISSUER") or None,
-            jwks_url=os.environ.get("MNEMON_OAUTH_JWKS_URL") or None,
-            audience=os.environ.get("MNEMON_OAUTH_AUDIENCE") or None,
-            public_url=os.environ.get("MNEMON_PUBLIC_URL") or None,
-            userinfo_url=os.environ.get("MNEMON_OAUTH_USERINFO_URL") or None,
-            local_token=os.environ.get("MNEMON_LOCAL_TOKEN") or None,
-        )
-
-    @property
-    def enabled(self) -> bool:
-        return bool(self.issuer and self.jwks_url and self.audience)
-
-    @property
-    def resource_metadata_url(self) -> str:
-        """URL of the Protected Resource Metadata endpoint."""
-        base = self.public_url or self._derive_base_from_audience()
-        return f"{base.rstrip('/')}/.well-known/oauth-protected-resource"
-
-    def _derive_base_from_audience(self) -> str:
-        """Fallback: derive scheme+host from audience if public_url unset."""
-        if not self.audience:
-            return ""
-        from urllib.parse import urlparse
-
-        parsed = urlparse(self.audience)
-        return f"{parsed.scheme}://{parsed.netloc}"
+        return cls(local_token=os.environ.get("MNEMON_LOCAL_TOKEN") or None)
 
 
 class OAuthMiddleware:
     """Pure-ASGI OAuth 2.1 resource-server middleware.
 
     Wraps a downstream ASGI application (the FastMCP streamable-http app).
-    Intercepts three categories of requests:
+    Intercepts four categories of requests:
 
     1. ``/health`` — served unauthenticated with ``{"status": "ok"}``.
-    2. ``/.well-known/oauth-protected-resource`` — served unauthenticated
-       with RFC 9728 Protected Resource Metadata JSON pointing at the
-       configured authorization server.
-    3. Everything else — requires a valid JWT bearer token. The token is
-       validated against the configured JWKS; on failure, returns 401 with
-       an RFC 6750 / RFC 9728 compliant ``WWW-Authenticate`` header.
+    2. Well-known metadata endpoints (``/.well-known/oauth-protected-
+       resource``, ``/.well-known/oauth-authorization-server``,
+       ``/.well-known/jwks.json``) — served unauthenticated.
+    3. OAuth AS endpoints (``/oauth/authorize``, ``/oauth/token``,
+       ``/oauth/register``) — delegated to ``oauth_as.py`` handlers,
+       served unauthenticated (they bootstrap auth).
+    4. Everything else — requires a valid bearer token. Either the
+       static ``MNEMON_LOCAL_TOKEN`` or a JWT issued by the self-hosted
+       AS; on failure returns 401 with WWW-Authenticate header.
 
-    If the OAuth config is not enabled (any of issuer/jwks_url/audience
-    unset), the middleware operates in pass-through mode: all requests go
-    through unauthenticated, /health still works, and the resource metadata
-    endpoint returns 404. This mirrors the pre-c5828c2 behavior of
-    ``mnemon serve-remote`` without env vars.
+    Pass-through mode: if neither ``MNEMON_LOCAL_TOKEN`` nor
+    ``MNEMON_AS_ENABLED=true`` is set, all non-health requests go
+    through unauthenticated. Intended for local development only —
+    never expose an unauthenticated server to the public internet.
     """
 
     def __init__(
@@ -147,14 +100,9 @@ class OAuthMiddleware:
         self.app = app
         self.config = config
         # Optional self-hosted Authorization Server config. When set and
-        # enabled, the middleware serves the AS well-known documents and
-        # (in future PRs) the AS endpoints themselves. Kept as a separate
-        # parameter from ``config`` so the resource-server concerns stay
-        # decoupled from the AS concerns — callers can wire one without
-        # the other.
+        # enabled, the middleware serves the AS endpoints and validates
+        # bearer JWTs against the local keypair.
         self.as_config = as_config
-        self._jwks_client: Any = None  # Lazy-init PyJWKClient
-        self._userinfo_cache: dict[str, float] = {}  # token hash -> expiry ts
 
     async def __call__(
         self, scope: ASGIScope, receive: ASGIReceive, send: ASGISend
@@ -242,15 +190,11 @@ class OAuthMiddleware:
             await serve_register(self.as_config, scope, receive, send)
             return
 
-        # Unauthenticated mode — pass through only when NEITHER auth method
-        # is configured. If local_token or self-hosted AS is set, we still
-        # enforce auth below.
+        # Pass-through mode: no auth configured at all. Health still
+        # works (handled above), but everything else goes straight to
+        # the downstream app. Local-development convenience only.
         as_enabled = self.as_config is not None and self.as_config.enabled
-        if (
-            not self.config.enabled
-            and not self.config.local_token
-            and not as_enabled
-        ):
+        if not self.config.local_token and not as_enabled:
             await self.app(scope, receive, send)
             return
 
@@ -263,11 +207,10 @@ class OAuthMiddleware:
         token = auth_header[7:].decode("ascii", errors="replace").strip()
 
         # Local-token fast path: static bearer validated directly against
-        # MNEMON_LOCAL_TOKEN with a constant-time comparison. Used by clients
-        # that cannot complete a browser OAuth flow (Claude Code hooks,
-        # Cursor, headless scripts). Skips JWT and userinfo entirely — no
-        # network hop, no external AS dependency. Checked first so local
-        # clients don't pay the network cost of a failed JWT validation.
+        # MNEMON_LOCAL_TOKEN with a constant-time comparison. Used by
+        # headless clients (Claude Code hooks, Cursor, scripts) that
+        # cannot complete a browser OAuth flow. Checked first — no
+        # key-loading cost for the common case.
         if self.config.local_token and hmac.compare_digest(
             token, self.config.local_token
         ):
@@ -281,11 +224,9 @@ class OAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # Self-hosted AS path: when MNEMON_AS_ENABLED=true, validate the
-        # token against the local JWKS. No network hop. Checked before
-        # the Auth0 path so that after the Phase 2 cutover (PR #40), we
-        # don't waste a PyJWKClient roundtrip on tokens we'll reject
-        # anyway if the Auth0 config ends up unset.
+        # Self-hosted AS path: validate the JWT against the local JWKS.
+        # No network hop — keys loaded from the same Fly volume that
+        # signs them.
         if as_enabled:
             from .oauth_as import verify_self_hosted_token
 
@@ -300,251 +241,50 @@ class OAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # If only local_token is configured (no OAuth, no AS), any non-
-        # matching token is invalid — do not fall through to JWT/userinfo
-        # because neither is configured and _validate_token would raise on
-        # missing jwks_url.
-        if not self.config.enabled:
-            await self._send_401(
-                send,
-                error="invalid_token",
-                description="bearer token did not match local token",
-            )
-            return
-
-        # Auth0 / external-AS path. Kept alongside the self-hosted path
-        # above so PR #40 can be the config flip (swap env vars on Fly +
-        # reconnect claude.ai) without a code change. Once cutover is
-        # validated and claude.ai is reconnected against the self-hosted
-        # AS, this block becomes dead code and can be deleted in a
-        # follow-up — but keeping it reversible costs us nothing.
-        jwt_error: _OAuthError | None = None
-        try:
-            self._validate_token(token)
-        except _OAuthError as e:
-            jwt_error = e
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Unexpected error during JWT validation")
-            jwt_error = _OAuthError(
-                "invalid_token", f"validation error: {e}"
-            )
-
-        if jwt_error is not None:
-            # JWT validation failed. If a userinfo URL is configured, try
-            # opaque-token introspection as a fallback. This works around
-            # OAuth providers (notably Auth0) that issue opaque /userinfo
-            # tokens instead of audience-bound JWTs for OIDC-only flows.
-            if self.config.userinfo_url:
-                try:
-                    await self._validate_via_userinfo(token)
-                except _OAuthError as ue:
-                    logger.info(
-                        "Both JWT and userinfo validation failed: jwt=%s userinfo=%s",
-                        jwt_error,
-                        ue,
-                    )
-                    await self._send_401(
-                        send,
-                        error=ue.code,
-                        description=f"jwt: {jwt_error.description}; userinfo: {ue.description}",
-                    )
-                    return
-                # Userinfo fallback succeeded — fall through.
-                logger.info("Token validated via userinfo fallback (JWT failed)")
-            else:
-                logger.info("JWT validation failed: %s", jwt_error)
-                await self._send_401(
-                    send, error=jwt_error.code, description=jwt_error.description
-                )
-                return
-
-        # Token valid — forward to downstream app.
-        await self.app(scope, receive, send)
+        # Only local_token was configured and the bearer didn't match —
+        # reject. Token validation against an AS is not possible.
+        await self._send_401(
+            send,
+            error="invalid_token",
+            description="bearer token did not match local token",
+        )
 
     def _prm_enabled(self) -> bool:
         """Whether to serve Protected Resource Metadata at all.
 
-        Served when any OAuth-capable auth path is active — either the
-        external-AS (Auth0) path or the self-hosted AS. Not served when
-        only MNEMON_LOCAL_TOKEN is configured (headless-only auth has
-        no PRM because there's no browser flow to bootstrap)."""
-        if self.config.enabled:
-            return True
-        if self.as_config is not None and self.as_config.enabled:
-            return True
-        return False
+        Served only when the self-hosted AS is enabled. Not served when
+        only ``MNEMON_LOCAL_TOKEN`` is configured — headless clients
+        don't need PRM because there's no browser flow to bootstrap.
+        """
+        return self.as_config is not None and self.as_config.enabled
 
     def _protected_resource_metadata(self) -> dict[str, Any]:
         """Build the RFC 9728 Protected Resource Metadata JSON body.
 
-        When the self-hosted AS is enabled, the authorization_servers
-        list points at this same server's issuer; otherwise it uses the
-        external-AS (Auth0) config.
+        ``_prm_enabled()`` must be True before calling this — otherwise
+        ``as_config`` may be None or disabled and the assertion fails.
         """
-        if self.as_config is not None and self.as_config.enabled:
-            issuer = self.as_config.issuer
-            resource = f"{issuer}/mcp"
-        else:
-            assert self.config.audience and self.config.issuer
-            issuer = self.config.issuer
-            resource = self.config.audience
+        assert self.as_config is not None and self.as_config.enabled
+        issuer = self.as_config.issuer
         return {
-            "resource": resource,
+            "resource": f"{issuer}/mcp",
             "authorization_servers": [issuer],
             "bearer_methods_supported": ["header"],
             "resource_documentation": "https://github.com/cipher813/mnemon",
         }
 
-    def _validate_token(self, token: str) -> dict[str, Any]:
-        """Validate JWT signature, issuer, audience, and expiry.
-
-        Raises :class:`_OAuthError` on validation failure.
-        """
-        try:
-            import jwt
-            from jwt import PyJWKClient
-        except ImportError as e:
-            raise _OAuthError(
-                "server_error",
-                "pyjwt not installed — install mnemon-memory[server]",
-            ) from e
-
-        if self._jwks_client is None:
-            assert self.config.jwks_url
-            self._jwks_client = PyJWKClient(
-                self.config.jwks_url, cache_keys=True, lifespan=3600
-            )
-
-        try:
-            signing_key = self._jwks_client.get_signing_key_from_jwt(token)
-        except jwt.PyJWKClientError as e:
-            raise _OAuthError(
-                "invalid_token", f"could not fetch signing key: {e}"
-            ) from e
-        except jwt.DecodeError as e:
-            raise _OAuthError("invalid_token", f"malformed token: {e}") from e
-
-        try:
-            return jwt.decode(
-                token,
-                signing_key.key,
-                algorithms=["RS256"],
-                audience=self.config.audience,
-                issuer=self.config.issuer,
-                options={"require": ["exp", "iat", "iss", "aud"]},
-            )
-        except jwt.ExpiredSignatureError as e:
-            raise _OAuthError("invalid_token", "token expired") from e
-        except jwt.InvalidAudienceError as e:
-            raise _OAuthError(
-                "invalid_token", f"audience mismatch (expected {self.config.audience})"
-            ) from e
-        except jwt.InvalidIssuerError as e:
-            raise _OAuthError(
-                "invalid_token", f"issuer mismatch (expected {self.config.issuer})"
-            ) from e
-        except jwt.InvalidTokenError as e:
-            raise _OAuthError("invalid_token", str(e)) from e
-
-    async def _validate_via_userinfo(self, token: str) -> dict[str, Any]:
-        """Fallback: validate an opaque token by calling the OAuth provider's
-        userinfo endpoint (OIDC Core section 5.3).
-
-        Used when JWT decode fails — typically because the provider issued
-        an opaque access token scoped to /userinfo rather than an audience-
-        bound JWT. If the userinfo endpoint returns 200 with a user profile,
-        the token is valid and we extract identity claims.
-
-        Uses a small in-memory cache keyed by token hash to avoid repeat
-        network calls within a short window. Returns the decoded userinfo
-        payload on success. Raises :class:`_OAuthError` on failure.
-
-        This is less strict than JWT audience validation — any token that
-        the provider's /userinfo endpoint accepts will be allowed through,
-        regardless of whether it was specifically issued for mnemon. That's
-        acceptable for Phase 1 / single-user deployments. Phase 2's self-
-        hosted AS will enforce proper audience binding.
-        """
-        import hashlib
-        import time
-
-        assert self.config.userinfo_url
-
-        # Simple TTL cache: token_hash -> expiry_ts (accept until).
-        now = time.time()
-        token_hash = hashlib.sha256(token.encode("ascii", errors="replace")).hexdigest()
-        cached_until = self._userinfo_cache.get(token_hash, 0)
-        if cached_until > now:
-            return {"sub": "cached"}
-
-        try:
-            import httpx
-        except ImportError as e:
-            raise _OAuthError(
-                "server_error", "httpx not installed (required for userinfo fallback)"
-            ) from e
-
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    self.config.userinfo_url,
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-        except httpx.TimeoutException as e:
-            raise _OAuthError(
-                "server_error", f"userinfo endpoint timeout: {e}"
-            ) from e
-        except httpx.HTTPError as e:
-            raise _OAuthError(
-                "server_error", f"userinfo endpoint error: {e}"
-            ) from e
-
-        if resp.status_code == 401 or resp.status_code == 403:
-            raise _OAuthError(
-                "invalid_token", "userinfo rejected token"
-            )
-        if resp.status_code != 200:
-            raise _OAuthError(
-                "invalid_token",
-                f"userinfo returned {resp.status_code}",
-            )
-
-        try:
-            profile = resp.json()
-        except ValueError as e:
-            raise _OAuthError(
-                "invalid_token", f"userinfo returned non-JSON: {e}"
-            ) from e
-
-        if not isinstance(profile, dict) or "sub" not in profile:
-            raise _OAuthError(
-                "invalid_token", "userinfo response missing 'sub' claim"
-            )
-
-        # Cache for 5 minutes to avoid hammering the provider.
-        self._userinfo_cache[token_hash] = now + 300
-        # Opportunistic cache eviction to prevent unbounded growth.
-        if len(self._userinfo_cache) > 256:
-            expired = [k for k, v in self._userinfo_cache.items() if v <= now]
-            for k in expired:
-                self._userinfo_cache.pop(k, None)
-
-        return profile
-
     def _resource_metadata_url(self) -> str:
-        """Resolve the PRM URL from whichever AS config is active.
+        """Build the PRM URL for 401 WWW-Authenticate headers.
 
-        When the self-hosted AS is enabled and the external-AS (Auth0)
-        config is absent, ``config.resource_metadata_url`` would fail
-        its ``audience``-derivation fallback. Use the AS config's
-        public_url in that case. Both configs share the same Fly app
-        URL in practice, so the result is identical when both are set.
+        Uses the AS public_url when available. Falls back to an empty
+        string when no AS is configured (local_token-only deployments
+        don't publish a PRM — the header points nowhere useful, but
+        that's fine because headless clients don't read it anyway).
         """
-        if self.as_config is not None and self.as_config.enabled:
-            base = self.as_config.public_url or ""
-            if base:
-                return f"{base.rstrip('/')}/.well-known/oauth-protected-resource"
-        return self.config.resource_metadata_url
+        if self.as_config is not None and self.as_config.public_url:
+            base = self.as_config.public_url.rstrip("/")
+            return f"{base}/.well-known/oauth-protected-resource"
+        return ""
 
     async def _send_401(
         self,
@@ -582,15 +322,6 @@ class OAuthMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": body, "more_body": False})
-
-
-class _OAuthError(Exception):
-    """Internal OAuth validation error — carries an RFC 6750 error code."""
-
-    def __init__(self, code: str, description: str) -> None:
-        super().__init__(f"{code}: {description}")
-        self.code = code
-        self.description = description
 
 
 def _get_header(scope: ASGIScope, name: bytes) -> bytes | None:
