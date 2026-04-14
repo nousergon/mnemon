@@ -160,6 +160,95 @@ class TestCheckHealthEndpoint:
         assert "degraded" in result.detail
 
 
+# ── check_oauth_as_metadata ─────────────────────────────────────────────────
+
+
+class TestCheckOAuthASMetadata:
+    def _fake_resp(self, status, body):
+        resp = MagicMock()
+        resp.status = status
+        resp.read.return_value = body.encode() if isinstance(body, str) else body
+        resp.__enter__.return_value = resp
+        resp.__exit__.return_value = False
+        return resp
+
+    def test_passes_when_metadata_valid(self, monkeypatch):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://example.fly.dev/mcp")
+        metadata = json.dumps({
+            "issuer": "https://example.fly.dev",
+            "authorization_endpoint": "https://example.fly.dev/oauth/authorize",
+            "token_endpoint": "https://example.fly.dev/oauth/token",
+            "registration_endpoint": "https://example.fly.dev/oauth/register",
+        })
+        with patch("urllib.request.urlopen", return_value=self._fake_resp(200, metadata)) as m:
+            result = doctor.check_oauth_as_metadata()
+        assert result.ok
+        assert not result.warn
+        assert "issuer=https://example.fly.dev" in result.detail
+        # Should have stripped the /mcp suffix before hitting /.well-known/.
+        assert m.call_args[0][0] == \
+            "https://example.fly.dev/.well-known/oauth-authorization-server"
+
+    def test_warns_when_as_not_enabled_404(self, monkeypatch):
+        """MNEMON_AS_ENABLED unset → /.well-known/ returns 404 via HTTPError.
+        Legitimate for a local-token-only deployment; warn, don't fail."""
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://example.fly.dev/mcp")
+        import urllib.error
+        err = urllib.error.HTTPError(
+            "url", 404, "Not Found", {}, io.BytesIO(b"")
+        )
+        with patch("urllib.request.urlopen", side_effect=err):
+            result = doctor.check_oauth_as_metadata()
+        assert result.ok
+        assert result.warn
+        assert "AS not enabled" in result.detail
+
+    def test_fails_when_required_fields_missing(self, monkeypatch):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://example.fly.dev/mcp")
+        # Missing registration_endpoint — claude.ai's DCR flow would break.
+        partial = json.dumps({
+            "issuer": "https://example.fly.dev",
+            "authorization_endpoint": "https://example.fly.dev/oauth/authorize",
+            "token_endpoint": "https://example.fly.dev/oauth/token",
+        })
+        with patch("urllib.request.urlopen", return_value=self._fake_resp(200, partial)):
+            result = doctor.check_oauth_as_metadata()
+        assert not result.ok
+        assert "registration_endpoint" in result.detail
+
+    def test_fails_when_issuer_mismatches_base(self, monkeypatch):
+        """Common cause: MNEMON_PUBLIC_URL typo. Silent breakage for browser
+        clients — this is the single highest-value thing the check catches."""
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://example.fly.dev/mcp")
+        bad = json.dumps({
+            "issuer": "https://WRONG.fly.dev",
+            "authorization_endpoint": "https://WRONG.fly.dev/oauth/authorize",
+            "token_endpoint": "https://WRONG.fly.dev/oauth/token",
+            "registration_endpoint": "https://WRONG.fly.dev/oauth/register",
+        })
+        with patch("urllib.request.urlopen", return_value=self._fake_resp(200, bad)):
+            result = doctor.check_oauth_as_metadata()
+        assert not result.ok
+        assert "MNEMON_PUBLIC_URL" in result.detail
+
+    def test_fails_on_connection_error(self, monkeypatch):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://example.fly.dev/mcp")
+        import urllib.error
+        with patch("urllib.request.urlopen",
+                   side_effect=urllib.error.URLError("connection refused")):
+            result = doctor.check_oauth_as_metadata()
+        assert not result.ok
+        assert "connection refused" in result.detail
+
+    def test_fails_on_non_json_body(self, monkeypatch):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://example.fly.dev/mcp")
+        with patch("urllib.request.urlopen",
+                   return_value=self._fake_resp(200, "<html>oops</html>")):
+            result = doctor.check_oauth_as_metadata()
+        assert not result.ok
+        assert "non-JSON" in result.detail
+
+
 # ── check_auth_and_tool_call ────────────────────────────────────────────────
 
 

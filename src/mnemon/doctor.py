@@ -157,6 +157,90 @@ def check_health_endpoint() -> CheckResult:
         )
 
 
+def check_oauth_as_metadata() -> CheckResult:
+    """GET /.well-known/oauth-authorization-server to verify the
+    self-hosted Authorization Server is serving valid RFC 8414 metadata.
+
+    This exercises the browser-client auth path that ``check_auth_and_
+    tool_call`` can't reach — claude.ai, Claude Desktop etc. rely on
+    this endpoint to discover token/authorize URLs. A 404 means
+    ``MNEMON_AS_ENABLED`` is not set (local-token-only deployment —
+    legitimate, but browser clients won't work): warn rather than fail.
+    """
+    try:
+        url = get_remote_url()
+    except RemoteClientConfigError as exc:
+        return CheckResult("OAuth AS metadata", False, str(exc))
+
+    base = url.rstrip("/")
+    if base.endswith("/mcp"):
+        base = base[: -len("/mcp")]
+    metadata_url = f"{base}/.well-known/oauth-authorization-server"
+
+    try:
+        with urllib.request.urlopen(metadata_url, timeout=HEALTH_TIMEOUT_SEC) as resp:
+            status = resp.status
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return CheckResult(
+                "OAuth AS metadata",
+                True,
+                "AS not enabled (MNEMON_AS_ENABLED unset) — browser clients won't work",
+                warn=True,
+            )
+        return CheckResult(
+            "OAuth AS metadata", False, f"{metadata_url}: HTTP {exc.code}"
+        )
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+        return CheckResult("OAuth AS metadata", False, f"{metadata_url}: {exc}")
+
+    if status != 200:
+        return CheckResult(
+            "OAuth AS metadata", False, f"HTTP {status} from {metadata_url}"
+        )
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return CheckResult(
+            "OAuth AS metadata",
+            False,
+            f"non-JSON body from {metadata_url}: {body[:80]}",
+        )
+
+    required = [
+        "issuer",
+        "authorization_endpoint",
+        "token_endpoint",
+        "registration_endpoint",
+    ]
+    missing = [f for f in required if f not in payload]
+    if missing:
+        return CheckResult(
+            "OAuth AS metadata",
+            False,
+            f"missing required RFC 8414 fields: {', '.join(missing)}",
+        )
+
+    # Issuer must equal the deployment base — mismatches silently break
+    # browser clients by pointing them at the wrong AS. Commonly caused
+    # by a typo in MNEMON_PUBLIC_URL.
+    if payload["issuer"].rstrip("/") != base:
+        return CheckResult(
+            "OAuth AS metadata",
+            False,
+            f"issuer {payload['issuer']!r} ≠ deployment base {base!r} "
+            "(check MNEMON_PUBLIC_URL)",
+        )
+
+    return CheckResult(
+        "OAuth AS metadata",
+        True,
+        f"issuer={payload['issuer']}, "
+        "authorize/token/register endpoints present",
+    )
+
+
 def check_auth_and_tool_call() -> CheckResult:
     """Full MCP handshake + memory_search call. Exercises auth end-to-end."""
     try:
@@ -298,6 +382,7 @@ CHECKS: list[Callable[[], CheckResult]] = [
     check_local_token,
     check_token_file_perms,
     check_health_endpoint,
+    check_oauth_as_metadata,
     check_auth_and_tool_call,
     check_round_trip,
 ]
