@@ -8,6 +8,7 @@ Tools: memory_search, memory_get, memory_save, memory_pin, memory_forget,
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 from mcp.server.fastmcp import FastMCP
@@ -16,6 +17,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .config import CONTENT_TYPE_VALUES
 from .search import search
 from .store import Store
+
+logger = logging.getLogger(__name__)
 
 
 def _build_transport_security() -> TransportSecuritySettings | None:
@@ -191,14 +194,20 @@ def memory_save(
         source_client=source_client,
     )
 
-    # Embed asynchronously (non-blocking, failures are non-fatal)
+    # Embed asynchronously (non-blocking, failures are non-fatal — the
+    # memory is in SQLite either way; only semantic search is affected).
     try:
         from .embedder import embed_document
         doc = store.get(doc_id)
         if doc:
             embed_document(store, doc.hash, title, content)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "memory_save: embedding failed for doc_id=%d (%s: %s); "
+            "memory is saved but won't surface in vector search until "
+            "`mnemon rebuild` runs",
+            doc_id, type(exc).__name__, exc,
+        )
 
     return f'Saved memory #{doc_id}: "{title}" [{content_type}]'
 
@@ -353,8 +362,13 @@ def profile_update(title: str, content: str) -> str:
         doc = store.get(doc_id)
         if doc:
             embed_document(store, doc.hash, title, content)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "profile_update: embedding failed for doc_id=%d (%s: %s); "
+            "preference is saved but won't surface in vector search until "
+            "`mnemon rebuild` runs",
+            doc_id, type(exc).__name__, exc,
+        )
 
     return f'Profile updated — saved preference #{doc_id}: "{title}"'
 

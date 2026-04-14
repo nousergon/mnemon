@@ -8,12 +8,15 @@ alternative search terms. Falls back to BM25-only when vectors unavailable.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .config import COMPOSITE_WEIGHTS, MMR_THRESHOLD, RECENCY_HALF_LIFE_DAYS, RRF_K
 from .store import SearchResult, Store
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -205,8 +208,15 @@ def search(
             from .embedder import embed
             query_embedding = embed(f"query: {query}")
             vector_results = store.search_vector(query_embedding, limit * 2)
-        except Exception:
-            pass  # Fall back to BM25-only
+        except Exception as exc:
+            # BM25 still serves results — but we need the cause visible so
+            # "why is semantic search suddenly missing obvious matches?"
+            # isn't an invisible bug. Most common cause is an embedder
+            # model load failure after a fresh install or model upgrade.
+            logger.warning(
+                "search: vector path failed (%s: %s); falling back to BM25-only",
+                type(exc).__name__, exc,
+            )
 
     # Snapshot cosine similarities by doc_id before RRF fusion flattens
     # the scores into opaque RRF values. Needed so downstream clients can
