@@ -174,3 +174,51 @@ class TestLoadVectors:
         assert vectors.dtype == np.float32
         assert doc_map["abc_0"]["title"] == "T1"
         assert doc_map["def_0"]["content_type"] == "decision"
+
+
+class TestLoadVectorsCollapsed:
+    def test_collapses_multi_chunk_docs(self, remote, no_streamlit_cache):
+        """Doc 1 has 3 chunks, doc 2 has 1 chunk. After collapse we get
+        two rows total, each synthetic vec_id ``doc_{doc_id}`` mapped to
+        its document, and the pooled vectors are unit-norm."""
+        items = [
+            {"doc_id": 1, "vec_id": "aaa_0", "title": "T1",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": False,
+             "vector": [1.0, 0.0] + [0.0] * 382},
+            {"doc_id": 1, "vec_id": "aaa_1", "title": "T1",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": False,
+             "vector": [0.0, 1.0] + [0.0] * 382},
+            {"doc_id": 1, "vec_id": "aaa_2", "title": "T1",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": False,
+             "vector": [1.0, 1.0] + [0.0] * 382},
+            {"doc_id": 2, "vec_id": "bbb_0", "title": "T2",
+             "content_type": "decision", "confidence": 0.9,
+             "created_at": "2026-01-02", "pinned": True,
+             "vector": [0.0, 0.0, 1.0] + [0.0] * 381},
+        ]
+        with patch(
+            "mnemon.dashboard.loaders._call_remote",
+            return_value=json.dumps({"count": 4, "dim": 384,
+                                     "truncated": False, "items": items}),
+        ):
+            result = no_streamlit_cache.load_vectors_collapsed()
+        assert result is not None
+        vec_ids, vectors, doc_map = result
+        assert sorted(vec_ids) == ["doc_1", "doc_2"]
+        assert vectors.shape == (2, 384)
+        # Every row is unit-norm (ready for cosine UMAP).
+        norms = np.linalg.norm(vectors, axis=1)
+        np.testing.assert_allclose(norms, [1.0, 1.0], atol=1e-6)
+        assert doc_map["doc_1"]["title"] == "T1"
+        assert doc_map["doc_2"]["content_type"] == "decision"
+
+    def test_empty_vault_returns_none(self, remote, no_streamlit_cache):
+        with patch(
+            "mnemon.dashboard.loaders._call_remote",
+            return_value=json.dumps({"count": 0, "dim": 384,
+                                     "truncated": False, "items": []}),
+        ):
+            assert no_streamlit_cache.load_vectors_collapsed() is None

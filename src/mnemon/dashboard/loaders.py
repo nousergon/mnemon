@@ -200,6 +200,43 @@ def load_vectors() -> tuple[list[str], np.ndarray, dict[str, dict]] | None:
 
 
 @st.cache_data(ttl=900)
+def load_vectors_collapsed() -> tuple[list[str], np.ndarray, dict[str, dict]] | None:
+    """Same shape as ``load_vectors``, but one row per document.
+
+    Multi-chunk documents get mean-pooled (then L2-normalized so the
+    result stays on the unit sphere for cosine UMAP). The synthesized
+    vec_id is ``"doc_{doc_id}"`` so the Graph page's click-to-detail
+    keeps working through the ``customdata.doc_id`` field.
+    """
+    raw = load_vectors()
+    if raw is None:
+        return None
+    vec_ids, vectors, doc_map = raw
+
+    by_doc: dict[int, list[int]] = {}
+    for idx, vid in enumerate(vec_ids):
+        doc_id = doc_map[vid]["id"]
+        by_doc.setdefault(doc_id, []).append(idx)
+
+    new_ids: list[str] = []
+    pooled: list[np.ndarray] = []
+    new_map: dict[str, dict] = {}
+    for doc_id, idxs in by_doc.items():
+        chunk_vecs = vectors[idxs]
+        mean_vec = chunk_vecs.mean(axis=0)
+        norm = np.linalg.norm(mean_vec)
+        if norm > 0:
+            mean_vec = mean_vec / norm
+        synthetic_id = f"doc_{doc_id}"
+        new_ids.append(synthetic_id)
+        pooled.append(mean_vec)
+        # Use any chunk's doc info — they all point to the same doc.
+        new_map[synthetic_id] = doc_map[vec_ids[idxs[0]]]
+
+    return new_ids, np.array(pooled, dtype=np.float32), new_map
+
+
+@st.cache_data(ttl=900)
 def load_umap_coords(_vectors: np.ndarray, n_neighbors: int = 15) -> np.ndarray:
     """UMAP 384d → 2D. Cached aggressively since reprojecting is expensive."""
     import umap
