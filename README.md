@@ -17,8 +17,25 @@ mnemon is a [Model Context Protocol](https://modelcontextprotocol.io) server wit
 
 **Platforms:** Tested on macOS 14+. Linux should work — Python + SQLite + FastEmbed are portable. Windows untested.
 
+## When to use mnemon
+
+mnemon is built for individual developers who use multiple MCP clients (Claude Code, Cursor, claude.ai, Claude Desktop) and want a single memory vault shared across all of them. If that's you, this is probably the right tool.
+
+**Comfortable range:** up to ~50k memories on a single Fly machine. Below that scale, SQLite + FTS5 + in-process vectors are faster than any network hop. Beyond it, in-process brute-force vector scan starts to feel slow and a 384d embedding's recall ceiling starts to matter — if you're there, you're probably deploying for a team and should evaluate [Mem0](https://mem0.ai), [Zep](https://www.getzep.com), or [Letta](https://docs.letta.com) instead. They offer managed multi-tenancy, larger embeddings, and per-user isolation that mnemon intentionally doesn't.
+
+**What mnemon optimizes for:**
+- MCP-native — one vault, every MCP client. No SDK integration or per-framework wiring.
+- Self-hosted — your data, your server, ~$1/mo on Fly.io auto-stop.
+- Personal-scale ergonomics — single SQLite file, copy-to-backup, no vector DB to operate.
+
+**What mnemon doesn't do (by design):**
+- Multi-tenancy / per-user isolation for teams.
+- Managed SaaS — you run the server.
+- Automatic fact extraction from arbitrary message streams at Mem0's level of polish.
+
 ## Table of Contents
 
+- [When to use mnemon](#when-to-use-mnemon)
 - [Install](#install)
 - [Quick Start](#quick-start)
   - [Try it locally (60 seconds)](#try-it-locally-60-seconds)
@@ -289,6 +306,10 @@ If `mnemon doctor` fails, check the specific failing line:
 - **Health endpoint unreachable** — app may be booting (cold start takes 15–25s for FastEmbed); retry after a moment. If persistent, check `fly logs -a <your-app>` and `fly status`.
 - **Auth + MCP tool call returns 401** — `MNEMON_LOCAL_TOKEN` on your machine doesn't match the Fly secret. Re-copy from your password manager into `~/.mnemon/local_token`.
 - **Round-trip fails** — `MNEMON_ALLOWED_HOSTS` in `fly.toml` doesn't include the hostname you're connecting through. It should match the host portion of `MNEMON_PUBLIC_URL`.
+
+**First prompt feels slow, or context-surfacing returns empty.** Fly's `auto_stop_machines` pauses the VM after ~5 min of inactivity to keep personal vaults at ~$1/mo. The first request after a pause pays 2–5s to wake the machine, plus a one-time 15–25s on first-ever use while FastEmbed loads. Users with infrequent usage patterns (e.g. one session a day) hit this on every first prompt; the context-surfacing hook may time out and the prompt runs without memory context. The next prompt has it.
+
+If this bothers you, disable auto-stop: set `auto_stop_machines = false` in `fly.toml`, then `fly scale count 1 --max-per-region 1 && fly deploy`. Expect ~$5/mo for always-on. Most personal users don't need this.
 
 ## S3 Vault Sync
 
