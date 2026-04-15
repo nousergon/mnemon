@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import subprocess
 import sys
 from pathlib import Path
 
@@ -157,12 +158,52 @@ def _ensure_local_token(token: str | None = None) -> str:
     return new_token
 
 
+def _register_claude_code_mcp(remote_url: str, local_token: str) -> None:
+    """Register the mnemon MCP server with Claude Code via the `claude` CLI.
+
+    Claude Code loads MCP server registrations from its own config
+    (managed by ``claude mcp add``), not from ``settings.json.mcpServers``.
+    Writing an HTTP transport entry to ``settings.json`` has no effect — the
+    CLI silently ignores it. Shelling out to ``claude mcp add`` is the only
+    supported registration path.
+    """
+    try:
+        subprocess.run(
+            ["claude", "mcp", "remove", "--scope", "user", "mnemon"],
+            check=False,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "claude", "mcp", "add",
+                "--scope", "user",
+                "--transport", "http",
+                "mnemon",
+                remote_url,
+                "--header", f"Authorization: Bearer {local_token}",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "The `claude` CLI was not found on PATH. Install Claude Code "
+            "before running `mnemon setup claude-code` with --remote-url."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode(errors="replace").strip()
+        raise RuntimeError(
+            f"`claude mcp add` failed (exit {exc.returncode}): {stderr}"
+        ) from exc
+
+
 def setup_claude_code(*, remote_url: str | None = None, token: str | None = None) -> str:
     """Configure Claude Code hooks (and optionally MCP server).
 
     When ``remote_url`` is provided, writes the URL and token to
-    ``~/.mnemon/`` config files and adds a SessionStart pre-warm hook.
-    The hooks themselves read these files at runtime via ``_remote_client``.
+    ``~/.mnemon/`` config files, registers the HTTP MCP server via
+    ``claude mcp add``, and adds a SessionStart pre-warm hook. The hooks
+    themselves read these files at runtime via ``_remote_client``.
 
     When ``remote_url`` is not provided, configures a local stdio MCP server
     for development/testing. Hooks will attempt to use remote if
@@ -174,21 +215,21 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
     lines = []
 
     if remote_url:
+        local_token = _ensure_local_token(token)
         _ensure_remote_url(remote_url)
-        # Call for side-effect only (writes ~/.mnemon/local_token); the
-        # Claude-Code path doesn't need the token string back — hooks
-        # read the file directly at invocation time.
-        _ensure_local_token(token)
         lines.append(f"  Remote URL: {remote_url}")
         lines.append(f"  Token file: {LOCAL_TOKEN_FILE} (chmod 600)")
 
-        # Remove stdio MCP server — hooks use remote now
-        if "mcpServers" in settings and "mnemon" in settings["mcpServers"]:
-            del settings["mcpServers"]["mnemon"]
-            if not settings["mcpServers"]:
+        _register_claude_code_mcp(remote_url, local_token)
+        lines.append("  MCP server: mnemon (http, remote) — registered via `claude mcp add`")
+
+        mcp_servers = settings.get("mcpServers")
+        if isinstance(mcp_servers, dict) and "mnemon" in mcp_servers:
+            del mcp_servers["mnemon"]
+            if not mcp_servers:
                 del settings["mcpServers"]
+            lines.append("  Cleaned up stale settings.json mcpServers.mnemon entry")
     else:
-        # Local-only mode: add stdio MCP server
         if "mcpServers" not in settings:
             settings["mcpServers"] = {}
         settings["mcpServers"]["mnemon"] = _mcp_config()

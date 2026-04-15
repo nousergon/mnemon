@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -119,29 +119,59 @@ class TestSetupClaudeCode:
             assert "Stop" in settings["hooks"]
             assert "Restart" in result
 
-    def test_remote_mode_removes_stdio_mcp(self):
+    def test_remote_mode_registers_via_claude_cli_and_cleans_stale_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / ".claude" / "settings.json"
             settings_path.parent.mkdir(parents=True)
             settings_path.write_text(json.dumps({
-                "mcpServers": {"mnemon": {"command": "python", "args": ["-m", "mnemon", "serve"]}},
+                "mcpServers": {
+                    "mnemon": {"type": "http", "url": "https://old.fly.dev/mcp"},
+                    "other": {"command": "keepme"},
+                },
             }))
             mnemon_dir = Path(tmpdir) / ".mnemon"
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
-                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"):
-                result = setup_claude_code(remote_url="https://test.fly.dev/mcp")
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+                result = setup_claude_code(
+                    remote_url="https://test.fly.dev/mcp",
+                    token="test-tok",
+                )
+
+            add_calls = [c for c in mock_run.call_args_list if "add" in c.args[0]]
+            assert len(add_calls) == 1
+            cmd = add_calls[0].args[0]
+            assert cmd[:3] == ["claude", "mcp", "add"]
+            assert "--scope" in cmd and "user" in cmd
+            assert "--transport" in cmd and "http" in cmd
+            assert "https://test.fly.dev/mcp" in cmd
+            assert "Authorization: Bearer test-tok" in cmd
+
+            remove_calls = [c for c in mock_run.call_args_list if "remove" in c.args[0]]
+            assert len(remove_calls) == 1
 
             settings = json.loads(settings_path.read_text())
-            # stdio MCP server should be removed
-            assert "mcpServers" not in settings or "mnemon" not in settings.get("mcpServers", {})
-            # Hooks should exist
+            assert "mnemon" not in settings.get("mcpServers", {})
+            assert settings["mcpServers"]["other"]["command"] == "keepme"
             assert "UserPromptSubmit" in settings["hooks"]
             assert "SessionStart" in settings["hooks"]
-            # Remote URL file should be written
             assert (mnemon_dir / "remote_url").read_text() == "https://test.fly.dev/mcp"
             assert "Remote URL" in result
+            assert "claude mcp add" in result
+
+    def test_remote_mode_raises_when_claude_cli_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mnemon_dir = Path(tmpdir) / ".mnemon"
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
+                 patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup.subprocess.run", side_effect=FileNotFoundError):
+                with pytest.raises(RuntimeError, match="claude.*CLI was not found"):
+                    setup_claude_code(remote_url="https://test.fly.dev/mcp", token="tok")
 
     def test_remote_mode_adds_session_start_hook(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -150,7 +180,9 @@ class TestSetupClaudeCode:
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
-                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"):
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
                 setup_claude_code(remote_url="https://test.fly.dev/mcp")
 
             settings = json.loads(settings_path.read_text())
@@ -253,7 +285,9 @@ class TestRunSetup:
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
-                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"):
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
                 result = run_setup("claude-code", ["--remote-url", "https://my.fly.dev/mcp"])
         assert "Remote URL" in result
         assert "https://my.fly.dev/mcp" in result
