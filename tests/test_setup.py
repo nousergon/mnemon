@@ -9,16 +9,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mnemon.setup import (
+    SetupError,
     run_setup,
     setup_claude_code,
     setup_cursor,
     setup_gemini,
     setup_hooks,
-    _mcp_config,
     _hooks_config,
+    _mcp_config,
     _ensure_local_token,
     _ensure_remote_url,
+    _next_steps_block,
     _parse_setup_args,
+    _strip_mnemon_hooks,
     TARGETS,
 )
 
@@ -106,7 +109,13 @@ class TestParseSetupArgs:
 
 
 class TestSetupClaudeCode:
-    def test_creates_settings_file_local_mode(self):
+    def test_creates_settings_file_local_mode_without_hooks(self):
+        """P0 (mnemon #109): local-only setup must NOT install hooks.
+
+        Hooks are HTTP-only (hooks/_remote_client.py has no local
+        fallback). Installing them with only a stdio MCP server produced
+        silent ``RemoteClientConfigError`` banners on every prompt.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / ".claude" / "settings.json"
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)):
@@ -115,9 +124,44 @@ class TestSetupClaudeCode:
             assert settings_path.exists()
             settings = json.loads(settings_path.read_text())
             assert "mnemon" in settings["mcpServers"]
-            assert "UserPromptSubmit" in settings["hooks"]
-            assert "Stop" in settings["hooks"]
+            assert "hooks" not in settings, (
+                "local-only setup must not write hook entries"
+            )
+            assert "Hooks" in result and "skipped" in result
             assert "Restart" in result
+
+    def test_local_mode_strips_stale_mnemon_hooks(self):
+        """Re-running setup locally after a prior remote install should
+        clean up old mnemon hook entries so they stop erroring."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / ".claude" / "settings.json"
+            settings_path.parent.mkdir(parents=True)
+            settings_path.write_text(json.dumps({
+                "hooks": {
+                    "UserPromptSubmit": [
+                        {"matcher": "", "hooks": [
+                            {"type": "command",
+                             "command": "python -m mnemon.hooks.context_surfacing"},
+                        ]},
+                    ],
+                    "Stop": [
+                        {"matcher": "", "hooks": [
+                            {"type": "command",
+                             "command": "python -m mnemon.hooks.session_extractor"},
+                            {"type": "command", "command": "other-thing"},
+                        ]},
+                    ],
+                },
+            }))
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)):
+                setup_claude_code()
+            settings = json.loads(settings_path.read_text())
+            hooks = settings.get("hooks", {})
+            assert "UserPromptSubmit" not in hooks
+            # Non-mnemon entries survive
+            stop = hooks.get("Stop", [])
+            assert len(stop) == 1
+            assert stop[0]["hooks"][0]["command"] == "other-thing"
 
     def test_remote_mode_registers_via_claude_cli_and_cleans_stale_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -134,12 +178,16 @@ class TestSetupClaudeCode:
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
                  patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint") as mock_preflight, \
                  patch("mnemon.setup.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
                 result = setup_claude_code(
                     remote_url="https://test.fly.dev/mcp",
                     token="test-tok",
                 )
+            mock_preflight.assert_called_once_with(
+                "https://test.fly.dev/mcp", "test-tok"
+            )
 
             add_calls = [c for c in mock_run.call_args_list if "add" in c.args[0]]
             assert len(add_calls) == 1
@@ -169,9 +217,32 @@ class TestSetupClaudeCode:
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
                  patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint"), \
                  patch("mnemon.setup.subprocess.run", side_effect=FileNotFoundError):
                 with pytest.raises(RuntimeError, match="claude.*CLI was not found"):
                     setup_claude_code(remote_url="https://test.fly.dev/mcp", token="tok")
+
+    def test_remote_preflight_failure_aborts_setup_cleanly(self):
+        """Preflight must run BEFORE any destructive step. On failure, no
+        config files or settings.json edits are left behind."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / ".claude" / "settings.json"
+            mnemon_dir = Path(tmpdir) / ".mnemon"
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
+                 patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint",
+                       side_effect=SetupError("endpoint unreachable")), \
+                 patch("mnemon.setup.subprocess.run") as mock_run:
+                with pytest.raises(SetupError, match="endpoint unreachable"):
+                    setup_claude_code(remote_url="https://test.fly.dev/mcp", token="tok")
+            # claude CLI never invoked (preflight aborted before it)
+            mock_run.assert_not_called()
+            # settings.json never written
+            assert not settings_path.exists()
+            # remote_url file never written (we bail before _ensure_remote_url)
+            assert not (mnemon_dir / "remote_url").exists()
 
     def test_remote_mode_adds_session_start_hook(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -181,6 +252,7 @@ class TestSetupClaudeCode:
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
                  patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint"), \
                  patch("mnemon.setup.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
                 setup_claude_code(remote_url="https://test.fly.dev/mcp")
@@ -229,7 +301,8 @@ class TestSetupCursor:
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
-                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"):
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint"):
                 setup_cursor(remote_url="https://test.fly.dev/mcp", token="test-tok")
 
             config = json.loads(cursor_path.read_text())
@@ -246,16 +319,15 @@ class TestSetupGemini:
 
 
 class TestSetupHooks:
-    def test_writes_hooks_only_local(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            settings_path = Path(tmpdir) / ".claude" / "settings.json"
-            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)):
-                setup_hooks()
+    def test_refuses_without_remote_url(self):
+        """P0 (mnemon #109): setup_hooks without --remote-url must raise.
 
-            settings = json.loads(settings_path.read_text())
-            assert "hooks" in settings
-            assert "mcpServers" not in settings
-            assert "SessionStart" not in settings["hooks"]
+        The hook code path is HTTP-only; writing hook entries without a
+        configured remote endpoint guarantees a config error on every
+        prompt. Better to refuse loudly than to ship the broken config.
+        """
+        with pytest.raises(SetupError, match="requires --remote-url"):
+            setup_hooks()
 
     def test_writes_hooks_with_session_start_when_remote(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -264,11 +336,27 @@ class TestSetupHooks:
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
-                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"):
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint"):
                 setup_hooks(remote_url="https://test.fly.dev/mcp")
 
             settings = json.loads(settings_path.read_text())
             assert "SessionStart" in settings["hooks"]
+
+    def test_preflight_failure_leaves_no_state(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / ".claude" / "settings.json"
+            mnemon_dir = Path(tmpdir) / ".mnemon"
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
+                 patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint",
+                       side_effect=SetupError("endpoint 502")):
+                with pytest.raises(SetupError, match="502"):
+                    setup_hooks(remote_url="https://test.fly.dev/mcp")
+            assert not settings_path.exists()
+            assert not (mnemon_dir / "remote_url").exists()
 
 
 class TestRunSetup:
@@ -286,15 +374,184 @@ class TestRunSetup:
                  patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
                  patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
                  patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint"), \
+                 patch("mnemon.doctor.run_doctor", return_value=0), \
                  patch("mnemon.setup.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
-                result = run_setup("claude-code", ["--remote-url", "https://my.fly.dev/mcp"])
+                result = run_setup(
+                    "claude-code",
+                    ["--remote-url", "https://my.fly.dev/mcp", "--skip-doctor"],
+                )
         assert "Remote URL" in result
         assert "https://my.fly.dev/mcp" in result
 
     def test_gemini_ignores_remote_url(self):
-        result = run_setup("gemini", ["--remote-url", "https://ignored.fly.dev/mcp"])
+        result = run_setup(
+            "gemini",
+            ["--remote-url", "https://ignored.fly.dev/mcp", "--skip-doctor"],
+        )
         assert "mnemon" in result
+
+    def test_auto_runs_doctor_after_successful_setup(self):
+        """Without --skip-doctor, a successful setup invokes run_doctor
+        and appends its output to the returned message."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake_doctor = MagicMock(return_value=0)
+
+            def _doctor_side_effect(out, **_kw):
+                out.write("mnemon doctor — local mode (FAKE)\n")
+                out.write("  OK fake_check: everything fine\n")
+                return 0
+
+            fake_doctor.side_effect = _doctor_side_effect
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.doctor.run_doctor", fake_doctor):
+                result = run_setup("claude-code", [])
+
+            fake_doctor.assert_called_once()
+            assert "Running mnemon doctor" in result
+            assert "fake_check: everything fine" in result
+            assert "Next steps:" in result
+
+    def test_skip_doctor_bypasses_invocation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.doctor.run_doctor") as mock_doctor:
+                result = run_setup("claude-code", ["--skip-doctor"])
+            mock_doctor.assert_not_called()
+            assert "Running mnemon doctor" not in result
+
+    def test_setup_error_returned_as_failure_message(self):
+        """A SetupError must be surfaced as a user-facing string, not a
+        crash. Keeps the CLI from dumping a traceback on the user."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mnemon_dir = Path(tmpdir) / ".mnemon"
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
+                 patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint",
+                       side_effect=SetupError("cold fly machine")), \
+                 patch("mnemon.setup.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+                result = run_setup(
+                    "claude-code",
+                    ["--remote-url", "https://x.fly.dev/mcp", "--skip-doctor"],
+                )
+        assert result.startswith("setup failed:")
+        assert "cold fly machine" in result
+
+    def test_doctor_failure_appends_note_but_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def _failing_doctor(out, **_kw):
+                out.write("mnemon doctor — local mode\n")
+                out.write("  FAIL vault: missing\n")
+                return 1
+
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.doctor.run_doctor", side_effect=_failing_doctor):
+                result = run_setup("claude-code", [])
+
+        assert "doctor reported issues" in result
+
+
+class TestStripMnemonHooks:
+    def test_drops_mnemon_entries_keeps_others(self):
+        hooks = {
+            "UserPromptSubmit": [
+                {"matcher": "", "hooks": [
+                    {"type": "command",
+                     "command": "python -m mnemon.hooks.context_surfacing"},
+                    {"type": "command", "command": "other-tool"},
+                ]},
+            ],
+            "Stop": [
+                {"matcher": "", "hooks": [
+                    {"type": "command",
+                     "command": "python -m mnemon.hooks.session_extractor"},
+                ]},
+            ],
+        }
+        _strip_mnemon_hooks(hooks)
+        assert "Stop" not in hooks  # only had a mnemon entry
+        ups = hooks["UserPromptSubmit"][0]["hooks"]
+        assert len(ups) == 1
+        assert ups[0]["command"] == "other-tool"
+
+    def test_leaves_unrelated_events_untouched(self):
+        hooks = {
+            "CustomEvent": [
+                {"matcher": "", "hooks": [
+                    {"type": "command", "command": "python -m mnemon.hooks.foo"},
+                ]},
+            ],
+        }
+        _strip_mnemon_hooks(hooks)
+        # CustomEvent is not one of mnemon's three hook events, so the
+        # filter leaves it alone even if the command references mnemon.
+        assert "CustomEvent" in hooks
+
+
+class TestNextStepsBlock:
+    def test_local_claude_code_mentions_upgrade_web(self):
+        out = _next_steps_block("claude-code", None)
+        assert "upgrade web" in out
+        assert "Restart Claude Code" in out
+
+    def test_remote_claude_code_omits_upgrade_suggestion(self):
+        out = _next_steps_block("claude-code", "https://x.fly.dev/mcp")
+        assert "upgrade web" not in out
+        assert "Restart Claude Code" in out
+
+    def test_cursor_targets_cursor_restart(self):
+        out = _next_steps_block("cursor", None)
+        assert "Restart Cursor" in out
+
+
+class TestPreflightRemoteEndpoint:
+    def test_restores_env_vars_on_success(self):
+        os.environ.pop("MNEMON_REMOTE_URL", None)
+        os.environ.pop("MNEMON_LOCAL_TOKEN", None)
+
+        from mnemon.setup import _preflight_remote_endpoint
+
+        with patch("mnemon.hooks._remote_client.call_tool_sync",
+                   return_value=("ok", 0.01)):
+            _preflight_remote_endpoint("https://x.fly.dev/mcp", "tok")
+        # Env vars set during preflight must not leak into the process
+        assert "MNEMON_REMOTE_URL" not in os.environ
+        assert "MNEMON_LOCAL_TOKEN" not in os.environ
+
+    def test_restores_env_vars_on_failure(self):
+        os.environ["MNEMON_REMOTE_URL"] = "https://existing/mcp"
+        os.environ["MNEMON_LOCAL_TOKEN"] = "existing-token"
+        try:
+            from mnemon.setup import _preflight_remote_endpoint
+
+            with patch(
+                "mnemon.hooks._remote_client.call_tool_sync",
+                side_effect=TimeoutError("no response"),
+            ):
+                with pytest.raises(SetupError, match="did not respond"):
+                    _preflight_remote_endpoint(
+                        "https://new.fly.dev/mcp", "new-tok"
+                    )
+            # Prior values must be restored, not overwritten
+            assert os.environ["MNEMON_REMOTE_URL"] == "https://existing/mcp"
+            assert os.environ["MNEMON_LOCAL_TOKEN"] == "existing-token"
+        finally:
+            os.environ.pop("MNEMON_REMOTE_URL", None)
+            os.environ.pop("MNEMON_LOCAL_TOKEN", None)
+
+
+class TestParseSkipDoctor:
+    def test_skip_doctor_flag(self):
+        result = _parse_setup_args(["--skip-doctor"])
+        assert result["skip_doctor"] is True
+
+    def test_skip_doctor_default_false(self):
+        result = _parse_setup_args([])
+        assert result["skip_doctor"] is False
 
     def test_no_hardcoded_fly_url(self):
         """CRITICAL GUARDRAIL: setup must never contain a hardcoded default
