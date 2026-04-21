@@ -191,6 +191,20 @@ def main() -> None:
             print(f"upgrade failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    elif command == "uninstall":
+        # `mnemon uninstall [--yes] [--keep-vault]` — wipe all mnemon
+        # state from this machine. Useful for testing the full fresh-
+        # install experience or for users who want to exit entirely.
+        flags = args[1:]
+        yes = "--yes" in flags
+        keep_vault = "--keep-vault" in flags
+        from .uninstall import UninstallError, uninstall
+        try:
+            print(uninstall(yes=yes, keep_vault=keep_vault))
+        except UninstallError as exc:
+            print(f"uninstall failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     elif command == "downgrade":
         # `mnemon downgrade local [--destroy-fly-app] [--yes] [--skip-doctor]`
         # Symmetric to `mnemon upgrade web`. Pulls the Fly vault state
@@ -307,6 +321,13 @@ Downgrade web → local (pull remote vault back, reconfigure clients to stdio):
   mnemon downgrade local    [--destroy-fly-app] [--yes] [--app-name NAME]
                             [--skip-doctor]
                             Requires MNEMON_S3_BUCKET and aws CLI creds.
+
+Uninstall (remove all mnemon state from this machine):
+  mnemon uninstall          [--yes] [--keep-vault]
+                            Removes vault, client configs, claude mcp
+                            registration. Does NOT touch Fly / S3 / the
+                            pip package. Run `downgrade local` first if
+                            you want to preserve a live web deployment.
 
 Server:
   mnemon serve              Start MCP server (stdio, local development)

@@ -26,6 +26,33 @@ from mnemon.setup import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_setup_env(monkeypatch, tmp_path_factory):
+    """Guard every setup test against real-world side effects.
+
+    - Point ``REMOTE_URL_FILE`` at a scratch path so the refuse-if-
+      remote-configured guard (added 2026-04-21) doesn't block local-
+      mode tests on a developer machine that has a real Fly install.
+    - Stub ``subprocess.run`` so local-mode setup's
+      ``claude mcp add --transport stdio`` call doesn't exec the real
+      Claude CLI. Tests that assert specific subprocess calls can still
+      use their own explicit ``patch("mnemon.setup.subprocess.run")``.
+    """
+    scratch = tmp_path_factory.mktemp("mnemon-remote-url-sentinel")
+    monkeypatch.setattr(
+        "mnemon.setup.REMOTE_URL_FILE", scratch / "remote_url"
+    )
+    monkeypatch.delenv("MNEMON_REMOTE_URL", raising=False)
+
+    import subprocess as _sp
+
+    def _ok(*_args, **_kw):
+        return MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("mnemon.setup.subprocess.run", _ok)
+    yield
+
+
 class TestMcpConfig:
     def test_mcp_config_uses_current_python(self):
         config = _mcp_config()
@@ -110,19 +137,33 @@ class TestParseSetupArgs:
 
 class TestSetupClaudeCode:
     def test_creates_settings_file_local_mode_installs_local_hooks(self):
-        """P1b: local-mode setup installs UserPromptSubmit + Stop hooks
-        that dispatch via :class:`LocalMemoryClient`. P0 skipped them
-        because the hook client was HTTP-only; P1a fixed that.
+        """Local-mode setup: UserPromptSubmit + Stop hooks in settings.json,
+        MCP server registered via ``claude mcp add`` (NOT in settings.json —
+        Claude Code ignores settings.json.mcpServers for mnemon). The
+        2026-04-21 fix moved local-mode MCP registration to the CLI
+        registry for the same reason remote mode uses it.
+
         SessionStart is intentionally omitted in local mode — no remote
         machine to pre-warm."""
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / ".claude" / "settings.json"
-            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)):
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.setup.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
                 result = setup_claude_code()
 
+            # `claude mcp add --transport stdio mnemon -- <py> -m mnemon serve`
+            add_calls = [c for c in mock_run.call_args_list if "add" in c.args[0]]
+            assert len(add_calls) == 1
+            cmd = add_calls[0].args[0]
+            assert cmd[:3] == ["claude", "mcp", "add"]
+            assert "--transport" in cmd and "stdio" in cmd
+            assert "serve" in cmd
+
+            # settings.json has hooks but NOT mcpServers.mnemon (moved to CLI registry)
             assert settings_path.exists()
             settings = json.loads(settings_path.read_text())
-            assert "mnemon" in settings["mcpServers"]
+            assert settings.get("mcpServers", {}).get("mnemon") is None
             assert "UserPromptSubmit" in settings["hooks"]
             assert "Stop" in settings["hooks"]
             assert "SessionStart" not in settings["hooks"]
@@ -258,6 +299,10 @@ class TestSetupClaudeCode:
             assert "https://test.fly.dev/health" in cmd
 
     def test_preserves_existing_settings(self):
+        """Non-mnemon mcpServers entries and unrelated top-level keys
+        must survive local-mode setup. The mnemon MCP registration
+        itself is in the `claude mcp` registry after the 2026-04-21
+        fix, not in settings.json."""
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / ".claude" / "settings.json"
             settings_path.parent.mkdir(parents=True)
@@ -270,8 +315,8 @@ class TestSetupClaudeCode:
                 setup_claude_code()
 
             settings = json.loads(settings_path.read_text())
-            assert "other-server" in settings["mcpServers"]
-            assert "mnemon" in settings["mcpServers"]
+            assert settings["mcpServers"]["other-server"] == {"command": "other"}
+            assert "mnemon" not in settings["mcpServers"]
             assert settings["customSetting"] is True
 
 
@@ -690,6 +735,64 @@ class TestFailOnWarnPropagation:
 
         assert "doctor reported issues" in result
         assert "including warnings" in result
+
+
+class TestRefuseIfRemoteConfigured:
+    """Guard added 2026-04-21. Running local-mode setup while a remote
+    is configured leaves the machine in a split-brain state — MCP goes
+    local, but hooks keep reading ~/.mnemon/remote_url and route through
+    RemoteMemoryClient. The guard raises loudly so the user has to pick
+    a clean exit (downgrade or uninstall) first."""
+
+    def test_env_var_triggers_refuse(self, monkeypatch):
+        monkeypatch.setenv(
+            "MNEMON_REMOTE_URL", "https://x.fly.dev/mcp"
+        )
+        with pytest.raises(SetupError, match="Refusing local-mode"):
+            setup_claude_code()
+
+    def test_file_triggers_refuse(self, monkeypatch, tmp_path):
+        url_file = tmp_path / "remote_url"
+        url_file.write_text("https://x.fly.dev/mcp\n")
+        monkeypatch.setattr("mnemon.setup.REMOTE_URL_FILE", url_file)
+        with pytest.raises(SetupError, match="Refusing local-mode"):
+            setup_claude_code()
+
+    def test_refuse_error_points_at_recovery_commands(
+        self, monkeypatch, tmp_path
+    ):
+        url_file = tmp_path / "remote_url"
+        url_file.write_text("https://x.fly.dev/mcp\n")
+        monkeypatch.setattr("mnemon.setup.REMOTE_URL_FILE", url_file)
+        with pytest.raises(SetupError) as exc_info:
+            setup_claude_code()
+        msg = str(exc_info.value)
+        # Three recovery options should be mentioned explicitly so the
+        # user knows how to get out of the split-brain state.
+        assert "downgrade local" in msg
+        assert "uninstall" in msg
+        assert "--remote-url" in msg
+
+    def test_guard_does_not_fire_in_remote_mode(
+        self, monkeypatch, tmp_path
+    ):
+        """When --remote-url is passed, the guard should not fire even
+        if a remote is already configured — this is how a user
+        reconfigures to a DIFFERENT remote URL."""
+        url_file = tmp_path / "remote_url"
+        url_file.write_text("https://old.fly.dev/mcp\n")
+        mnemon_dir = tmp_path / ".mnemon"
+        monkeypatch.setattr("mnemon.setup.REMOTE_URL_FILE", url_file)
+        monkeypatch.setattr("mnemon.setup.MNEMON_DIR", mnemon_dir)
+        monkeypatch.setattr(
+            "mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"
+        )
+        with patch("mnemon.setup._preflight_remote_endpoint"), \
+             patch("mnemon.setup.Path.home", return_value=tmp_path):
+            # This call should not raise — remote-mode setup is fine
+            # when a remote is configured (that's the whole point of
+            # running setup in remote mode).
+            setup_claude_code(remote_url="https://new.fly.dev/mcp", token="t")
 
 
 class TestParseSkipDoctor:

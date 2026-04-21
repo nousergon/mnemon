@@ -464,6 +464,37 @@ class TestDoctorCli:
         mock_doctor.assert_called_once_with(fail_on_warn=True)
 
 
+class TestUninstallCli:
+    @patch("mnemon.uninstall.uninstall")
+    def test_happy_path_passes_flags(self, mock_uninstall, capsys):
+        mock_uninstall.return_value = "uninstall output"
+        with patch(
+            "sys.argv",
+            ["mnemon", "uninstall", "--yes", "--keep-vault"],
+        ):
+            main()
+        mock_uninstall.assert_called_once_with(yes=True, keep_vault=True)
+        assert "uninstall output" in capsys.readouterr().out
+
+    @patch("mnemon.uninstall.uninstall")
+    def test_no_flags_defaults_are_false(self, mock_uninstall):
+        mock_uninstall.return_value = ""
+        with patch("sys.argv", ["mnemon", "uninstall"]):
+            main()
+        mock_uninstall.assert_called_once_with(yes=False, keep_vault=False)
+
+    @patch("mnemon.uninstall.uninstall")
+    def test_uninstall_error_surfaces_as_exit_1(self, mock_uninstall, capsys):
+        from mnemon.uninstall import UninstallError
+
+        mock_uninstall.side_effect = UninstallError("disk full")
+        with patch("sys.argv", ["mnemon", "uninstall", "--yes"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        assert "uninstall failed: disk full" in capsys.readouterr().err
+
+
 class TestDowngradeCli:
     @patch("mnemon.downgrade.downgrade_local")
     def test_happy_path_passes_parsed_flags(self, mock_downgrade, capsys):
