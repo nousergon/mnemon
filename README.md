@@ -58,6 +58,7 @@ You can start local, save a few hundred memories, and `mnemon upgrade web --app-
   - [Local — one command, zero accounts](#local--one-command-zero-accounts)
   - [Web — one command once you have Fly + AWS](#web--one-command-once-you-have-fly--aws)
   - [Downgrade back to local](#downgrade-back-to-local)
+  - [Uninstall](#uninstall)
   - [Visualize your vault](#visualize-your-vault)
   - [Use it](#use-it)
 - [MCP Tools](#mcp-tools)
@@ -132,6 +133,91 @@ mnemon downgrade local --destroy-fly-app
 ```
 
 Symmetric exit: pulls the current Fly vault state back to `~/.mnemon/default.sqlite` via S3, reconfigures every client back to stdio mode, optionally destroys the Fly app (with a y/N confirmation). No memories lost — whatever was on the Fly vault at teardown time becomes the new local vault.
+
+### Uninstall
+
+Remove mnemon state from this machine. Nothing user-owned in the cloud is touched.
+
+```bash
+mnemon uninstall [--yes] [--keep-vault]
+```
+
+#### What mnemon uninstall removes
+
+- `~/.mnemon/` — vault (SQLite + vectors), archive/, remote_url, local_token, models cache. With `--keep-vault`, this directory is preserved.
+- Claude Code MCP registration (`claude mcp remove --scope user mnemon`).
+- mnemon hook + mcpServers entries in `~/.claude/settings.json`.
+- mnemon entry in `~/.cursor/mcp.json`.
+- mnemon entry in Claude Desktop's config (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS).
+
+#### What mnemon uninstall does NOT touch
+
+These are deliberate scope exclusions. Memory data is preserved in full:
+
+- **The `mnemon-memory` Python package.** Use `pip uninstall mnemon-memory` separately if you want the CLI gone too.
+- **Your Fly.io app.** If you deployed web via `mnemon upgrade web`, that app keeps running (and keeps billing, if above free tier). Destroy it explicitly with `mnemon downgrade local --destroy-fly-app` BEFORE running uninstall — that command pulls the remote vault back to local first, so no memories are lost.
+- **Your S3 bucket contents.** Your vault backup stays in S3. mnemon has no `sync delete`; we never issue DELETE against your bucket.
+- **claude.ai + Claude mobile MCP entries.** If you added mnemon via claude.ai's web UI (Settings → Connected Apps), that registration lives in your Anthropic account, not on your machine. `claude mcp list` shows it with a `claude.ai` prefix. No local command can remove it — you have to delete it in the claude.ai web UI manually. If `mnemon uninstall` detects one, it surfaces a loud `⚠ REQUIRED` bullet pointing you there.
+
+#### Memory retention matrix
+
+| Command | Local `~/.mnemon/default.sqlite` | Fly volume | S3 bucket contents |
+|---|---|---|---|
+| `mnemon uninstall` | deleted (unless `--keep-vault`) | **untouched** | **untouched** |
+| `mnemon uninstall --keep-vault` | **untouched** | **untouched** | **untouched** |
+| `mnemon downgrade local` | replaced with Fly state (via S3 pull) | untouched (keeps running) | untouched |
+| `mnemon downgrade local --destroy-fly-app` | replaced with Fly state | destroyed (after data was pulled to local) | untouched |
+| `mnemon upgrade web` | archived to `archive/pre-web-<date>.sqlite` | newly created, seeded from S3 | written to (push) |
+| `mnemon sync push` / `mnemon sync pull` | read/write local | — | read/write |
+
+Memories are always recoverable as long as at least one of {S3 backup, Fly volume, local vault, local archive} exists.
+
+#### Common flows
+
+**Test from scratch on one machine** (validating setup, testing install flow):
+
+```bash
+mnemon uninstall --yes
+# Your Fly + S3 + claude.ai keep running; memories in the cloud are safe.
+pip install -e .           # or: pip install mnemon-memory
+mnemon setup               # fresh local install, no prior config
+```
+
+If a claude.ai-synced mnemon entry is also present, uninstall will tell you — remove it in claude.ai's web UI before re-setup or Claude Code will shadow the new local registration.
+
+**Stop using mnemon entirely** (delete all memories, destroy cloud infra):
+
+```bash
+# If you were in web mode, tear down the Fly app first (preserves the
+# vault in S3 as a backup before destruction):
+mnemon downgrade local --destroy-fly-app
+
+# Then remove local state:
+mnemon uninstall --yes
+
+# Then (optionally) remove the pip package:
+pip uninstall mnemon-memory
+
+# Then (manually, if applicable):
+# - Remove the mnemon entry in claude.ai → Settings → Connected Apps
+# - Remove the mnemon entry in the Claude mobile app
+# - Delete your S3 bucket contents if you want no residual memory data
+```
+
+**Move to a new machine** (preserve all memories):
+
+```bash
+# On the old machine:
+mnemon sync push           # ensure S3 has the latest vault
+mnemon uninstall --yes     # optional; Fly + S3 keep serving
+
+# On the new machine:
+pip install mnemon-memory
+mnemon setup claude-code --remote-url https://<your-app>.fly.dev/mcp
+# If you're local-only on the old machine:
+mnemon sync pull           # pulls your vault from S3 to local
+mnemon setup               # wires clients
+```
 
 ### Visualize your vault
 
