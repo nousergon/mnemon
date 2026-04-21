@@ -177,6 +177,53 @@ def _ensure_local_token(token: str | None = None) -> str:
     return new_token
 
 
+def _refuse_if_remote_configured(target_label: str) -> None:
+    """Raise :class:`SetupError` if ``~/.mnemon/remote_url`` exists.
+
+    Called by local-mode setup paths. Running local setup while a remote
+    is still configured leaves the machine in a split state: the stdio
+    MCP registration lands, but hooks keep reading the remote URL file
+    and routing through ``RemoteMemoryClient``. The user sees inconsistent
+    behavior ("Cursor went local but Claude Code still shows Fly").
+
+    Refusing here is the arch-correct "no silent split-brain" answer.
+    Users have two clean exits: ``mnemon downgrade local`` (preserves
+    web data by pulling from S3) or ``mnemon uninstall`` (wipes all
+    mnemon state).
+    """
+    # Check env var first (highest priority, matches _remote_client
+    # resolution order); fall through to the file.
+    env_url = os.environ.get("MNEMON_REMOTE_URL", "").strip()
+    file_url: str | None = None
+    if REMOTE_URL_FILE.exists():
+        try:
+            file_url = REMOTE_URL_FILE.read_text().strip() or None
+        except OSError:
+            file_url = None
+
+    if not env_url and not file_url:
+        return
+
+    source = (
+        f"MNEMON_REMOTE_URL={env_url}"
+        if env_url
+        else f"{REMOTE_URL_FILE} ({file_url})"
+    )
+    raise SetupError(
+        f"Refusing local-mode `mnemon setup {target_label}` while a "
+        f"remote is configured ({source}). "
+        "Running local setup now would leave this machine in a split "
+        "state — MCP goes local but hooks keep talking to the remote. "
+        "Pick one of:\n"
+        "  • `mnemon downgrade local` — pull your remote vault back to "
+        "local, reconfigure clients, optionally destroy the Fly app.\n"
+        "  • `mnemon uninstall` — remove ALL mnemon state from this "
+        "machine so you can reinstall from scratch.\n"
+        "  • `mnemon setup claude-code --remote-url <URL>` — "
+        "reconfigure this client to use the existing remote."
+    )
+
+
 def _strip_mnemon_hooks(hooks: dict) -> None:
     """Remove any hook entries whose command references ``mnemon.hooks.*``.
 
@@ -252,15 +299,53 @@ def _preflight_remote_endpoint(remote_url: str, local_token: str) -> None:
             os.environ["MNEMON_LOCAL_TOKEN"] = prior_token
 
 
-def _register_claude_code_mcp(remote_url: str, local_token: str) -> None:
-    """Register the mnemon MCP server with Claude Code via the `claude` CLI.
+def _register_claude_code_mcp_remote(remote_url: str, local_token: str) -> None:
+    """Register the mnemon HTTP MCP server with Claude Code.
 
     Claude Code loads MCP server registrations from its own config
     (managed by ``claude mcp add``), not from ``settings.json.mcpServers``.
-    Writing an HTTP transport entry to ``settings.json`` has no effect — the
-    CLI silently ignores it. Shelling out to ``claude mcp add`` is the only
-    supported registration path.
+    Writing to ``settings.json`` has no effect — the CLI silently ignores
+    mnemon entries there. Shelling out to ``claude mcp add`` is the only
+    supported registration path for BOTH HTTP and stdio transports.
     """
+    _run_claude_mcp_add(
+        [
+            "--transport", "http",
+            "mnemon",
+            remote_url,
+            "--header", f"Authorization: Bearer {local_token}",
+        ]
+    )
+
+
+def _register_claude_code_mcp_stdio() -> None:
+    """Register the mnemon stdio MCP server with Claude Code.
+
+    Local-mode counterpart to :func:`_register_claude_code_mcp_remote`.
+    Same rationale: settings.json entries are ignored by Claude Code, so
+    the only way to make mnemon tools visible to Claude Code locally is
+    via ``claude mcp add --transport stdio``.
+
+    This was the missing piece that made local-mode setup silently fail
+    for Claude Code users while appearing to succeed (settings.json was
+    written, but Claude Code never read it).
+    """
+    _run_claude_mcp_add(
+        [
+            "--transport", "stdio",
+            "mnemon",
+            "--",
+            _python_path(),
+            "-m",
+            "mnemon",
+            "serve",
+        ]
+    )
+
+
+def _run_claude_mcp_add(add_args: list[str]) -> None:
+    """Shared helper: remove any existing mnemon registration, then add
+    with the supplied args. Both remote and local paths use this."""
     try:
         subprocess.run(
             ["claude", "mcp", "remove", "--scope", "user", "mnemon"],
@@ -268,21 +353,14 @@ def _register_claude_code_mcp(remote_url: str, local_token: str) -> None:
             capture_output=True,
         )
         subprocess.run(
-            [
-                "claude", "mcp", "add",
-                "--scope", "user",
-                "--transport", "http",
-                "mnemon",
-                remote_url,
-                "--header", f"Authorization: Bearer {local_token}",
-            ],
+            ["claude", "mcp", "add", "--scope", "user"] + add_args,
             check=True,
             capture_output=True,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
             "The `claude` CLI was not found on PATH. Install Claude Code "
-            "before running `mnemon setup claude-code` with --remote-url."
+            "before running `mnemon setup claude-code`."
         ) from exc
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or b"").decode(errors="replace").strip()
@@ -292,24 +370,28 @@ def _register_claude_code_mcp(remote_url: str, local_token: str) -> None:
 
 
 def setup_claude_code(*, remote_url: str | None = None, token: str | None = None) -> str:
-    """Configure Claude Code (MCP server, and hooks only when remote).
+    """Configure Claude Code (MCP server + hooks).
 
     When ``remote_url`` is provided:
       - Preflight the endpoint (aborts setup if unreachable).
       - Write URL + token to ``~/.mnemon/`` config files.
-      - Register the HTTP MCP server via ``claude mcp add``.
+      - Register the HTTP MCP server via ``claude mcp add --transport http``.
       - Install UserPromptSubmit / Stop / SessionStart hooks.
 
     When ``remote_url`` is not provided:
-      - Register a local stdio MCP server in ``settings.json``.
+      - Refuses to run if ``~/.mnemon/remote_url`` is present (you're
+        currently in web mode; use ``mnemon downgrade local`` or
+        ``mnemon uninstall`` to exit first).
+      - Registers the stdio MCP server via ``claude mcp add --transport stdio``.
+        Writing to ``settings.json.mcpServers`` has no effect — Claude Code
+        reads its own registry, not settings.json.
       - Install UserPromptSubmit / Stop hooks (no SessionStart — no
         remote machine to pre-warm). Hooks dispatch in-process via
-        :class:`~mnemon.hooks._client.LocalMemoryClient` (added in P1a).
-
-    Note: P1a removed the constraint that hooks require HTTP. P0 skipped
-    hooks in local mode because the client path was HTTP-only; that's
-    been fixed.
+        :class:`~mnemon.hooks._client.LocalMemoryClient`.
     """
+    if remote_url is None:
+        _refuse_if_remote_configured("claude-code")
+
     settings_path = Path.home() / ".claude" / "settings.json"
     settings = _read_json(settings_path)
 
@@ -323,9 +405,12 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
         lines.append(f"  Token file: {LOCAL_TOKEN_FILE} (chmod 600)")
         lines.append(f"  Preflight:  OK (memory_status round-trip < {REMOTE_PREFLIGHT_TIMEOUT_SEC:.0f}s)")
 
-        _register_claude_code_mcp(remote_url, local_token)
+        _register_claude_code_mcp_remote(remote_url, local_token)
         lines.append("  MCP server: mnemon (http, remote) — registered via `claude mcp add`")
 
+        # Strip any stdio mnemon entry in settings.json from a prior
+        # local setup. Claude Code ignores the key for mnemon, but
+        # leaving a stale entry is confusing when users inspect the file.
         mcp_servers = settings.get("mcpServers")
         if isinstance(mcp_servers, dict) and "mnemon" in mcp_servers:
             del mcp_servers["mnemon"]
@@ -333,10 +418,18 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
                 del settings["mcpServers"]
             lines.append("  Cleaned up stale settings.json mcpServers.mnemon entry")
     else:
-        if "mcpServers" not in settings:
-            settings["mcpServers"] = {}
-        settings["mcpServers"]["mnemon"] = _mcp_config()
-        lines.append("  MCP server: mnemon (stdio, local)")
+        _register_claude_code_mcp_stdio()
+        lines.append("  MCP server: mnemon (stdio, local) — registered via `claude mcp add`")
+
+        # Strip any stdio entry in settings.json — leftover from earlier
+        # versions of setup that wrote there. Claude Code ignores it,
+        # but it's confusing to see the mnemon name in two places.
+        mcp_servers = settings.get("mcpServers")
+        if isinstance(mcp_servers, dict) and "mnemon" in mcp_servers:
+            del mcp_servers["mnemon"]
+            if not mcp_servers:
+                del settings["mcpServers"]
+            lines.append("  Cleaned up stale settings.json mcpServers.mnemon entry")
 
     # Hooks: install in both modes. _hooks_config adds SessionStart only
     # when remote_url is supplied (local mode has no cold-start to warm).
@@ -385,7 +478,12 @@ def setup_cursor(*, remote_url: str | None = None, token: str | None = None) -> 
 
     When ``remote_url`` is provided, configures Cursor to use the remote
     mnemon server with bearer token auth. Otherwise falls back to stdio.
+    Refuses local mode if a remote is currently configured (split-brain
+    guard — see :func:`_refuse_if_remote_configured`).
     """
+    if remote_url is None:
+        _refuse_if_remote_configured("cursor")
+
     cursor_path = Path.home() / ".cursor" / "mcp.json"
     config = _read_json(cursor_path)
 
@@ -456,8 +554,12 @@ def setup_claude_desktop(
     Claude Desktop has no hook system — this only writes the MCP entry.
     Config format mirrors Cursor's ``mcp.json``. When ``remote_url`` is
     provided, writes an HTTP transport with bearer auth and preflights
-    the endpoint; otherwise writes a local stdio entry.
+    the endpoint; otherwise writes a local stdio entry. Refuses local
+    mode if a remote is currently configured (split-brain guard).
     """
+    if remote_url is None:
+        _refuse_if_remote_configured("claude-desktop")
+
     desktop_path = _claude_desktop_config_path()
     config = _read_json(desktop_path)
 
@@ -508,8 +610,12 @@ def setup_hooks(*, remote_url: str | None = None, token: str | None = None) -> s
     Works in both modes after P1a: local hooks dispatch in-process via
     :class:`~mnemon.hooks._client.LocalMemoryClient`; remote hooks go
     over HTTP. When ``remote_url`` is supplied, the endpoint is
-    preflighted and a SessionStart pre-warm hook is added.
+    preflighted and a SessionStart pre-warm hook is added. Refuses
+    local mode if a remote is currently configured (split-brain guard).
     """
+    if remote_url is None:
+        _refuse_if_remote_configured("hooks")
+
     settings_path = Path.home() / ".claude" / "settings.json"
     settings = _read_json(settings_path)
 
@@ -621,8 +727,8 @@ def _next_steps_block(target: str, remote_url: str | None) -> str:
     if remote_url is None and target == "claude-code":
         lines.append(
             "  • Want mobile / claude.ai / cross-device memory? "
-            "Run `mnemon upgrade web` (coming soon) or pass "
-            "--remote-url <URL> to enable hooks now."
+            "Run `mnemon upgrade web --app-name <name>` or pass "
+            "--remote-url <URL> to switch this install to remote mode."
         )
     lines.append("  • Run `mnemon doctor` any time to re-verify the setup.")
     return "\n".join(lines)
@@ -693,7 +799,7 @@ def _run_autodetect(parsed: dict) -> str:
     if remote_url is None:
         blocks.append(
             "  • Want mobile / claude.ai / cross-device memory? "
-            "Run `mnemon upgrade web` (coming soon) or rerun with "
+            "Run `mnemon upgrade web --app-name <name>` or rerun with "
             "--remote-url <URL>."
         )
     blocks.append("  • Run `mnemon doctor` any time to re-verify the setup.")
