@@ -1,13 +1,14 @@
 # mnemon
 
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-550%2B_passing-brightgreen.svg)]()
-[![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/badge/PyPI-v0.5.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
 
 > One memory vault. Every MCP client. Self-hosted, no third-party auth.
+>
+> **Status:** alpha — interfaces may change. [Issues](https://github.com/cipher813/mnemon/issues) and PRs welcome.
 
 Claude Code remembers your architecture decisions. Cursor remembers your API conventions. claude.ai web/mobile/desktop remembers your project context. All from a single vault you own and run.
 
@@ -81,19 +82,19 @@ You can start local, save a few hundred memories, and `mnemon upgrade web --app-
 pip install mnemon-memory
 ```
 
-Optional extras:
+Optional: `pip install "mnemon-memory[ui]"` for the Streamlit dashboard (`mnemon dashboard`), or `[llm]` for the on-device 1.7B model that powers smarter extraction. Both are optional and evolving.
 
-```bash
-pip install "mnemon-memory[ui]"    # Streamlit dashboard (mnemon dashboard)
-pip install "mnemon-memory[llm]"   # local 1.7B model for query expansion + smarter extraction
-pip install "mnemon-memory[ui,llm]" # both
-```
-
-From source:
+**From source** (e.g. to try unreleased fixes on `main`):
 
 ```bash
 git clone https://github.com/cipher813/mnemon.git
 cd mnemon
+pip install -e .
+```
+
+**For contributors** (adds `pytest`, `ruff`, and other test/lint tooling):
+
+```bash
 pip install -e ".[dev]"
 ```
 
