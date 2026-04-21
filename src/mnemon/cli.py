@@ -191,6 +191,35 @@ def main() -> None:
             print(f"upgrade failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    elif command == "downgrade":
+        # `mnemon downgrade local [--destroy-fly-app] [--yes] [--skip-doctor]`
+        # Symmetric to `mnemon upgrade web`. Pulls the Fly vault state
+        # back to local, reconfigures every MCP client to stdio mode,
+        # optionally destroys the Fly app.
+        subcommand = args[1] if len(args) > 1 else ""
+        if subcommand != "local":
+            print(
+                "Usage: mnemon downgrade local "
+                "[--destroy-fly-app] [--yes] [--app-name NAME] "
+                "[--skip-doctor]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        parsed = _parse_downgrade_args(args[2:])
+        from .downgrade import DowngradeError, downgrade_local
+        try:
+            print(
+                downgrade_local(
+                    destroy_fly_app=parsed["destroy_fly_app"],
+                    yes=parsed["yes"],
+                    skip_doctor=parsed["skip_doctor"],
+                    app_name_override=parsed["app_name"],
+                )
+            )
+        except DowngradeError as exc:
+            print(f"downgrade failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         _print_usage()
@@ -229,6 +258,34 @@ def _parse_upgrade_args(args: list[str]) -> dict:
     return result
 
 
+def _parse_downgrade_args(args: list[str]) -> dict:
+    """Parse ``mnemon downgrade local`` flags."""
+    result: dict[str, str | bool | None] = {
+        "destroy_fly_app": False,
+        "yes": False,
+        "skip_doctor": False,
+        "app_name": None,
+    }
+    i = 0
+    while i < len(args):
+        flag = args[i]
+        if flag == "--destroy-fly-app":
+            result["destroy_fly_app"] = True
+            i += 1
+        elif flag == "--yes":
+            result["yes"] = True
+            i += 1
+        elif flag == "--skip-doctor":
+            result["skip_doctor"] = True
+            i += 1
+        elif flag == "--app-name" and i + 1 < len(args):
+            result["app_name"] = args[i + 1]
+            i += 2
+        else:
+            i += 1
+    return result
+
+
 def _print_usage() -> None:
     print(f"""mnemon v{__version__} — Universal long-term memory for AI agents
 
@@ -245,6 +302,11 @@ Upgrade local → web (deploys a Fly.io app + reconfigures every client):
                              [--region REGION] [--skip-doctor]
                              Requires: flyctl, aws CLI with credentials,
                              and an S3 bucket (MNEMON_S3_BUCKET or --s3-bucket).
+
+Downgrade web → local (pull remote vault back, reconfigure clients to stdio):
+  mnemon downgrade local    [--destroy-fly-app] [--yes] [--app-name NAME]
+                            [--skip-doctor]
+                            Requires MNEMON_S3_BUCKET and aws CLI creds.
 
 Server:
   mnemon serve              Start MCP server (stdio, local development)

@@ -464,6 +464,52 @@ class TestDoctorCli:
         mock_doctor.assert_called_once_with(fail_on_warn=True)
 
 
+class TestDowngradeCli:
+    @patch("mnemon.downgrade.downgrade_local")
+    def test_happy_path_passes_parsed_flags(self, mock_downgrade, capsys):
+        mock_downgrade.return_value = "downgrade output"
+        with patch(
+            "sys.argv",
+            [
+                "mnemon",
+                "downgrade",
+                "local",
+                "--destroy-fly-app",
+                "--yes",
+                "--skip-doctor",
+            ],
+        ):
+            main()
+        mock_downgrade.assert_called_once_with(
+            destroy_fly_app=True,
+            yes=True,
+            skip_doctor=True,
+            app_name_override=None,
+        )
+        assert "downgrade output" in capsys.readouterr().out
+
+    def test_local_subcommand_missing_prints_usage(self, capsys):
+        with patch("sys.argv", ["mnemon", "downgrade"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        assert "Usage: mnemon downgrade local" in capsys.readouterr().err
+
+    @patch("mnemon.downgrade.downgrade_local")
+    def test_downgrade_error_surfaces_as_exit_1(self, mock_downgrade, capsys):
+        from mnemon.downgrade import DowngradeError
+
+        mock_downgrade.side_effect = DowngradeError("no remote")
+        with patch(
+            "sys.argv",
+            ["mnemon", "downgrade", "local", "--skip-doctor"],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        assert "downgrade failed: no remote" in capsys.readouterr().err
+
+
 class TestUnknownCommand:
     def test_unknown_command_exits(self, capsys):
         with patch("sys.argv", ["mnemon", "foobar"]):
