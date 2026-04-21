@@ -91,6 +91,43 @@ def _claude_desktop_config_path() -> Path:
     return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
 
 
+def detect_claude_ai_mnemon() -> bool:
+    """True if ``claude mcp list`` shows a mnemon entry that originated
+    from the claude.ai web UI (Settings → Connected Apps).
+
+    Claude Code's CLI tags such entries with a ``claude.ai`` prefix:
+
+        claude.ai mnemon: https://mnemon-memory.fly.dev/mcp - ✓ Connected
+
+    Those registrations live in the user's Anthropic account (synced
+    from claude.ai), not in any local filesystem that
+    ``claude mcp remove --scope user`` can reach. This command can
+    detect them but cannot remove them — the user has to delete the
+    mnemon entry in claude.ai's web UI manually.
+
+    Returns False if the ``claude`` CLI isn't on PATH, list fails, or
+    no claude.ai-scoped mnemon entry is present.
+    """
+    try:
+        out = subprocess.run(
+            ["claude", "mcp", "list"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return False
+    if out.returncode != 0:
+        return False
+    for line in out.stdout.splitlines():
+        # Match exactly the prefix Claude Code emits for claude.ai-synced
+        # entries. Narrow match on purpose — don't false-positive on a
+        # server literally named "mnemon" in some other context.
+        if line.lstrip().startswith("claude.ai mnemon:") or line.lstrip().startswith("claude.ai mnemon "):
+            return True
+    return False
+
+
 def _detect_state() -> dict:
     """Return a dict describing what mnemon state is present on this
     machine. Used to build the confirmation prompt and the summary."""
@@ -109,6 +146,7 @@ def _detect_state() -> dict:
         "claude_desktop_config": _claude_desktop_config_path()
         if _claude_desktop_config_path().exists()
         else None,
+        "claude_ai_registration": detect_claude_ai_mnemon(),
     }
     return state
 
@@ -232,6 +270,27 @@ def uninstall(*, yes: bool = False, keep_vault: bool = False) -> str:
         )
         print(warning, file=sys.stderr)
 
+    # Warn loudly if there is a claude.ai-synced mnemon MCP registration.
+    # This command literally cannot remove it — it lives in the user's
+    # Anthropic account, not on this machine. Surfacing the detection
+    # prominently lets the user act on it; otherwise `claude mcp list`
+    # after uninstall would still show mnemon and they'd (reasonably)
+    # think the command didn't work.
+    if state["claude_ai_registration"]:
+        ca_warning = (
+            "⚠ claude.ai-synced mnemon MCP detected.\n"
+            "  `claude mcp list` shows a `claude.ai mnemon: …` entry. "
+            "This registration lives in your Anthropic account and is "
+            "synced to Claude Code from claude.ai — it CANNOT be removed "
+            "by `mnemon uninstall` or any `claude mcp remove` command.\n"
+            "  To finish the uninstall, open claude.ai → Settings → "
+            "Connected Apps and remove the mnemon entry there.\n"
+            "  If you leave it in place: it will shadow any local stdio "
+            "registration from a future `mnemon setup`, and Claude Code "
+            "will keep talking to the remote vault.\n"
+        )
+        print(ca_warning, file=sys.stderr)
+
     # Build the plan so the user knows what's about to happen.
     plan_lines = ["mnemon uninstall will remove:"]
     if state["mnemon_dir"] and not keep_vault:
@@ -324,8 +383,29 @@ def uninstall(*, yes: bool = False, keep_vault: bool = False) -> str:
             "",
             "Next steps:",
             "  • Restart Claude Code / Cursor / Claude Desktop to drop the cached MCP connections.",
-            "  • Remove mnemon MCP entries from claude.ai and the Claude mobile app manually "
-            "(Settings → Connected Apps).",
+        ]
+    )
+    # Promote the claude.ai note to its own bullet when we know one
+    # actually exists. Otherwise it reads as a hypothetical reminder
+    # and users skip it.
+    if state["claude_ai_registration"]:
+        summary.append(
+            "  • ⚠ REQUIRED: remove the mnemon MCP entry in claude.ai → "
+            "Settings → Connected Apps. `mnemon uninstall` cannot touch "
+            "claude.ai-synced registrations (they live in your Anthropic "
+            "account, not on this machine)."
+        )
+        summary.append(
+            "  • Then remove the mnemon entry in the Claude mobile app "
+            "(Settings → Connected Apps) if you use it."
+        )
+    else:
+        summary.append(
+            "  • If you use claude.ai or the Claude mobile app, remove "
+            "any mnemon entry there manually (Settings → Connected Apps)."
+        )
+    summary.extend(
+        [
             "  • `pip uninstall mnemon-memory` to remove the Python package itself.",
             "  • Re-run `mnemon setup` at any time to reinstall from scratch.",
         ]

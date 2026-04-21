@@ -130,14 +130,25 @@ class TestUninstallHappyPath:
 
 class TestConfirmation:
     def test_no_tty_without_yes_aborts(self, tmp_path):
-        """Non-interactive context without --yes must not delete data."""
+        """Non-interactive context without --yes must not delete data.
+
+        The detect_claude_ai_mnemon() read-only probe (`claude mcp list`)
+        IS allowed to fire before the confirmation prompt — it's
+        informational. Only destructive subprocess calls (``claude mcp
+        remove``) must be skipped when the user aborts.
+        """
         _seed_full_install(tmp_path)
         with patch("mnemon.uninstall._confirm", return_value=False), \
-             patch("mnemon.uninstall.subprocess.run") as mock_run:
+             patch("mnemon.uninstall.subprocess.run", return_value=_ok(0)) as mock_run:
             result = uninstall(yes=False)
         assert "aborted" in result.lower()
-        # No destructive actions fired
-        mock_run.assert_not_called()
+        # Only the read-only detection probe (`claude mcp list`) is
+        # allowed. No `claude mcp remove` or other destructive calls.
+        destructive_calls = [
+            c for c in mock_run.call_args_list
+            if "remove" in (c.args[0] if c.args else [])
+        ]
+        assert destructive_calls == []
         assert (tmp_path / ".mnemon").exists()
 
     def test_interactive_yes_proceeds(self, tmp_path):
@@ -170,6 +181,98 @@ class TestRemoteWarning:
         err = capsys.readouterr().err
         assert "remote URL is configured" in err
         assert "mnemon downgrade local" in err
+
+
+class TestDetectClaudeAiMnemon:
+    """The `claude.ai mnemon` prefix in `claude mcp list` marks
+    registrations that came through claude.ai's web UI. They're synced
+    from the user's Anthropic account and can't be removed by any
+    `claude mcp remove` invocation. Detection lets us warn loudly."""
+
+    def test_matches_claude_ai_prefix(self):
+        from mnemon.uninstall import detect_claude_ai_mnemon
+
+        fake_out = (
+            "claude.ai mnemon: https://mnemon-memory.fly.dev/mcp - ✓ Connected\n"
+            "other-server: stdio\n"
+        )
+        with patch(
+            "mnemon.uninstall.subprocess.run",
+            return_value=CompletedProcess(
+                args=[], returncode=0, stdout=fake_out, stderr=""
+            ),
+        ):
+            assert detect_claude_ai_mnemon() is True
+
+    def test_does_not_match_user_scope_mnemon(self):
+        """A user-scope mnemon entry (from `claude mcp add`, not claude.ai)
+        is not a claude.ai registration. It starts with `mnemon:` alone,
+        no `claude.ai` prefix."""
+        from mnemon.uninstall import detect_claude_ai_mnemon
+
+        fake_out = "mnemon: stdio (command: python -m mnemon serve)\n"
+        with patch(
+            "mnemon.uninstall.subprocess.run",
+            return_value=CompletedProcess(
+                args=[], returncode=0, stdout=fake_out, stderr=""
+            ),
+        ):
+            assert detect_claude_ai_mnemon() is False
+
+    def test_claude_cli_missing_returns_false(self):
+        from mnemon.uninstall import detect_claude_ai_mnemon
+
+        with patch(
+            "mnemon.uninstall.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            assert detect_claude_ai_mnemon() is False
+
+    def test_list_nonzero_returns_false(self):
+        from mnemon.uninstall import detect_claude_ai_mnemon
+
+        with patch(
+            "mnemon.uninstall.subprocess.run",
+            return_value=CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="auth error"
+            ),
+        ):
+            assert detect_claude_ai_mnemon() is False
+
+
+class TestClaudeAiWarnings:
+    """When a claude.ai mnemon entry exists, uninstall output must
+    surface it prominently — both in the pre-confirmation plan (stderr)
+    and in the post-action summary (stdout/return value). A generic
+    'remove manually' line isn't enough; users need to know the tool
+    KNOWS there's one present."""
+
+    def test_warning_promoted_when_detected(self, tmp_path, capsys):
+        _seed_full_install(tmp_path)
+        with patch(
+            "mnemon.uninstall.detect_claude_ai_mnemon", return_value=True
+        ), patch("mnemon.uninstall.subprocess.run", return_value=_ok(0)):
+            result = uninstall(yes=True)
+
+        # Pre-action loud warning went to stderr
+        err = capsys.readouterr().err
+        assert "claude.ai-synced mnemon MCP detected" in err
+        # Post-action summary has the REQUIRED bullet
+        assert "REQUIRED" in result
+        assert "claude.ai → Settings → Connected Apps" in result
+
+    def test_no_warning_when_not_detected(self, tmp_path, capsys):
+        _seed_full_install(tmp_path)
+        with patch(
+            "mnemon.uninstall.detect_claude_ai_mnemon", return_value=False
+        ), patch("mnemon.uninstall.subprocess.run", return_value=_ok(0)):
+            result = uninstall(yes=True)
+
+        err = capsys.readouterr().err
+        assert "claude.ai-synced mnemon MCP detected" not in err
+        assert "REQUIRED" not in result
+        # The generic hypothetical reminder still appears
+        assert "If you use claude.ai" in result
 
 
 class TestEmptyMachine:

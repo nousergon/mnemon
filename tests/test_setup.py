@@ -737,6 +737,50 @@ class TestFailOnWarnPropagation:
         assert "including warnings" in result
 
 
+class TestClaudeAiShadowWarning:
+    """Local-mode setup_claude_code now surfaces a warning when a
+    claude.ai-synced mnemon MCP registration is detected. The stdio
+    registration the function just added will be shadowed by the
+    claude.ai one because Claude Code prefers the synced-from-account
+    source. Users need to know the setup technically succeeded but
+    Claude Code behavior won't reflect it until they remove the entry
+    in claude.ai's web UI."""
+
+    def test_warning_surfaced_when_claude_ai_entry_exists(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=True):
+                result = setup_claude_code()
+        assert "claude.ai-synced mnemon MCP registration detected" in result
+        assert "Claude Code will PREFER" in result
+        assert "Cursor + Claude Desktop are unaffected" in result
+
+    def test_no_warning_when_no_claude_ai_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=False):
+                result = setup_claude_code()
+        assert "claude.ai-synced mnemon MCP registration detected" not in result
+
+    def test_no_warning_in_remote_mode(self):
+        """Remote-mode setup intentionally uses the HTTP MCP via
+        `claude mcp add`. It doesn't matter whether a claude.ai entry
+        also exists — we're explicitly in remote mode. No need for
+        the shadow warning."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mnemon_dir = Path(tmpdir) / ".mnemon"
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
+                 patch("mnemon.setup.MNEMON_DIR", mnemon_dir), \
+                 patch("mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"), \
+                 patch("mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"), \
+                 patch("mnemon.setup._preflight_remote_endpoint"), \
+                 patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=True):
+                result = setup_claude_code(
+                    remote_url="https://test.fly.dev/mcp", token="tok"
+                )
+        assert "claude.ai-synced mnemon MCP registration detected" not in result
+
+
 class TestRefuseIfRemoteConfigured:
     """Guard added 2026-04-21. Running local-mode setup while a remote
     is configured leaves the machine in a split-brain state — MCP goes

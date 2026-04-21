@@ -464,6 +464,31 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
     if remote_url:
         lines.append("  SessionStart: pre-warm polling (90s background)")
 
+    # Warn if a claude.ai-synced mnemon entry exists. It can't be removed
+    # by any `claude mcp remove` command; it'll shadow the stdio
+    # registration we just added. Surface it here so the user knows the
+    # setup "succeeded" but Claude Code will still prefer the remote.
+    if remote_url is None:
+        from .uninstall import detect_claude_ai_mnemon
+
+        if detect_claude_ai_mnemon():
+            lines.append("")
+            lines.append(
+                "  ⚠ claude.ai-synced mnemon MCP registration detected."
+            )
+            lines.append(
+                "    Claude Code will PREFER that entry over the stdio "
+                "registration we just added."
+            )
+            lines.append(
+                "    To use local for Claude Code too: open claude.ai → "
+                "Settings → Connected Apps and remove the mnemon entry."
+            )
+            lines.append(
+                "    (Cursor + Claude Desktop are unaffected — they use "
+                "their own local configs.)"
+            )
+
     _write_json(settings_path, settings)
 
     return (
