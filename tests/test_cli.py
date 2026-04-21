@@ -375,6 +375,75 @@ class TestSetup:
         )
 
 
+class TestUpgradeCli:
+    @patch("mnemon.upgrade.upgrade_web")
+    def test_happy_path_passes_parsed_flags(self, mock_upgrade, capsys):
+        mock_upgrade.return_value = "upgrade output"
+        with patch(
+            "sys.argv",
+            [
+                "mnemon",
+                "upgrade",
+                "web",
+                "--app-name",
+                "mnemon-test-cli",
+                "--s3-bucket",
+                "my-bucket",
+                "--region",
+                "sjc",
+                "--skip-doctor",
+            ],
+        ):
+            main()
+        mock_upgrade.assert_called_once_with(
+            app_name="mnemon-test-cli",
+            s3_bucket="my-bucket",
+            token=None,
+            region="sjc",
+            skip_doctor=True,
+        )
+        assert "upgrade output" in capsys.readouterr().out
+
+    def test_web_subcommand_missing_prints_usage(self, capsys):
+        with patch("sys.argv", ["mnemon", "upgrade"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        assert "Usage: mnemon upgrade web" in capsys.readouterr().err
+
+    def test_missing_app_name_exits(self, capsys):
+        with patch(
+            "sys.argv",
+            ["mnemon", "upgrade", "web", "--s3-bucket", "b"],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        assert "--app-name is required" in capsys.readouterr().err
+
+    @patch("mnemon.upgrade.upgrade_web")
+    def test_upgrade_error_surfaces_as_exit_1(self, mock_upgrade, capsys):
+        from mnemon.upgrade import UpgradeError
+
+        mock_upgrade.side_effect = UpgradeError("boom")
+        with patch(
+            "sys.argv",
+            [
+                "mnemon",
+                "upgrade",
+                "web",
+                "--app-name",
+                "mnemon-test",
+                "--skip-doctor",
+            ],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "upgrade failed: boom" in err
+
+
 class TestDoctorCli:
     @patch("mnemon.doctor.run_doctor")
     def test_default_invocation_does_not_fail_on_warn(self, mock_doctor):
