@@ -143,16 +143,23 @@ def main() -> None:
             sys.exit(1)
 
     elif command == "setup":
-        target = args[1] if len(args) > 1 else ""
-        if not target:
-            print("Usage: mnemon setup <claude-code|cursor|gemini|hooks> [--remote-url URL] [--token TOKEN]", file=sys.stderr)
-            sys.exit(1)
+        # `mnemon setup` with no target auto-detects every installed
+        # client and configures each. Explicit target names
+        # (claude-code, claude-desktop, cursor, gemini, hooks) still
+        # work for narrow use cases.
         from .setup import run_setup
-        print(run_setup(target, args[2:]))
+        if len(args) > 1 and not args[1].startswith("--"):
+            target: str | None = args[1]
+            setup_args = args[2:]
+        else:
+            target = None
+            setup_args = args[1:]
+        print(run_setup(target, setup_args))
 
     elif command == "doctor":
         from .doctor import run_doctor
-        sys.exit(run_doctor())
+        fail_on_warn = "--fail-on-warn" in args[1:]
+        sys.exit(run_doctor(fail_on_warn=fail_on_warn))
 
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
@@ -163,9 +170,13 @@ def main() -> None:
 def _print_usage() -> None:
     print(f"""mnemon v{__version__} — Universal long-term memory for AI agents
 
-Setup (configure clients to use remote vault):
-  mnemon setup <target>     Configure integration [--remote-url URL] [--token TOKEN]
-  mnemon doctor             Run diagnostics against the configured remote vault
+Setup (configure MCP clients; use --remote-url for web mode):
+  mnemon setup              Auto-detect installed clients and configure each
+  mnemon setup <target>     Configure one client explicitly
+                            (claude-code | claude-desktop | cursor | gemini | hooks)
+                            [--remote-url URL] [--token TOKEN] [--skip-doctor]
+  mnemon doctor             Run diagnostics (local or remote, auto-detected)
+                            [--fail-on-warn] treat warnings as failures
 
 Server:
   mnemon serve              Start MCP server (stdio, local development)

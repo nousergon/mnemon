@@ -347,13 +347,52 @@ class TestSetup:
         out = capsys.readouterr().out
         assert "Configured claude-code successfully." in out
 
-    def test_setup_without_target_exits(self, capsys):
+    @patch("mnemon.setup.run_setup")
+    def test_setup_without_target_invokes_autodetect(
+        self, mock_run, capsys
+    ):
+        """P1b: `mnemon setup` with no target auto-detects clients
+        instead of printing usage and exiting. CLI passes ``None`` for
+        target when no positional arg is given (only flags, or nothing)."""
+        mock_run.return_value = "auto-detect output"
         with patch("sys.argv", ["mnemon", "setup"]):
+            main()
+        mock_run.assert_called_once_with(None, [])
+        assert "auto-detect output" in capsys.readouterr().out
+
+    @patch("mnemon.setup.run_setup")
+    def test_setup_with_only_flags_is_autodetect(self, mock_run, capsys):
+        """Flags like --remote-url without a target should still be
+        treated as auto-detect, not as a target name."""
+        mock_run.return_value = "ok"
+        with patch(
+            "sys.argv",
+            ["mnemon", "setup", "--remote-url", "https://x/mcp", "--skip-doctor"],
+        ):
+            main()
+        mock_run.assert_called_once_with(
+            None, ["--remote-url", "https://x/mcp", "--skip-doctor"]
+        )
+
+
+class TestDoctorCli:
+    @patch("mnemon.doctor.run_doctor")
+    def test_default_invocation_does_not_fail_on_warn(self, mock_doctor):
+        mock_doctor.return_value = 0
+        with patch("sys.argv", ["mnemon", "doctor"]):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 0
+        mock_doctor.assert_called_once_with(fail_on_warn=False)
+
+    @patch("mnemon.doctor.run_doctor")
+    def test_fail_on_warn_flag_propagates(self, mock_doctor):
+        mock_doctor.return_value = 1
+        with patch("sys.argv", ["mnemon", "doctor", "--fail-on-warn"]):
             with pytest.raises(SystemExit) as exc_info:
                 main()
         assert exc_info.value.code == 1
-        err = capsys.readouterr().err
-        assert "Usage: mnemon setup" in err
+        mock_doctor.assert_called_once_with(fail_on_warn=True)
 
 
 class TestUnknownCommand:

@@ -302,11 +302,13 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
 
     When ``remote_url`` is not provided:
       - Register a local stdio MCP server in ``settings.json``.
-      - **Hooks are NOT installed** — the hook code path is HTTP-only
-        (``hooks/_remote_client.py``) and has no local fallback. Writing
-        them against stdio would produce silent config errors on every
-        prompt. Users who want hooks should run ``mnemon upgrade web``
-        (forthcoming) or pass ``--remote-url``.
+      - Install UserPromptSubmit / Stop hooks (no SessionStart — no
+        remote machine to pre-warm). Hooks dispatch in-process via
+        :class:`~mnemon.hooks._client.LocalMemoryClient` (added in P1a).
+
+    Note: P1a removed the constraint that hooks require HTTP. P0 skipped
+    hooks in local mode because the client path was HTTP-only; that's
+    been fixed.
     """
     settings_path = Path.home() / ".claude" / "settings.json"
     settings = _read_json(settings_path)
@@ -330,34 +332,44 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
             if not mcp_servers:
                 del settings["mcpServers"]
             lines.append("  Cleaned up stale settings.json mcpServers.mnemon entry")
-
-        hooks = _hooks_config(remote_url=remote_url)
-        if "hooks" not in settings:
-            settings["hooks"] = {}
-        settings["hooks"]["UserPromptSubmit"] = hooks["UserPromptSubmit"]
-        settings["hooks"]["Stop"] = hooks["Stop"]
-        settings["hooks"]["SessionStart"] = hooks["SessionStart"]
-        lines.append("  UserPromptSubmit: context-surfacing (8s)")
-        lines.append("  Stop: session-extractor (30s), handoff-generator (30s)")
-        lines.append("  SessionStart: pre-warm polling (90s background)")
     else:
         if "mcpServers" not in settings:
             settings["mcpServers"] = {}
         settings["mcpServers"]["mnemon"] = _mcp_config()
         lines.append("  MCP server: mnemon (stdio, local)")
-        # Strip any previously-installed mnemon hooks so old configs on
-        # a machine being downgraded don't keep erroring.
-        existing_hooks = settings.get("hooks")
-        if isinstance(existing_hooks, dict):
-            _strip_mnemon_hooks(existing_hooks)
-            if not existing_hooks:
-                del settings["hooks"]
-        lines.append("  Hooks:      skipped (local-only setup)")
-        lines.append(
-            "              Hooks require a remote vault. Run "
-            "`mnemon setup claude-code --remote-url <URL>` or "
-            "`mnemon upgrade web` to enable them."
-        )
+
+    # Hooks: install in both modes. _hooks_config adds SessionStart only
+    # when remote_url is supplied (local mode has no cold-start to warm).
+    hooks = _hooks_config(remote_url=remote_url)
+    if "hooks" not in settings:
+        settings["hooks"] = {}
+    settings["hooks"]["UserPromptSubmit"] = hooks["UserPromptSubmit"]
+    settings["hooks"]["Stop"] = hooks["Stop"]
+    if "SessionStart" in hooks:
+        settings["hooks"]["SessionStart"] = hooks["SessionStart"]
+    else:
+        # Drop any stale SessionStart (set by a previous remote install);
+        # it would poll a remote URL that's no longer authoritative.
+        stale_session = settings["hooks"].get("SessionStart")
+        if isinstance(stale_session, list):
+            filtered = [
+                entry
+                for entry in stale_session
+                if not any(
+                    "mnemon" in (h.get("command") or "")
+                    for h in entry.get("hooks", [])
+                )
+            ]
+            if filtered:
+                settings["hooks"]["SessionStart"] = filtered
+            else:
+                del settings["hooks"]["SessionStart"]
+
+    hook_mode_tag = "remote" if remote_url else "local (in-process)"
+    lines.append(f"  UserPromptSubmit: context-surfacing (8s, {hook_mode_tag})")
+    lines.append(f"  Stop: session-extractor (30s), handoff-generator (30s) [{hook_mode_tag}]")
+    if remote_url:
+        lines.append("  SessionStart: pre-warm polling (90s background)")
 
     _write_json(settings_path, settings)
 
@@ -404,8 +416,85 @@ def setup_cursor(*, remote_url: str | None = None, token: str | None = None) -> 
     )
 
 
+def _claude_desktop_config_path() -> Path:
+    """Resolve the Claude Desktop MCP config path for this platform.
+
+    - macOS: ``~/Library/Application Support/Claude/claude_desktop_config.json``
+    - Windows: ``%APPDATA%\\Claude\\claude_desktop_config.json``
+    - Linux: ``~/.config/Claude/claude_desktop_config.json`` (Claude
+      Desktop is not officially supported on Linux but users who build
+      from source put the config here).
+    """
+    if sys.platform == "darwin":
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "Claude" / "claude_desktop_config.json"
+        # Fallback if APPDATA is unset for any reason.
+        return (
+            Path.home()
+            / "AppData"
+            / "Roaming"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
+    return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def setup_claude_desktop(
+    *, remote_url: str | None = None, token: str | None = None
+) -> str:
+    """Configure Claude Desktop's MCP server.
+
+    Claude Desktop has no hook system — this only writes the MCP entry.
+    Config format mirrors Cursor's ``mcp.json``. When ``remote_url`` is
+    provided, writes an HTTP transport with bearer auth and preflights
+    the endpoint; otherwise writes a local stdio entry.
+    """
+    desktop_path = _claude_desktop_config_path()
+    config = _read_json(desktop_path)
+
+    if "mcpServers" not in config:
+        config["mcpServers"] = {}
+
+    if remote_url:
+        local_token = _ensure_local_token(token)
+        _preflight_remote_endpoint(remote_url, local_token)
+        _ensure_remote_url(remote_url)
+        config["mcpServers"]["mnemon"] = {
+            "url": remote_url,
+            "headers": {"Authorization": f"Bearer {local_token}"},
+        }
+        mode = "remote (preflight OK)"
+    else:
+        config["mcpServers"]["mnemon"] = _mcp_config()
+        mode = "stdio (local)"
+
+    _write_json(desktop_path, config)
+
+    return (
+        f"Claude Desktop MCP configured at {desktop_path}\n"
+        f"  Mode: {mode}\n"
+        "Restart Claude Desktop to activate."
+    )
+
+
 def setup_gemini() -> str:
-    """Show Gemini CLI MCP configuration."""
+    """Show Gemini CLI MCP configuration.
+
+    Gemini CLI config format is installation-specific and the CLI doesn't
+    commit to a single canonical path (varies across distributions and
+    user customizations), so we print the snippet for the user to paste
+    rather than auto-write. Keeps us out of the "accidentally wrote to
+    the wrong file" category.
+    """
     config = json.dumps({"mnemon": _mcp_config()}, indent=2)
     return (
         "Add this to your Gemini CLI MCP config:\n\n"
@@ -416,54 +505,84 @@ def setup_gemini() -> str:
 def setup_hooks(*, remote_url: str | None = None, token: str | None = None) -> str:
     """Configure Claude Code hooks only (no MCP server).
 
-    Hooks require a reachable remote vault — the hook code path speaks
-    HTTP exclusively. Calling this without ``--remote-url`` raises
-    :class:`SetupError` rather than writing broken config.
+    Works in both modes after P1a: local hooks dispatch in-process via
+    :class:`~mnemon.hooks._client.LocalMemoryClient`; remote hooks go
+    over HTTP. When ``remote_url`` is supplied, the endpoint is
+    preflighted and a SessionStart pre-warm hook is added.
     """
-    if not remote_url:
-        raise SetupError(
-            "`mnemon setup hooks` requires --remote-url. The hook code "
-            "path is HTTP-only; without a remote endpoint hooks would "
-            "emit a config error on every Claude Code prompt. Use "
-            "`mnemon setup claude-code` for a local-only (MCP-only) "
-            "install, or pass --remote-url to enable hooks."
-        )
-
     settings_path = Path.home() / ".claude" / "settings.json"
     settings = _read_json(settings_path)
 
-    local_token = _ensure_local_token(token)
-    _preflight_remote_endpoint(remote_url, local_token)
-    _ensure_remote_url(remote_url)
+    if remote_url:
+        local_token = _ensure_local_token(token)
+        _preflight_remote_endpoint(remote_url, local_token)
+        _ensure_remote_url(remote_url)
 
     hooks = _hooks_config(remote_url=remote_url)
     if "hooks" not in settings:
         settings["hooks"] = {}
     settings["hooks"]["UserPromptSubmit"] = hooks["UserPromptSubmit"]
     settings["hooks"]["Stop"] = hooks["Stop"]
-    settings["hooks"]["SessionStart"] = hooks["SessionStart"]
+    if "SessionStart" in hooks:
+        settings["hooks"]["SessionStart"] = hooks["SessionStart"]
 
     _write_json(settings_path, settings)
 
-    return "\n".join(
-        [
-            f"Hooks configured at {settings_path}",
+    mode_tag = "remote" if remote_url else "local (in-process)"
+    out_lines = [
+        f"Hooks configured at {settings_path}",
+        f"  Mode: {mode_tag}",
+    ]
+    if remote_url:
+        out_lines += [
             f"  Remote URL: {remote_url}",
             f"  Preflight:  OK (memory_status round-trip < {REMOTE_PREFLIGHT_TIMEOUT_SEC:.0f}s)",
-            "  UserPromptSubmit: context-surfacing (8s)",
-            "  Stop: session-extractor (30s), handoff-generator (30s)",
-            "  SessionStart: pre-warm polling (90s background)",
-            "Restart Claude Code to activate.",
         ]
-    )
+    out_lines += [
+        "  UserPromptSubmit: context-surfacing (8s)",
+        "  Stop: session-extractor (30s), handoff-generator (30s)",
+    ]
+    if remote_url:
+        out_lines.append("  SessionStart: pre-warm polling (90s background)")
+    out_lines.append("Restart Claude Code to activate.")
+    return "\n".join(out_lines)
 
 
 TARGETS = {
     "claude-code": setup_claude_code,
+    "claude-desktop": setup_claude_desktop,
     "cursor": setup_cursor,
     "gemini": setup_gemini,
     "hooks": setup_hooks,
 }
+
+
+# Auto-detect probes — a target is considered "installed" if its config
+# directory exists. Probes are lightweight filesystem checks; they do not
+# write anything. ``hooks`` is a pseudo-target (hooks-only install); it
+# is intentionally excluded from auto-detect since every auto-detected
+# ``claude-code`` install already handles hooks.
+_AUTODETECT_ORDER = ["claude-code", "claude-desktop", "cursor"]
+
+
+def _is_installed(target: str) -> bool:
+    """True if the machine appears to have the given MCP client installed."""
+    if target == "claude-code":
+        return (Path.home() / ".claude").is_dir()
+    if target == "claude-desktop":
+        return _claude_desktop_config_path().parent.is_dir()
+    if target == "cursor":
+        return (Path.home() / ".cursor").is_dir()
+    # Gemini and hooks have no reliable detection signal.
+    return False
+
+
+def detect_installed_clients() -> list[str]:
+    """Return the subset of auto-detect targets whose config dir exists.
+
+    Order is stable (``_AUTODETECT_ORDER``) so output is deterministic.
+    """
+    return [t for t in _AUTODETECT_ORDER if _is_installed(t)]
 
 
 def _parse_setup_args(args: list[str]) -> dict:
@@ -509,26 +628,18 @@ def _next_steps_block(target: str, remote_url: str | None) -> str:
     return "\n".join(lines)
 
 
-def run_setup(target: str, args: list[str] | None = None) -> str:
-    """Run setup for the given target, auto-run doctor, return status.
+def _run_single_target(
+    target: str, parsed: dict, *, include_footer: bool = True
+) -> str:
+    """Invoke one setup target and return its user-facing message.
 
-    After a successful setup, ``mnemon doctor`` runs against the
-    newly-configured vault (local or remote, auto-detected). A failing
-    doctor run is surfaced in the returned message but does not raise —
-    the setup itself already succeeded, and the doctor output is what
-    the user needs to read to act on the gap.
-
-    Pass ``--skip-doctor`` in ``args`` to suppress the automatic run
-    (useful for CI or scripted setups where the caller runs doctor
-    separately).
+    Shared by :func:`run_setup` (single-target) and
+    :func:`_run_autodetect` (one entry per detected client). When
+    ``include_footer`` is False, the "Next steps" block is omitted so
+    the caller can print a single aggregate footer instead of one per
+    target.
     """
-    if target not in TARGETS:
-        valid = ", ".join(TARGETS.keys())
-        return f"Unknown target: {target}\nValid targets: {valid}"
-
-    parsed = _parse_setup_args(args or [])
     func = TARGETS[target]
-
     try:
         if target == "gemini":
             primary = func()
@@ -537,15 +648,98 @@ def run_setup(target: str, args: list[str] | None = None) -> str:
                 remote_url=parsed["remote_url"], token=parsed["token"]
             )
     except SetupError as exc:
-        return f"setup failed: {exc}"
+        return f"setup failed ({target}): {exc}"
 
-    footer = _next_steps_block(target, parsed["remote_url"])
+    if include_footer:
+        primary += _next_steps_block(target, parsed["remote_url"])
+    return primary
 
+
+def _run_autodetect(parsed: dict) -> str:
+    """Configure every detected client, emit an aggregate summary.
+
+    Gemini is tacked onto the end as a manual-step reminder — we print
+    the snippet but don't pretend to have configured it. If no clients
+    are detected, returns a clear message pointing at `--help`.
+    """
+    detected = detect_installed_clients()
+    if not detected:
+        return (
+            "No MCP clients detected on this machine.\n"
+            "Checked: ~/.claude (Claude Code), ~/.cursor (Cursor), "
+            "Claude Desktop config dir.\n"
+            "Install one of those, or run `mnemon setup <target>` "
+            "explicitly (see `mnemon setup --help`)."
+        )
+
+    blocks: list[str] = [
+        f"Detected MCP clients: {', '.join(detected)}",
+        "",
+    ]
+    for target in detected:
+        blocks.append(f"── {target} ──")
+        blocks.append(_run_single_target(target, parsed, include_footer=False))
+        blocks.append("")
+
+    # Gemini tail: print snippet as a manual step reminder.
+    blocks.append("── gemini (manual) ──")
+    blocks.append(setup_gemini())
+
+    # Single footer for the aggregate.
+    remote_url = parsed["remote_url"]
+    blocks.append("")
+    blocks.append("Next steps:")
+    blocks.append("  • Restart each client above to activate the MCP tools.")
+    if remote_url is None:
+        blocks.append(
+            "  • Want mobile / claude.ai / cross-device memory? "
+            "Run `mnemon upgrade web` (coming soon) or rerun with "
+            "--remote-url <URL>."
+        )
+    blocks.append("  • Run `mnemon doctor` any time to re-verify the setup.")
+
+    return "\n".join(blocks)
+
+
+def run_setup(target: str | None, args: list[str] | None = None) -> str:
+    """Run setup for the given target (or auto-detect when ``target`` is None).
+
+    Behavior matrix:
+
+    - ``target=None`` → configure every detected client (auto-detect).
+      Matches the documented happy-path ``mnemon setup`` invocation.
+    - ``target="claude-code" | "cursor" | "claude-desktop" | "hooks"``
+      → configure just that client.
+    - ``target="gemini"`` → print the config snippet; never auto-writes.
+
+    After a successful setup, ``mnemon doctor`` runs against the
+    newly-configured vault with ``fail_on_warn=True`` (per the P1b plan —
+    any config gap should surface as a non-zero exit so scripted installs
+    propagate the failure). Pass ``--skip-doctor`` in ``args`` to
+    suppress the automatic run.
+    """
+    parsed = _parse_setup_args(args or [])
+
+    if target is None:
+        primary = _run_autodetect(parsed)
+        # Auto-detect block already has its own footer; doctor still runs.
+        footer = ""
+    elif target in TARGETS:
+        primary = _run_single_target(target, parsed)
+        if primary.startswith("setup failed"):
+            return primary
+        footer = ""  # _run_single_target already appended the next-steps block
+    else:
+        valid = ", ".join(TARGETS.keys())
+        return f"Unknown target: {target}\nValid targets: {valid}"
+
+    if primary.startswith("setup failed"):
+        return primary
+
+    # Doctor doesn't make sense for "gemini-only" or pure print targets.
     if parsed["skip_doctor"] or target == "gemini":
         return primary + footer
 
-    # Capture doctor output so setup returns a single cohesive string
-    # (tests + CLI wrapper both consume this as one blob).
     import io
 
     from .doctor import run_doctor
@@ -554,7 +748,7 @@ def run_setup(target: str, args: list[str] | None = None) -> str:
     print("", file=buf)
     print("Running mnemon doctor to verify...", file=buf)
     try:
-        doctor_rc = run_doctor(out=buf)
+        doctor_rc = run_doctor(out=buf, fail_on_warn=True)
     except Exception as exc:  # noqa: BLE001
         buf.write(
             f"\n(doctor invocation crashed: {type(exc).__name__}: {exc})\n"
@@ -563,9 +757,11 @@ def run_setup(target: str, args: list[str] | None = None) -> str:
 
     if doctor_rc != 0:
         buf.write(
-            "\nNOTE: doctor reported issues. Setup files were written, "
-            "but the environment is not fully ready — fix the failing "
-            "check(s) above before using mnemon.\n"
+            "\nNOTE: doctor reported issues (including warnings, which "
+            "are now treated as failures). Setup files were written, but "
+            "the environment is not fully ready — fix the failing "
+            "check(s) above before using mnemon, or rerun with "
+            "--skip-doctor to bypass.\n"
         )
 
     return primary + footer + "\n" + buf.getvalue()
