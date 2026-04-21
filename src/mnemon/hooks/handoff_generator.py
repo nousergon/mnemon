@@ -105,7 +105,7 @@ def generate_with_regex(transcript: str) -> dict | None:
 def main() -> None:
     try:
         from .framework import log_hook_error, read_stdin, read_transcript
-        from ._remote_client import RemoteClientConfigError, call_tool_sync
+        from ._client import RemoteClientConfigError, get_client
 
         hook_input = read_stdin()
         transcript = read_transcript(hook_input.get("transcript_path", ""), 6000)
@@ -121,7 +121,8 @@ def main() -> None:
             return
 
         try:
-            result, elapsed = call_tool_sync(
+            client = get_client()
+            result, elapsed = client.call_tool(
                 "memory_save",
                 {
                     "title": f"Session: {handoff['title']}",

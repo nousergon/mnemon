@@ -1,4 +1,16 @@
-"""Extended tests for hook framework, context surfacing, session extractor, and handoff generator."""
+"""Extended tests for hook framework, context surfacing, session extractor, and handoff generator.
+
+These tests exercise the REMOTE code path in hooks because they were
+written when hooks only supported remote vaults. After the P1a
+MemoryClient refactor (see ``private/mnemon-simplification-plan-260421.md``),
+hooks dispatch via ``_client.get_client()`` which returns
+:class:`LocalMemoryClient` or :class:`RemoteMemoryClient` based on
+whether a remote URL is configured. The autouse fixture below pins
+``MNEMON_REMOTE_URL`` for this module so ``get_client()`` deterministically
+returns the remote client, and the existing mocks on
+``mnemon.hooks._remote_client.call_tool_sync`` fire through the
+delegation in :class:`RemoteMemoryClient`.
+"""
 
 import json
 import sys
@@ -16,6 +28,15 @@ from mnemon.hooks.framework import (
     read_transcript,
     write_output,
 )
+
+
+@pytest.fixture(autouse=True)
+def _force_remote_client(monkeypatch):
+    """Pin hooks to the remote path so ``_remote_client.call_tool_sync``
+    patches continue to intercept hook calls. See module docstring."""
+    monkeypatch.setenv("MNEMON_REMOTE_URL", "https://test.invalid/mcp")
+    monkeypatch.setenv("MNEMON_LOCAL_TOKEN", "test-token")
+    yield
 
 
 # ── framework.py: is_duplicate + mark_seen ────────────────────────────────────

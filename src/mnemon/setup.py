@@ -217,19 +217,16 @@ def _preflight_remote_endpoint(remote_url: str, local_token: str) -> None:
 
     Raises :class:`SetupError` with a concrete message on any failure.
     """
-    # Import late: _remote_client pulls in the MCP SDK, which we do not
-    # want to load for users running local-only setup.
-    from .hooks._remote_client import (
-        RemoteClientConfigError,
-        call_tool_sync,
-    )
+    # Import late: the hook client pulls in the MCP SDK transitively,
+    # which we do not want to load for users running local-only setup.
+    from .hooks._client import RemoteClientConfigError, RemoteMemoryClient
 
     prior_url = os.environ.get("MNEMON_REMOTE_URL")
     prior_token = os.environ.get("MNEMON_LOCAL_TOKEN")
     os.environ["MNEMON_REMOTE_URL"] = remote_url
     os.environ["MNEMON_LOCAL_TOKEN"] = local_token
     try:
-        call_tool_sync(
+        RemoteMemoryClient().call_tool(
             "memory_status",
             {},
             timeout=REMOTE_PREFLIGHT_TIMEOUT_SEC,

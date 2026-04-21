@@ -144,10 +144,11 @@ def is_duplicate_remote(title: str, content: str) -> bool:
     import json
 
     try:
-        from ._remote_client import call_tool_sync
+        from ._client import get_client
 
+        client = get_client()
         query = f"{title}: {content}"
-        raw, _elapsed = call_tool_sync(
+        raw, _elapsed = client.call_tool(
             "memory_search",
             {"query": query, "limit": 3},
             timeout=HOOK_DEDUP_TIMEOUT_SEC,
@@ -168,7 +169,7 @@ def is_duplicate_remote(title: str, content: str) -> bool:
 def main() -> None:
     try:
         from .framework import log_hook_error, read_stdin, read_transcript
-        from ._remote_client import RemoteClientConfigError, call_tool_sync
+        from ._client import RemoteClientConfigError, get_client
 
         hook_input = read_stdin()
         transcript = read_transcript(hook_input.get("transcript_path", ""), 6000)
@@ -183,6 +184,7 @@ def main() -> None:
         if not observations:
             return
 
+        client = get_client()
         saved = 0
         for obs in observations:
             content_type = obs["type"] if obs["type"] in VALID_TYPES else "observation"
@@ -193,7 +195,7 @@ def main() -> None:
                 continue
 
             try:
-                result, elapsed = call_tool_sync(
+                result, elapsed = client.call_tool(
                     "memory_save",
                     {
                         "title": obs["title"],

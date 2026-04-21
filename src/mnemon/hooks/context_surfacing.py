@@ -125,7 +125,7 @@ def main() -> None:
             read_stdin,
             write_output,
         )
-        from ._remote_client import RemoteClientConfigError, call_tool_sync
+        from ._client import RemoteClientConfigError, get_client
 
         hook_input = read_stdin()
         prompt = hook_input.get("prompt", "")
@@ -136,7 +136,8 @@ def main() -> None:
             return
 
         try:
-            raw, elapsed = call_tool_sync(
+            client = get_client()
+            raw, elapsed = client.call_tool(
                 "memory_search",
                 {"query": prompt, "limit": SEARCH_LIMIT},
                 client_label=CLIENT_LABEL,
