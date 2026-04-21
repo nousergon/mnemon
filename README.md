@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-450%2B_passing-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-550%2B_passing-brightgreen.svg)]()
 [![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/badge/PyPI-v0.5.0-blue.svg)](https://pypi.org/project/mnemon-memory/)
@@ -17,29 +17,47 @@ mnemon is a [Model Context Protocol](https://modelcontextprotocol.io) server wit
 
 **Platforms:** Tested on macOS 14+. Linux should work — Python + SQLite + FastEmbed are portable. Windows untested.
 
-## When to use mnemon
+## Two product lanes: local and web
 
-mnemon is built for individual developers who use multiple MCP clients (Claude Code, Cursor, claude.ai, Claude Desktop) and want a single memory vault shared across all of them. If that's you, this is probably the right tool.
+mnemon ships as one tool with two distinct deployment modes. Pick the one that matches what you need; upgrade later if that changes.
 
-**Comfortable range:** up to ~50k memories on a single Fly machine. Below that scale, SQLite + FTS5 + in-process vectors are faster than any network hop. Beyond it, in-process brute-force vector scan starts to feel slow and a 384d embedding's recall ceiling starts to matter — if you're there, you're probably deploying for a team and should evaluate [Mem0](https://mem0.ai), [Zep](https://www.getzep.com), or [Letta](https://docs.letta.com) instead. They offer managed multi-tenancy, larger embeddings, and per-user isolation that mnemon intentionally doesn't.
+| Capability | **mnemon local** | **mnemon web** |
+|---|---|---|
+| Claude Code (CLI) | ✅ | ✅ |
+| Claude Desktop (Mac/Win app) | ✅ | ✅ |
+| Cursor | ✅ | ✅ |
+| Gemini CLI | ✅ | ✅ |
+| Any local MCP client | ✅ | ✅ |
+| **claude.ai (web)** | ❌ | ✅ |
+| **Claude mobile app** | ❌ | ✅ |
+| Memory shared across laptop + desktop | ❌ | ✅ |
+| Durable off-machine backup | ❌ (manual file copy) | ✅ (S3) |
+| External accounts required | none | Fly.io + AWS |
+| Credit card required | no | yes (both free tiers) |
+| First-install setup time | ~2 min | ~15 min |
+| Ongoing cost | $0 | ~$0 on free tiers |
+| Cold-start latency after idle | none | 2–5s |
 
-**What mnemon optimizes for:**
-- MCP-native — one vault, every MCP client. No SDK integration or per-framework wiring.
-- Self-hosted — your data, your server, ~$1/mo on Fly.io auto-stop.
-- Personal-scale ergonomics — single SQLite file, copy-to-backup, no vector DB to operate.
+- **mnemon local** is the right call if you use one machine and one-or-more MCP clients on that machine. Zero external accounts, zero tokens, zero config files to edit. `pip install mnemon-memory && mnemon setup` and you're done.
+- **mnemon web** is the right call if you want memory across devices, via the claude.ai web app, or on mobile. Requires a Fly.io account (≈$0/mo on the free tier with auto-stop) and an AWS account (S3 backup — also free-tier for mnemon's payload size). `mnemon upgrade web` wraps the deploy + seed + reconfigure in one command.
+
+You can start local, save a few hundred memories, and `mnemon upgrade web --app-name my-mnemon` later — your entire vault rides along. Symmetric `mnemon downgrade local` reverts if you change your mind.
+
+**Who this is for:** individual developers who use multiple MCP clients and want a single memory vault shared across all of them. Comfortable up to ~50k memories. Beyond that, evaluate [Mem0](https://mem0.ai), [Zep](https://www.getzep.com), or [Letta](https://docs.letta.com) — they offer managed multi-tenancy, larger embeddings, and per-user isolation that mnemon intentionally doesn't.
 
 **What mnemon doesn't do (by design):**
 - Multi-tenancy / per-user isolation for teams.
-- Managed SaaS — you run the server.
+- Managed SaaS — if you choose web, you run the server.
 - Automatic fact extraction from arbitrary message streams at Mem0's level of polish.
 
 ## Table of Contents
 
-- [When to use mnemon](#when-to-use-mnemon)
+- [Two product lanes: local and web](#two-product-lanes-local-and-web)
 - [Install](#install)
 - [Quick Start](#quick-start)
-  - [Try it locally (60 seconds)](#try-it-locally-60-seconds)
-  - [Self-host a remote vault (10 min, ~$1/mo)](#self-host-a-remote-vault-10-min-1mo)
+  - [Local — one command, zero accounts](#local--one-command-zero-accounts)
+  - [Web — one command once you have Fly + AWS](#web--one-command-once-you-have-fly--aws)
+  - [Downgrade back to local](#downgrade-back-to-local)
   - [Visualize your vault](#visualize-your-vault)
   - [Use it](#use-it)
 - [MCP Tools](#mcp-tools)
@@ -80,32 +98,40 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-Two paths, depending on how deep you want to go in the first sitting.
-
-### Try it locally (60 seconds)
-
-No Fly account, no secrets, no OAuth — a single-file SQLite vault at `~/.mnemon/default.sqlite`. Good for a first look and for offline development.
+### Local — one command, zero accounts
 
 ```bash
 pip install mnemon-memory
-mnemon setup claude-code        # or: cursor, gemini, hooks
-mnemon doctor                   # 3 green checks: vault, embedder, round-trip
+mnemon setup
 ```
 
-Then use Claude Code / Cursor as usual — memories save and surface automatically.
+`mnemon setup` with no target auto-detects every MCP client you have installed (Claude Code, Claude Desktop, Cursor — plus prints a copy-paste snippet for Gemini CLI), configures each, installs in-process hooks that dispatch against the local SQLite vault at `~/.mnemon/default.sqlite`, and runs `mnemon doctor` to verify. A single explicit target — `mnemon setup claude-code` etc. — also works.
+
+No Fly account. No AWS account. No tokens. No config files to edit. Restart the clients and you're done.
 
 **Heads-up:** the first `memory_search` after a fresh install takes ~10–20s while FastEmbed downloads the embedding model (one-time). Subsequent calls are fast.
 
-### Self-host a remote vault (10 min, ~$1/mo)
-
-One vault, all clients — Claude Code, Cursor, claude.ai web/mobile/desktop, Claude Desktop all read and write the same memories. See [Self-host on Fly.io](#self-host-on-flyio) for the end-to-end runbook.
+### Web — one command once you have Fly + AWS
 
 ```bash
-# After you've deployed:
-mnemon setup claude-code --remote-url https://your-app.fly.dev/mcp
-mnemon setup cursor       --remote-url https://your-app.fly.dev/mcp
-mnemon doctor             # 6 green checks: URL, token, /health, OAuth AS, MCP round-trip
+# Prereqs: flyctl authenticated, aws CLI configured, S3 bucket for vault backup.
+export MNEMON_S3_BUCKET=my-mnemon-vault
+mnemon upgrade web --app-name my-mnemon
 ```
+
+`mnemon upgrade web` deploys a Fly app running `mnemon serve-remote`, seeds its volume from S3 (your local vault rides along), archives your local `~/.mnemon/default.sqlite` to `~/.mnemon/archive/pre-web-YYYY-MM-DD.sqlite`, rewrites every detected client's MCP config to point at `https://my-mnemon.fly.dev/mcp`, installs Claude Code's SessionStart pre-warm hook, and runs `mnemon doctor --fail-on-warn` against the new remote.
+
+After it's done, add the same URL + token manually to claude.ai and the Claude mobile app (Settings → Connected Apps). Those two live in Anthropic's UI and can't be auto-configured.
+
+See [Self-host on Fly.io](#self-host-on-flyio) for what the command does under the hood and what to do if a step fails.
+
+### Downgrade back to local
+
+```bash
+mnemon downgrade local --destroy-fly-app
+```
+
+Symmetric exit: pulls the current Fly vault state back to `~/.mnemon/default.sqlite` via S3, reconfigures every client back to stdio mode, optionally destroys the Fly app (with a y/N confirmation). No memories lost — whatever was on the Fly vault at teardown time becomes the new local vault.
 
 ### Visualize your vault
 
@@ -212,9 +238,20 @@ PORT=9000 mnemon serve-remote   # custom port
 
 ### Self-host on Fly.io
 
-End-to-end deploy. You'll get an OAuth-protected MCP endpoint at `https://<your-app>.fly.dev/mcp` with no third-party auth vendor. Takes ~10 minutes the first time.
+You'll get a bearer-authenticated MCP endpoint at `https://<your-app>.fly.dev/mcp` running on your own Fly account. Budget ~$0–$2/mo for a personal vault (auto-stop idle, 1GB volume). Free tier covers most personal use.
 
-**Prerequisites.** A [Fly.io](https://fly.io) account, [`flyctl`](https://fly.io/docs/hands-on/install-flyctl/) on your `$PATH`, and this repo cloned locally. Budget ~$0.50–$2/mo for a personal vault (auto-stop idle, 1GB volume).
+**Prerequisites:**
+- A [Fly.io](https://fly.io) account with [`flyctl`](https://fly.io/docs/hands-on/install-flyctl/) on `$PATH`.
+- An AWS account with the AWS CLI v2 configured (`aws configure`), plus an S3 bucket for vault backup.
+- `mnemon setup` already run in local mode (gives `mnemon upgrade web` a vault to migrate).
+
+**One-command path.** `mnemon upgrade web --app-name <name>` handles everything: `mnemon sync push` (local → S3), `flyctl launch` with an embedded Dockerfile that installs `mnemon-memory[server]` from PyPI, `flyctl volumes create`, `flyctl secrets set` (bearer token + AWS creds so the container can pull from S3), `flyctl deploy`, and a post-deploy `flyctl ssh console -C 'mnemon sync pull'` to seed the vault. Then it rewrites every detected client's MCP config and runs `mnemon doctor --fail-on-warn` against the new remote.
+
+If a step fails, the orchestration aborts. For failures after `flyctl launch` you may need `flyctl apps destroy <name>` to clean up the partial Fly state — the error message will tell you.
+
+**Guardrail — don't touch prod.** Set `MNEMON_PROD_APP_NAMES=mnemon-memory,<your-other-prod-apps>` before running `mnemon upgrade web` and the command will refuse to target any of those names. Cheap insurance when testing with a scoped `--app-name`.
+
+**Manual runbook.** The long-form steps below still work if you want to deploy by hand or debug a step of the one-command path. The files referenced (`Dockerfile`, `fly.toml.example`) live in this repo:
 
 **1. Pick an app name and copy the template.**
 
