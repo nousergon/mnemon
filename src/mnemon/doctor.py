@@ -545,12 +545,25 @@ def _has_remote_config() -> bool:
     return False
 
 
-def run_doctor(out=sys.stdout) -> int:
+def run_doctor(out=sys.stdout, *, fail_on_warn: bool = False) -> int:
     """Run all checks, print results, return exit code (0 = all pass).
 
     Auto-detects remote vs. local mode from config. Prints a one-line
     banner so the user knows which flavor ran; everything else is
     format-identical across modes.
+
+    Parameters
+    ----------
+    out:
+        File-like object for the human-readable report.
+    fail_on_warn:
+        When True (default False), warnings are treated as failures and
+        the exit code is 1 if any check emits a warning. Used by
+        ``run_setup`` / ``mnemon upgrade web`` / ``mnemon downgrade
+        local`` so scripted installs don't silently succeed in a
+        partially-broken state. Consistent with the "hard-fail until
+        stabilized" preference captured in the simplification plan
+        (``private/mnemon-simplification-plan-260421.md``).
     """
     if _has_remote_config():
         mode_label = "remote"
@@ -591,6 +604,13 @@ def run_doctor(out=sys.stdout) -> int:
         )
         return 1
     if warned:
+        if fail_on_warn:
+            print(
+                f"{FAIL} {len(warned)}/{len(results)} checks emitted "
+                f"warnings (--fail-on-warn treats these as failures).",
+                file=out,
+            )
+            return 1
         print(
             f"{WARN} All checks passed with {len(warned)} warning(s).",
             file=out,

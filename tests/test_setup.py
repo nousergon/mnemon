@@ -109,13 +109,12 @@ class TestParseSetupArgs:
 
 
 class TestSetupClaudeCode:
-    def test_creates_settings_file_local_mode_without_hooks(self):
-        """P0 (mnemon #109): local-only setup must NOT install hooks.
-
-        Hooks are HTTP-only (hooks/_remote_client.py has no local
-        fallback). Installing them with only a stdio MCP server produced
-        silent ``RemoteClientConfigError`` banners on every prompt.
-        """
+    def test_creates_settings_file_local_mode_installs_local_hooks(self):
+        """P1b: local-mode setup installs UserPromptSubmit + Stop hooks
+        that dispatch via :class:`LocalMemoryClient`. P0 skipped them
+        because the hook client was HTTP-only; P1a fixed that.
+        SessionStart is intentionally omitted in local mode — no remote
+        machine to pre-warm."""
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / ".claude" / "settings.json"
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)):
@@ -124,31 +123,27 @@ class TestSetupClaudeCode:
             assert settings_path.exists()
             settings = json.loads(settings_path.read_text())
             assert "mnemon" in settings["mcpServers"]
-            assert "hooks" not in settings, (
-                "local-only setup must not write hook entries"
-            )
-            assert "Hooks" in result and "skipped" in result
+            assert "UserPromptSubmit" in settings["hooks"]
+            assert "Stop" in settings["hooks"]
+            assert "SessionStart" not in settings["hooks"]
+            assert "local (in-process)" in result
             assert "Restart" in result
 
-    def test_local_mode_strips_stale_mnemon_hooks(self):
-        """Re-running setup locally after a prior remote install should
-        clean up old mnemon hook entries so they stop erroring."""
+    def test_local_mode_drops_stale_session_start(self):
+        """Re-running setup in local mode after a prior remote install
+        must strip the mnemon SessionStart pre-warm hook (it polls a
+        remote URL that's no longer authoritative). UserPromptSubmit /
+        Stop are overwritten with the local variants; SessionStart is
+        removed entirely."""
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / ".claude" / "settings.json"
             settings_path.parent.mkdir(parents=True)
             settings_path.write_text(json.dumps({
                 "hooks": {
-                    "UserPromptSubmit": [
+                    "SessionStart": [
                         {"matcher": "", "hooks": [
                             {"type": "command",
-                             "command": "python -m mnemon.hooks.context_surfacing"},
-                        ]},
-                    ],
-                    "Stop": [
-                        {"matcher": "", "hooks": [
-                            {"type": "command",
-                             "command": "python -m mnemon.hooks.session_extractor"},
-                            {"type": "command", "command": "other-thing"},
+                             "command": "curl mnemon.fly.dev/health"},
                         ]},
                     ],
                 },
@@ -157,11 +152,10 @@ class TestSetupClaudeCode:
                 setup_claude_code()
             settings = json.loads(settings_path.read_text())
             hooks = settings.get("hooks", {})
-            assert "UserPromptSubmit" not in hooks
-            # Non-mnemon entries survive
-            stop = hooks.get("Stop", [])
-            assert len(stop) == 1
-            assert stop[0]["hooks"][0]["command"] == "other-thing"
+            assert "SessionStart" not in hooks
+            # Local UserPromptSubmit + Stop were installed
+            assert "UserPromptSubmit" in hooks
+            assert "Stop" in hooks
 
     def test_remote_mode_registers_via_claude_cli_and_cleans_stale_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -319,15 +313,20 @@ class TestSetupGemini:
 
 
 class TestSetupHooks:
-    def test_refuses_without_remote_url(self):
-        """P0 (mnemon #109): setup_hooks without --remote-url must raise.
-
-        The hook code path is HTTP-only; writing hook entries without a
-        configured remote endpoint guarantees a config error on every
-        prompt. Better to refuse loudly than to ship the broken config.
-        """
-        with pytest.raises(SetupError, match="requires --remote-url"):
-            setup_hooks()
+    def test_installs_local_hooks_without_remote_url(self):
+        """P1b: setup_hooks works in local mode now that LocalMemoryClient
+        exists. UserPromptSubmit + Stop are written; SessionStart is
+        skipped (only meaningful for remote cold-start)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / ".claude" / "settings.json"
+            with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)):
+                out = setup_hooks()
+            assert settings_path.exists()
+            settings = json.loads(settings_path.read_text())
+            assert "UserPromptSubmit" in settings["hooks"]
+            assert "Stop" in settings["hooks"]
+            assert "SessionStart" not in settings["hooks"]
+            assert "local (in-process)" in out
 
     def test_writes_hooks_with_session_start_when_remote(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -365,7 +364,13 @@ class TestRunSetup:
         assert "Unknown target" in result
 
     def test_all_targets_registered(self):
-        assert set(TARGETS.keys()) == {"claude-code", "cursor", "gemini", "hooks"}
+        assert set(TARGETS.keys()) == {
+            "claude-code",
+            "claude-desktop",
+            "cursor",
+            "gemini",
+            "hooks",
+        }
 
     def test_passes_remote_url_from_args(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -438,7 +443,8 @@ class TestRunSetup:
                     "claude-code",
                     ["--remote-url", "https://x.fly.dev/mcp", "--skip-doctor"],
                 )
-        assert result.startswith("setup failed:")
+        # Per-target prefix disambiguates in auto-detect mode.
+        assert result.startswith("setup failed (claude-code):")
         assert "cold fly machine" in result
 
     def test_doctor_failure_appends_note_but_does_not_raise(self):
@@ -542,6 +548,148 @@ class TestPreflightRemoteEndpoint:
         finally:
             os.environ.pop("MNEMON_REMOTE_URL", None)
             os.environ.pop("MNEMON_LOCAL_TOKEN", None)
+
+
+class TestSetupClaudeDesktop:
+    def test_writes_platform_config_local_mode(self, tmp_path, monkeypatch):
+        """Claude Desktop has no hook system — only MCP is written."""
+        from mnemon.setup import setup_claude_desktop
+
+        # Force the darwin path so the test is platform-deterministic.
+        monkeypatch.setattr("mnemon.setup.sys.platform", "darwin")
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+
+        out = setup_claude_desktop()
+        expected = (
+            tmp_path
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
+        assert expected.exists()
+        config = json.loads(expected.read_text())
+        assert "mnemon" in config["mcpServers"]
+        # Hooks are not Claude Desktop's concern
+        assert "hooks" not in config
+        assert "Mode: stdio (local)" in out
+
+    def test_remote_mode_writes_http_transport(self, tmp_path, monkeypatch):
+        from mnemon.setup import setup_claude_desktop
+
+        monkeypatch.setattr("mnemon.setup.sys.platform", "darwin")
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+        mnemon_dir = tmp_path / ".mnemon"
+        monkeypatch.setattr("mnemon.setup.MNEMON_DIR", mnemon_dir)
+        monkeypatch.setattr(
+            "mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"
+        )
+        monkeypatch.setattr(
+            "mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"
+        )
+        with patch("mnemon.setup._preflight_remote_endpoint"):
+            setup_claude_desktop(
+                remote_url="https://x.fly.dev/mcp", token="tok-123"
+            )
+
+        expected = (
+            tmp_path
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
+        config = json.loads(expected.read_text())
+        entry = config["mcpServers"]["mnemon"]
+        assert entry["url"] == "https://x.fly.dev/mcp"
+        assert entry["headers"]["Authorization"] == "Bearer tok-123"
+
+
+class TestDetectInstalledClients:
+    def test_detects_claude_code_only(self, tmp_path, monkeypatch):
+        from mnemon.setup import detect_installed_clients
+
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+        # Force Linux so Claude Desktop probe looks under ~/.config/Claude/
+        monkeypatch.setattr("mnemon.setup.sys.platform", "linux")
+        (tmp_path / ".claude").mkdir()
+        detected = detect_installed_clients()
+        assert detected == ["claude-code"]
+
+    def test_detects_multiple(self, tmp_path, monkeypatch):
+        from mnemon.setup import detect_installed_clients
+
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("mnemon.setup.sys.platform", "linux")
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".cursor").mkdir()
+        detected = detect_installed_clients()
+        assert "claude-code" in detected
+        assert "cursor" in detected
+        # Stable order per _AUTODETECT_ORDER
+        assert detected == ["claude-code", "cursor"]
+
+    def test_detects_nothing_when_no_client_dirs(self, tmp_path, monkeypatch):
+        from mnemon.setup import detect_installed_clients
+
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("mnemon.setup.sys.platform", "linux")
+        assert detect_installed_clients() == []
+
+
+class TestRunSetupAutodetect:
+    def test_no_target_no_clients_returns_helpful_message(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("mnemon.setup.sys.platform", "linux")
+        out = run_setup(None, ["--skip-doctor"])
+        assert "No MCP clients detected" in out
+        assert "mnemon setup <target>" in out
+
+    def test_no_target_configures_detected_clients(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("mnemon.setup.sys.platform", "linux")
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".cursor").mkdir()
+        out = run_setup(None, ["--skip-doctor"])
+        assert "Detected MCP clients: claude-code, cursor" in out
+        # Each detected target produced its own block
+        assert "── claude-code ──" in out
+        assert "── cursor ──" in out
+        # Gemini tail is always printed as a manual-step reminder
+        assert "── gemini (manual) ──" in out
+        # Aggregate footer (singular "Next steps:"), not per-target
+        assert out.count("Next steps:") == 1
+        # And the real files were written
+        assert (tmp_path / ".claude" / "settings.json").exists()
+        assert (tmp_path / ".cursor" / "mcp.json").exists()
+
+
+class TestFailOnWarnPropagation:
+    def test_setup_surfaces_doctor_warning_as_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """With fail_on_warn plumbed through, a warning-only doctor run
+        after setup appends the "doctor reported issues" NOTE so users
+        don't ignore it."""
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("mnemon.setup.sys.platform", "linux")
+
+        def _warning_doctor(out, *, fail_on_warn=False, **_):
+            # Simulate a doctor run that warns but doesn't fail. With
+            # fail_on_warn=True, run_doctor returns 1 anyway.
+            out.write("mnemon doctor — local mode\n")
+            out.write("  WARN something: heads up\n")
+            return 1 if fail_on_warn else 0
+
+        with patch("mnemon.doctor.run_doctor", side_effect=_warning_doctor):
+            result = run_setup("claude-code", [])
+
+        assert "doctor reported issues" in result
+        assert "including warnings" in result
 
 
 class TestParseSkipDoctor:

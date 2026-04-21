@@ -430,6 +430,31 @@ class TestRunDoctor:
         output = buf.getvalue()
         assert "1 warning" in output
 
+    def test_fail_on_warn_promotes_warning_to_failure(self):
+        """P1b: setup/upgrade/downgrade invoke doctor with fail_on_warn=True
+        so warning-only runs propagate as non-zero exits. Matches the
+        "hard-fail until stabilized" preference."""
+        fake_checks = [
+            lambda: doctor.CheckResult("A", True, "ok"),
+            lambda: doctor.CheckResult("B", True, "heads-up", warn=True),
+        ]
+        buf = io.StringIO()
+        with patch("mnemon.doctor._has_remote_config", return_value=True), \
+             patch("mnemon.doctor.get_remote_url", return_value="https://x/mcp"), \
+             patch("mnemon.doctor.REMOTE_CHECKS", fake_checks):
+            code = doctor.run_doctor(out=buf, fail_on_warn=True)
+        assert code == 1
+        assert "--fail-on-warn" in buf.getvalue()
+
+    def test_fail_on_warn_all_clean_still_passes(self):
+        fake_checks = [lambda: doctor.CheckResult("A", True, "ok")]
+        buf = io.StringIO()
+        with patch("mnemon.doctor._has_remote_config", return_value=True), \
+             patch("mnemon.doctor.get_remote_url", return_value="https://x/mcp"), \
+             patch("mnemon.doctor.REMOTE_CHECKS", fake_checks):
+            code = doctor.run_doctor(out=buf, fail_on_warn=True)
+        assert code == 0
+
 
 class TestRunDoctorLocalMode:
     """Without any remote config, ``run_doctor`` should run LOCAL_CHECKS
