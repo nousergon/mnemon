@@ -161,10 +161,72 @@ def main() -> None:
         fail_on_warn = "--fail-on-warn" in args[1:]
         sys.exit(run_doctor(fail_on_warn=fail_on_warn))
 
+    elif command == "upgrade":
+        # `mnemon upgrade web --app-name <name> [options]`
+        subcommand = args[1] if len(args) > 1 else ""
+        if subcommand != "web":
+            print(
+                "Usage: mnemon upgrade web --app-name <name> "
+                "[--s3-bucket NAME] [--token TOKEN] [--region REGION] "
+                "[--skip-doctor]",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        parsed = _parse_upgrade_args(args[2:])
+        if not parsed["app_name"]:
+            print("--app-name is required.", file=sys.stderr)
+            sys.exit(1)
+        from .upgrade import UpgradeError, upgrade_web
+        try:
+            print(
+                upgrade_web(
+                    app_name=parsed["app_name"],
+                    s3_bucket=parsed["s3_bucket"],
+                    token=parsed["token"],
+                    region=parsed["region"] or "sjc",
+                    skip_doctor=parsed["skip_doctor"],
+                )
+            )
+        except UpgradeError as exc:
+            print(f"upgrade failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         _print_usage()
         sys.exit(1)
+
+
+def _parse_upgrade_args(args: list[str]) -> dict:
+    """Parse ``mnemon upgrade web`` flags."""
+    result: dict[str, str | bool | None] = {
+        "app_name": None,
+        "s3_bucket": None,
+        "token": None,
+        "region": None,
+        "skip_doctor": False,
+    }
+    i = 0
+    while i < len(args):
+        flag = args[i]
+        if flag == "--app-name" and i + 1 < len(args):
+            result["app_name"] = args[i + 1]
+            i += 2
+        elif flag == "--s3-bucket" and i + 1 < len(args):
+            result["s3_bucket"] = args[i + 1]
+            i += 2
+        elif flag == "--token" and i + 1 < len(args):
+            result["token"] = args[i + 1]
+            i += 2
+        elif flag == "--region" and i + 1 < len(args):
+            result["region"] = args[i + 1]
+            i += 2
+        elif flag == "--skip-doctor":
+            result["skip_doctor"] = True
+            i += 1
+        else:
+            i += 1
+    return result
 
 
 def _print_usage() -> None:
@@ -177,6 +239,12 @@ Setup (configure MCP clients; use --remote-url for web mode):
                             [--remote-url URL] [--token TOKEN] [--skip-doctor]
   mnemon doctor             Run diagnostics (local or remote, auto-detected)
                             [--fail-on-warn] treat warnings as failures
+
+Upgrade local → web (deploys a Fly.io app + reconfigures every client):
+  mnemon upgrade web --app-name <name> [--s3-bucket NAME] [--token TOKEN]
+                             [--region REGION] [--skip-doctor]
+                             Requires: flyctl, aws CLI with credentials,
+                             and an S3 bucket (MNEMON_S3_BUCKET or --s3-bucket).
 
 Server:
   mnemon serve              Start MCP server (stdio, local development)
