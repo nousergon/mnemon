@@ -172,6 +172,10 @@ class TestSave:
     def test_save_with_title_and_content(self, MockStore, capsys):
         mock_store = MagicMock()
         mock_store.save.return_value = 7
+        # embed_document is called post-save; returning None from get()
+        # makes the `if doc:` branch skip embedding so this test doesn't
+        # depend on a FastEmbed ONNX model being in the cache.
+        mock_store.get.return_value = None
         MockStore.return_value = mock_store
 
         with patch("sys.argv", ["mnemon", "save", "My Title", "some", "content"]):
