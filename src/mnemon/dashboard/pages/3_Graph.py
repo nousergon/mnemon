@@ -22,7 +22,7 @@ if vec_data is None:
         st.warning("No memories saved yet. Save a memory to get started.")
     else:
         st.warning(
-            f"{doc_count} memor{'y' if doc_count == 1 else 'ies'} saved but no vectors found — "
+            f"{doc_count} memor{'y' if doc_count == 1 else 'ies'} saved but no embeddings found — "
             "the embedding step did not run or failed silently. "
             "Run `mnemon doctor` to diagnose, then `mnemon rebuild` to re-embed."
         )
@@ -30,11 +30,14 @@ if vec_data is None:
 
 vec_ids, vectors, doc_map = vec_data
 
+# Post-collapse each point = one memory, so count in memory-units here —
+# otherwise the Graph page's "1 vector" contradicts `mnemon status`'s
+# "2 vectors" (raw chunk count: full doc + section per save).
 if len(vec_ids) < 5:
     st.warning(
-        f"Only {len(vec_ids)} vector{'' if len(vec_ids) == 1 else 's'} — "
-        "need at least 5 for a meaningful UMAP projection. "
-        "Add more memories and come back."
+        f"Only {len(vec_ids)} memor{'y' if len(vec_ids) == 1 else 'ies'} — "
+        "need at least 5 memories for a meaningful UMAP projection. "
+        "Add more and come back."
     )
     st.stop()
 
