@@ -246,6 +246,22 @@ pip install mnemon-memory
 mnemon setup claude-code --remote-url https://<your-app>.fly.dev/mcp
 ```
 
+## Install troubleshooting
+
+### Intel Mac + Python 3.12: `pip install "mnemon-memory[ui]"` fails building `llvmlite` / `numba`
+
+The `[ui]` extra pulls in `umap-learn`, which requires `numba` + `llvmlite`. Starting with `numba 0.63`, those packages only ship macOS wheels for Apple Silicon (arm64). On an Intel Mac (x86_64), pip falls back to a source build and fails with `llvmlite needs CMake tools to build`.
+
+Pin to the last versions that ship x86_64 macOS wheels:
+
+```bash
+pip install 'numba==0.62.1' 'llvmlite==0.45.1' 'mnemon-memory[ui]'
+```
+
+If pip then complains about NumPy, add `'numpy<2.3'` to the same command.
+
+Apple Silicon, Linux, and Windows are unaffected — prebuilt wheels exist on those platforms.
+
 ## Development
 
 ```bash
