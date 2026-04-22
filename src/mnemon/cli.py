@@ -88,7 +88,53 @@ def main() -> None:
         store = Store()
         doc_id = store.save(title=title, content=content, source_client="cli")
         print(f'Saved memory #{doc_id}: "{title}"')
+        try:
+            from .embedder import embed_document
+            doc = store.get(doc_id)
+            if doc:
+                embed_document(store, doc.hash, title, content)
+        except Exception as exc:  # noqa: BLE001
+            # Loud on the CLI — an interactive save that skipped embedding
+            # means vector search won't find this memory. Exit non-zero so
+            # scripts catch it; `mnemon rebuild` is the recovery path.
+            print(
+                f"Warning: embedding failed ({type(exc).__name__}: {exc}). "
+                f"Memory saved to vault but will not surface in vector "
+                f"search until `mnemon rebuild` runs.",
+                file=sys.stderr,
+            )
+            store.close()
+            sys.exit(2)
         store.close()
+
+    elif command == "rebuild":
+        # Re-embed every non-invalidated document. Surfaces per-doc
+        # failures so users hit real errors here instead of only seeing
+        # them whispered into server logs.
+        from .store import Store
+        try:
+            from .embedder import embed_document
+        except ImportError:
+            print("FastEmbed not installed. Run: pip install fastembed", file=sys.stderr)
+            sys.exit(1)
+        store = Store()
+        docs = store.timeline(10_000)
+        embedded = 0
+        failed = 0
+        for doc in docs:
+            try:
+                embed_document(store, doc.hash, doc.title, doc.content)
+                embedded += 1
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                print(
+                    f"  embed failed: doc_id={doc.id} ({type(exc).__name__}: {exc})",
+                    file=sys.stderr,
+                )
+        print(f"Rebuild complete: {embedded} documents embedded, {failed} failed.")
+        store.close()
+        if failed:
+            sys.exit(1)
 
     elif command == "forget":
         if len(args) < 2 or not args[1].isdigit():
@@ -338,6 +384,8 @@ Local vault (development/server-side only):
   mnemon search <query>     Search local vault
   mnemon save <title> <c>   Save to local vault
   mnemon forget <id>        Soft-delete from local vault
+  mnemon rebuild            Re-embed every document (run after a model
+                            change, or to recover from skipped embeddings)
   mnemon sync push          Push local vault to S3
   mnemon sync pull          Pull vault from S3
   mnemon dashboard [port]   Launch web dashboard (default: 8503)
