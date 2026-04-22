@@ -86,6 +86,15 @@ mnemon upgrade web --app-name my-mnemon
 
 After it finishes, add `https://my-mnemon.fly.dev/mcp` to claude.ai and the Claude mobile app manually (Settings → Connectors / Connected Apps).
 
+### Upgrade to a newer version (already on web)
+
+Rerun the same command after `pip install -U mnemon-memory` — `upgrade web` is idempotent. If the Fly app already exists, it skips the first-time steps (S3 push, volume create, client reconfigure) and just redeploys with the new version pinned. Clients keep their URL and token; the new image is picked up on the next request.
+
+```bash
+pip install -U 'mnemon-memory[server]'
+mnemon upgrade web --app-name my-mnemon
+```
+
 ### Downgrade back to local
 
 ```bash
