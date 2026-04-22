@@ -422,6 +422,101 @@ def _fly_seed_vault(app_name: str) -> None:
     )
 
 
+def _fly_app_exists(app_name: str) -> bool:
+    """Return True if a Fly app with this name is already deployed.
+
+    Uses ``flyctl status --app <name>`` — exit 0 means the app exists
+    and the authenticated user has access to it. Any non-zero exit
+    (not found, not authorized, network error) is treated as "does not
+    exist from our perspective" so the caller falls through to the
+    first-time launch path.
+    """
+    try:
+        subprocess.run(
+            ["flyctl", "status", "--app", app_name],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+# ── Redeploy (existing app, version bump) ────────────────────────────────────
+
+
+def _redeploy_web(
+    *,
+    app_name: str,
+    region: str,
+    mnemon_version: str,
+    skip_doctor: bool,
+) -> str:
+    """Redeploy an existing Fly mnemon app pinned to ``mnemon_version``.
+
+    Skips every first-time step that only makes sense for the local →
+    web migration (S3 push, volume create, secrets set, vault seed,
+    local vault archive, MCP client reconfigure). Those are all
+    idempotent no-ops on a redeploy — the web tier already owns the
+    state, clients already point at the same URL, and the Fly secrets
+    + volume persist across deploys.
+
+    Clients keep their existing URL (``https://{app_name}.fly.dev/mcp``)
+    and bearer token, so no client-side action is required — every MCP
+    connection picks up the new image on next request.
+    """
+    with tempfile.TemporaryDirectory(prefix="mnemon-redeploy-") as tdir:
+        workdir = Path(tdir)
+        (workdir / "Dockerfile").write_text(
+            _DOCKERFILE_TEMPLATE.format(mnemon_version=mnemon_version)
+        )
+        (workdir / "fly.toml").write_text(
+            _FLY_TOML_TEMPLATE.format(app_name=app_name, region=region)
+        )
+        _fly_deploy(workdir, app_name)
+
+    remote_url = f"https://{app_name}.fly.dev/mcp"
+    summary_lines = [
+        f"Redeploy complete: {remote_url}",
+        f"  Fly app:       {app_name}",
+        f"  Version:       mnemon-memory=={mnemon_version}",
+        "",
+        "No client-side changes needed — every MCP client keeps its URL",
+        "and bearer token. New image is picked up on the next request.",
+    ]
+
+    if skip_doctor:
+        return "\n".join(summary_lines)
+
+    # Doctor reads MNEMON_REMOTE_URL / MNEMON_LOCAL_TOKEN from env or
+    # from ~/.mnemon/{remote_url,local_token} — both were written by
+    # the original upgrade, so no env wiring is needed here.
+    import io
+
+    from .doctor import run_doctor
+
+    buf = io.StringIO()
+    print("", file=buf)
+    print("Running mnemon doctor against the remote...", file=buf)
+    try:
+        doctor_rc = run_doctor(out=buf, fail_on_warn=True)
+    except Exception as exc:  # noqa: BLE001
+        buf.write(
+            f"\n(doctor invocation crashed: {type(exc).__name__}: {exc})\n"
+        )
+        doctor_rc = 1
+
+    if doctor_rc != 0:
+        buf.write(
+            "\nNOTE: doctor reported issues against the redeployed remote. "
+            "The new image is live, but something in the remote-facing "
+            "config doesn't match. Investigate the failing check(s) above.\n"
+        )
+
+    return "\n".join(summary_lines) + "\n" + buf.getvalue()
+
+
 # ── Public entry point ───────────────────────────────────────────────────────
 
 
@@ -436,7 +531,12 @@ def upgrade_web(
 ) -> str:
     """Upgrade a local mnemon install to a web (Fly-hosted) deployment.
 
-    Steps (each aborts the rest on failure):
+    Idempotent: if ``app_name`` already exists on Fly (user is already
+    on web and is just bumping the mnemon version), switches to a
+    redeploy-only path — see :func:`_redeploy_web`. The full first-time
+    flow below only runs when the app doesn't yet exist.
+
+    First-time steps (each aborts the rest on failure):
       1. Validate flyctl + aws + bucket. Validate app-name shape + not
          colliding with MNEMON_PROD_APP_NAMES.
       2. Push local vault to S3 (establishes the durable backup before
@@ -455,6 +555,30 @@ def upgrade_web(
     """
     _validate_app_name(app_name)
     _require_flyctl()
+
+    # Resolve the mnemon version to pin in the Dockerfile — needed by
+    # both the first-time deploy and the redeploy path.
+    if mnemon_version is None:
+        from . import __version__
+
+        mnemon_version = __version__
+
+    # Idempotent redeploy: if the app already exists on Fly, the user
+    # is bumping the pinned mnemon version, not running the local → web
+    # migration. Skip S3 push, volume create, secret set, vault seed,
+    # local archive, and client reconfigure — none of those are needed
+    # when the web tier is already established.
+    #
+    # MNEMON_FLY_ENDPOINT_OVERRIDE short-circuits detection (Layer 2
+    # integration tests point at a local serve-remote; no "app" exists).
+    if not _fly_endpoint_override() and _fly_app_exists(app_name):
+        return _redeploy_web(
+            app_name=app_name,
+            region=region,
+            mnemon_version=mnemon_version,
+            skip_doctor=skip_doctor,
+        )
+
     _require_aws()
     bucket = _require_bucket(s3_bucket)
 
@@ -466,12 +590,6 @@ def upgrade_web(
 
     local_sqlite = vault_dir() / "default.sqlite"
     local_exists = local_sqlite.exists()
-
-    # Resolve the mnemon version to pin in the Dockerfile.
-    if mnemon_version is None:
-        from . import __version__
-
-        mnemon_version = __version__
 
     local_token = token or secrets.token_urlsafe(32)
 

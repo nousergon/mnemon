@@ -21,6 +21,7 @@ from mnemon import upgrade
 from mnemon.upgrade import (
     UpgradeError,
     _archive_local_vault,
+    _fly_app_exists,
     _validate_app_name,
     upgrade_web,
 )
@@ -220,6 +221,7 @@ class TestUpgradeWebHappyPath:
             ) as mock_run, \
             patch("mnemon.upgrade._require_flyctl"), \
             patch("mnemon.upgrade._require_aws"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=False), \
             patch(
                 "mnemon.upgrade._reconfigure_clients",
                 return_value=["claude-code"],
@@ -267,6 +269,7 @@ class TestUpgradeWebHappyPath:
         ), \
             patch("mnemon.upgrade._require_flyctl"), \
             patch("mnemon.upgrade._require_aws"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=False), \
             patch("mnemon.upgrade.subprocess.run") as mock_run:
             with pytest.raises(UpgradeError, match="S3 push failed"):
                 upgrade_web(
@@ -328,3 +331,198 @@ class TestRequireAwsSecrets:
                 upgrade._fly_set_secrets(
                     "mnemon-test", "some-token", "bucket"
                 )
+
+
+# ── _fly_app_exists detection ────────────────────────────────────────────────
+
+
+class TestFlyAppExists:
+    def test_returns_true_when_status_exits_zero(self):
+        with patch(
+            "mnemon.upgrade.subprocess.run",
+            return_value=_ok_completed(),
+        ) as mock_run:
+            assert _fly_app_exists("mnemon-test") is True
+        args, _kwargs = mock_run.call_args
+        assert args[0] == ["flyctl", "status", "--app", "mnemon-test"]
+
+    def test_returns_false_when_flyctl_missing(self):
+        with patch(
+            "mnemon.upgrade.subprocess.run", side_effect=FileNotFoundError
+        ):
+            assert _fly_app_exists("mnemon-test") is False
+
+    def test_returns_false_when_status_exits_nonzero(self):
+        err = CalledProcessError(
+            1, ["flyctl", "status"], stderr="Could not find App"
+        )
+        with patch("mnemon.upgrade.subprocess.run", side_effect=err):
+            assert _fly_app_exists("mnemon-test") is False
+
+
+# ── upgrade_web redeploy path (idempotent version bump) ──────────────────────
+
+
+class TestUpgradeWebRedeploy:
+    """When the Fly app already exists, ``upgrade_web`` takes a
+    redeploy-only path: skip S3 push, volume create, secrets set, seed,
+    archive, and client reconfigure. Just rebuild + deploy with the new
+    mnemon version pinned."""
+
+    def test_redeploy_skips_every_first_time_step(self, tmp_path, monkeypatch):
+        """Core contract of the idempotent path: when flyctl says the
+        app exists, none of the first-time-only helpers fire. Only
+        ``flyctl deploy`` runs."""
+        monkeypatch.setattr(
+            "mnemon.config.vault_dir", lambda: tmp_path / ".mnemon"
+        )
+
+        with patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=True), \
+            patch("mnemon.upgrade._require_aws") as mock_req_aws, \
+            patch("mnemon.upgrade._require_bucket") as mock_req_bucket, \
+            patch("mnemon.sync.push") as mock_push, \
+            patch("mnemon.upgrade._fly_launch") as mock_launch, \
+            patch("mnemon.upgrade._fly_create_volume") as mock_vol, \
+            patch("mnemon.upgrade._fly_set_secrets") as mock_secrets, \
+            patch("mnemon.upgrade._fly_seed_vault") as mock_seed, \
+            patch("mnemon.upgrade._archive_local_vault") as mock_archive, \
+            patch("mnemon.upgrade._reconfigure_clients") as mock_reconfig, \
+            patch("mnemon.upgrade._fly_deploy") as mock_deploy:
+            result = upgrade_web(
+                app_name="mnemon-test-existing",
+                mnemon_version="0.6.0rc3",
+                skip_doctor=True,
+            )
+
+        # First-time-only helpers never called
+        mock_req_aws.assert_not_called()
+        mock_req_bucket.assert_not_called()
+        mock_push.assert_not_called()
+        mock_launch.assert_not_called()
+        mock_vol.assert_not_called()
+        mock_secrets.assert_not_called()
+        mock_seed.assert_not_called()
+        mock_archive.assert_not_called()
+        mock_reconfig.assert_not_called()
+
+        # Only flyctl deploy fired
+        mock_deploy.assert_called_once()
+        _workdir, app_arg = mock_deploy.call_args.args
+        assert app_arg == "mnemon-test-existing"
+
+        assert "Redeploy complete" in result
+        assert "https://mnemon-test-existing.fly.dev/mcp" in result
+        assert "0.6.0rc3" in result
+
+    def test_redeploy_pins_provided_version_in_dockerfile(
+        self, tmp_path, monkeypatch
+    ):
+        """The Dockerfile written to the tempdir pins the exact mnemon
+        version the caller passed — this is the version bump knob."""
+        monkeypatch.setattr(
+            "mnemon.config.vault_dir", lambda: tmp_path / ".mnemon"
+        )
+        captured: dict[str, str] = {}
+
+        def _capture(workdir: Path, app_name: str) -> None:
+            captured["dockerfile"] = (workdir / "Dockerfile").read_text()
+            captured["fly_toml"] = (workdir / "fly.toml").read_text()
+
+        with patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=True), \
+            patch("mnemon.upgrade._fly_deploy", side_effect=_capture):
+            upgrade_web(
+                app_name="mnemon-test-existing",
+                mnemon_version="0.6.0rc3",
+                region="iad",
+                skip_doctor=True,
+            )
+
+        assert "mnemon-memory[server]==0.6.0rc3" in captured["dockerfile"]
+        assert 'app = "mnemon-test-existing"' in captured["fly_toml"]
+        assert 'primary_region = "iad"' in captured["fly_toml"]
+
+    def test_redeploy_ignores_missing_aws_and_bucket(
+        self, tmp_path, monkeypatch
+    ):
+        """Users bumping the version shouldn't need AWS creds or an S3
+        bucket — those are only required for the first-time vault seed.
+        A redeploy with neither set must succeed."""
+        monkeypatch.setattr(
+            "mnemon.config.vault_dir", lambda: tmp_path / ".mnemon"
+        )
+        monkeypatch.delenv("MNEMON_S3_BUCKET", raising=False)
+        monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+        monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+
+        with patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=True), \
+            patch("mnemon.upgrade._fly_deploy"):
+            result = upgrade_web(
+                app_name="mnemon-test-existing",
+                mnemon_version="0.6.0rc3",
+                skip_doctor=True,
+            )
+
+        assert "Redeploy complete" in result
+
+    def test_redeploy_runs_doctor_when_not_skipped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "mnemon.config.vault_dir", lambda: tmp_path / ".mnemon"
+        )
+
+        with patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=True), \
+            patch("mnemon.upgrade._fly_deploy"), \
+            patch("mnemon.doctor.run_doctor", return_value=0) as mock_doctor:
+            result = upgrade_web(
+                app_name="mnemon-test-existing",
+                mnemon_version="0.6.0rc3",
+                skip_doctor=False,
+            )
+
+        mock_doctor.assert_called_once()
+        _args, kwargs = mock_doctor.call_args
+        assert kwargs.get("fail_on_warn") is True
+        assert "Redeploy complete" in result
+
+    def test_fly_endpoint_override_takes_first_time_path(
+        self, tmp_path, monkeypatch
+    ):
+        """Integration-test override bypasses the existence check so
+        Layer 2 harnesses still exercise the full orchestration. Even
+        if an existing app is "visible", the override means we skip
+        all flyctl and treat the endpoint as the remote."""
+        vdir = tmp_path / ".mnemon"
+        vdir.mkdir()
+        (vdir / "default.sqlite").write_bytes(b"seeded")
+        monkeypatch.setattr("mnemon.config.vault_dir", lambda: vdir)
+        monkeypatch.setenv(
+            "MNEMON_FLY_ENDPOINT_OVERRIDE", "http://localhost:8502/mcp"
+        )
+
+        with patch(
+            "mnemon.sync.push",
+            return_value={"pushed": [], "errors": []},
+        ), \
+            patch("mnemon.upgrade._require_aws"), \
+            patch(
+                "mnemon.upgrade._fly_app_exists", return_value=True
+            ) as mock_exists, \
+            patch(
+                "mnemon.upgrade._reconfigure_clients",
+                return_value=[],
+            ), \
+            patch("mnemon.upgrade._fly_deploy") as mock_deploy, \
+            patch("mnemon.upgrade.subprocess.run"):
+            result = upgrade_web(
+                app_name="mnemon-test",
+                s3_bucket="test-bucket",
+                skip_doctor=True,
+            )
+
+        # Override path doesn't even ask — redeploy branch never reached
+        mock_exists.assert_not_called()
+        mock_deploy.assert_not_called()
+        assert "http://localhost:8502/mcp" in result

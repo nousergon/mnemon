@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.0rc3] - 2026-04-22
+
+### Fixed
+
+- **`mnemon upgrade web` is now idempotent.** Rerunning it against an
+  already-deployed Fly app (previously a hard failure / confusing
+  relaunch) now detects the existing app via `flyctl status` and
+  switches to a redeploy-only path: skip S3 push, volume create,
+  secrets set, vault seed, local vault archive, and MCP client
+  reconfigure — all of which are no-ops once the web tier is
+  established. Clients keep their URL and bearer token; the new image
+  is picked up on the next request. First-time deploy flow is
+  unchanged.
+
+  Upgrading to a newer mnemon version is now a two-command flow:
+  `pip install -U 'mnemon-memory[server]'` then
+  `mnemon upgrade web --app-name <existing-app>`.
+
+  Redeploy only requires `flyctl`; AWS creds and an S3 bucket are no
+  longer required for the version-bump case.
+
 ## [0.5.0] - 2026-04-14
 
 ### Breaking

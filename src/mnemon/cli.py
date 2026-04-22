@@ -357,11 +357,15 @@ Setup (configure MCP clients; use --remote-url for web mode):
   mnemon doctor             Run diagnostics (local or remote, auto-detected)
                             [--fail-on-warn] treat warnings as failures
 
-Upgrade local → web (deploys a Fly.io app + reconfigures every client):
+Upgrade local → web (deploys a Fly.io app + reconfigures every client).
+Idempotent: rerun to redeploy an existing app with the current mnemon
+version (clients keep their URL + token):
   mnemon upgrade web --app-name <name> [--s3-bucket NAME] [--token TOKEN]
                              [--region REGION] [--skip-doctor]
-                             Requires: flyctl, aws CLI with credentials,
-                             and an S3 bucket (MNEMON_S3_BUCKET or --s3-bucket).
+                             First-time deploy requires: flyctl, aws CLI
+                             with credentials, and an S3 bucket
+                             (MNEMON_S3_BUCKET or --s3-bucket). Redeploy
+                             against an existing app only needs flyctl.
 
 Downgrade web → local (pull remote vault back, reconfigure clients to stdio):
   mnemon downgrade local    [--destroy-fly-app] [--yes] [--app-name NAME]
