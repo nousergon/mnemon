@@ -5,7 +5,7 @@ import streamlit as st
 st.set_page_config(page_title="Memory Graph — mnemon", layout="wide")
 st.title("Memory Graph")
 
-from mnemon.dashboard.loaders import load_vectors_collapsed, load_umap_coords, load_related
+from mnemon.dashboard.loaders import load_vectors_collapsed, load_umap_coords, load_related, load_status
 from mnemon.dashboard.charts import make_graph_scatter, add_relation_edges
 
 CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
@@ -15,13 +15,27 @@ CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "resear
 # points, which read as duplicates.
 vec_data = load_vectors_collapsed()
 if vec_data is None:
-    st.warning("No vectors found. Save some memories with embeddings first.")
+    # Disambiguate: empty vault vs. saved-but-unembedded memories. The
+    # second case is a silent-failure signal — tell the user how to fix it.
+    doc_count = load_status().get("total_documents", 0)
+    if doc_count == 0:
+        st.warning("No memories saved yet. Save a memory to get started.")
+    else:
+        st.warning(
+            f"{doc_count} memor{'y' if doc_count == 1 else 'ies'} saved but no vectors found — "
+            "the embedding step did not run or failed silently. "
+            "Run `mnemon doctor` to diagnose, then `mnemon rebuild` to re-embed."
+        )
     st.stop()
 
 vec_ids, vectors, doc_map = vec_data
 
 if len(vec_ids) < 5:
-    st.warning(f"Only {len(vec_ids)} vectors — need at least 5 for UMAP projection.")
+    st.warning(
+        f"Only {len(vec_ids)} vector{'' if len(vec_ids) == 1 else 's'} — "
+        "need at least 5 for a meaningful UMAP projection. "
+        "Add more memories and come back."
+    )
     st.stop()
 
 # Sidebar controls
