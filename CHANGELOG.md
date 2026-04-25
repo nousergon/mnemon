@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Persistent MCP Streamable HTTP sessions across process restarts.**
+  Issued `Mcp-Session-Id` values are now stored in SQLite (default at
+  `<vault_dir>/mcp_sessions.sqlite`, 7-day TTL). When a request bearing
+  a previously-issued session ID arrives at a fresh process — for
+  example after a Fly cold-stop, a redeploy, or any other restart — the
+  server transparently resumes the session instead of returning 404,
+  by spawning a new transport keyed to the same ID and running the MCP
+  app `stateless=True` so the server-side session is born already-
+  initialized. The client sees no break.
+
+  Pairs with the `/health` warm-keeper hook from the previous release:
+  the hook minimizes the *frequency* of cold-stops during active use,
+  this change handles the *consequence* when one happens anyway. With
+  both shipped, mnemon survives Fly auto-stop without the "MCP UI says
+  connected, every tool call returns 404" failure mode.
+
+  Caveat: resumed sessions are stateless on the server side. Mnemon
+  uses no client-capability-gated features (sampling, elicitation,
+  roots), so this is a no-op for our toolset, but third-party forks
+  adding those features will need to re-handshake explicitly.
+
 ### Fixed
 
 - **Mid-session disconnects on Fly when `auto_stop_machines = "stop"`.**
