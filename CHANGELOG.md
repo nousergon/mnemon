@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **Mid-session disconnects on Fly when `auto_stop_machines = "stop"`.**
+  `mnemon setup` (any target with `--remote-url`) now installs a
+  lightweight `/health` warm-keeper as the first `UserPromptSubmit`
+  hook. It pings the Fly app on every prompt, resetting Fly's idle
+  timer so the machine stays warm during active Claude Code sessions
+  and wakes on the first prompt after idle. Independent of MCP session
+  state, so it works even after a cold-stop has invalidated the
+  `Mcp-Session-Id` (which the existing context-surfacing hook's MCP
+  call cannot recover from). `|| true` ensures a slow Fly wake never
+  blocks the user's prompt.
+
+  Previously: machine autostops after ~5 min idle, the open MCP
+  Streamable HTTP session goes stale, and Claude Code's MCP UI keeps
+  showing "connected" while every subsequent tool call returns 404.
+
 ## [0.6.0rc3] - 2026-04-22
 
 ### Fixed

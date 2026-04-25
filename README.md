@@ -177,15 +177,21 @@ Memories with access activity decay slower — each access extends the effective
 
 ## Claude Code Hooks
 
-When configured via `mnemon setup`, three hooks are installed on Claude Code:
+When configured via `mnemon setup`, the following hooks are installed on Claude Code:
 
-| Hook | Event | Timeout | Description |
-|------|-------|---------|-------------|
-| Context surfacing | `UserPromptSubmit` | 8s | Searches vault and injects relevant memories as context |
-| Session extractor | `Stop` | 30s | Extracts decisions, preferences, and observations from the transcript |
-| Handoff generator | `Stop` | 30s | Creates a session summary for the next session |
+| Hook | Event | Timeout | Mode | Description |
+|------|-------|---------|------|-------------|
+| Health warm-keeper | `UserPromptSubmit` | 40s | remote only | `curl /health` to wake/keep the Fly machine warm. Runs first so the MCP call below has a warm machine. |
+| Context surfacing | `UserPromptSubmit` | 8s | both | Searches vault and injects relevant memories as context |
+| Session pre-warm | `SessionStart` | 90s | remote only | Polls `/health` for up to 60s in the background so the first prompt of the session lands on a warm machine |
+| Session extractor | `Stop` | 30s | both | Extracts decisions, preferences, and observations from the transcript |
+| Handoff generator | `Stop` | 30s | both | Creates a session summary for the next session |
 
 The extractor and handoff generator use LLM-based extraction when `mnemon[llm]` is installed, with regex/heuristic fallback otherwise.
+
+### Why a warm-keeper if Fly auto-stops?
+
+A self-hosted mnemon Fly app with `auto_stop_machines = "stop"` (the default in `fly.toml.example`) will autostop after a few minutes of idle. The warm-keeper resets Fly's idle timer on every prompt, so the machine stays warm during an active Claude Code session and only autostops once you've been idle for a while. Cost stays the same — Fly bills only running time — but you get reliable mid-session access without paying for an always-on machine. The `|| true` ensures a slow Fly cold-start never blocks your prompt.
 
 ## Uninstall
 

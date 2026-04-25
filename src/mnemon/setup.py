@@ -61,23 +61,53 @@ def _mcp_config() -> dict:
 def _hooks_config(remote_url: str | None = None) -> dict:
     """Generate Claude Code hooks config.
 
-    When ``remote_url`` is provided, adds a SessionStart polling hook that
-    pre-warms the Fly machine so subsequent hooks don't pay cold-start
-    latency. The polling hook runs in the background and exits 0 in all
-    cases — it never blocks session startup.
+    When ``remote_url`` is provided:
+
+    - Adds a SessionStart polling hook that pre-warms the Fly machine so
+      subsequent hooks don't pay cold-start latency. Runs up to 60s in
+      the background, exits 0 in all cases.
+    - Prepends a UserPromptSubmit ``/health`` warm-keeper that resets
+      Fly's idle timer on every prompt. Runs *before* context_surfacing
+      so Fly is awake before the MCP call. Uses ``curl ... || true`` so
+      a slow wake never blocks the prompt. Independent of MCP session
+      state — it works even after a cold-stop has invalidated the
+      Mcp-Session-Id, which context_surfacing's MCP call cannot.
     """
     py = _python_path()
+    user_prompt_hooks: list[dict] = []
+
+    if remote_url:
+        # Extract base URL (strip /mcp suffix for health endpoint)
+        base_url = remote_url.rstrip("/")
+        if base_url.endswith("/mcp"):
+            base_url = base_url[:-4]
+        health_url = f"{base_url}/health"
+
+        # Warm-keeper: ping /health on every prompt. Resets Fly idle timer
+        # so the machine doesn't autostop mid-session, and wakes it on
+        # first prompt after idle. `|| true` ensures a slow wake never
+        # blocks the prompt.
+        user_prompt_hooks.append(
+            {
+                "type": "command",
+                "command": f"curl -fs --max-time 35 {health_url} > /dev/null || true",
+                "timeout": 40,
+            }
+        )
+
+    user_prompt_hooks.append(
+        {
+            "type": "command",
+            "command": f"{py} -m mnemon.hooks.context_surfacing",
+            "timeout": 8,
+        }
+    )
+
     hooks: dict = {
         "UserPromptSubmit": [
             {
                 "matcher": "",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": f"{py} -m mnemon.hooks.context_surfacing",
-                        "timeout": 8,
-                    },
-                ],
+                "hooks": user_prompt_hooks,
             },
         ],
         "Stop": [
@@ -100,12 +130,6 @@ def _hooks_config(remote_url: str | None = None) -> dict:
     }
 
     if remote_url:
-        # Extract base URL (strip /mcp suffix for health endpoint)
-        base_url = remote_url.rstrip("/")
-        if base_url.endswith("/mcp"):
-            base_url = base_url[:-4]
-        health_url = f"{base_url}/health"
-
         hooks["SessionStart"] = [
             {
                 "matcher": "",

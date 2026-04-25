@@ -76,6 +76,22 @@ class TestMcpConfig:
         assert "https://example.fly.dev/health" in cmd
         assert "curl" in cmd
 
+    def test_hooks_config_local_mode_has_no_warmkeeper(self):
+        hooks = _hooks_config()
+        ups = hooks["UserPromptSubmit"][0]["hooks"]
+        assert len(ups) == 1
+        assert "context_surfacing" in ups[0]["command"]
+
+    def test_hooks_config_remote_mode_prepends_health_warmkeeper(self):
+        hooks = _hooks_config(remote_url="https://example.fly.dev/mcp")
+        ups = hooks["UserPromptSubmit"][0]["hooks"]
+        assert len(ups) == 2
+        warm = ups[0]
+        assert "curl" in warm["command"]
+        assert "https://example.fly.dev/health" in warm["command"]
+        assert "|| true" in warm["command"]
+        assert "context_surfacing" in ups[1]["command"]
+
 
 class TestEnsureRemoteUrl:
     def test_writes_url_file(self, tmp_path):
