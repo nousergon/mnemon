@@ -129,6 +129,39 @@ def run_remote() -> None:
         )
         sys.exit(1)
 
+    # Wire the persistent session manager BEFORE streamable_http_app() is
+    # called — FastMCP lazy-initializes the manager on first call and
+    # caches it. By assigning our subclass first, the lazy path is
+    # skipped and our manager handles all requests. This is what lets
+    # MCP sessions survive Fly auto_stop_machines: the in-memory dict
+    # gets replaced with a SQLite-persisted one, and unknown-but-issued
+    # session IDs are transparently resumed instead of 404'd.
+    from .config import vault_dir
+    from .persistent_sessions import PersistentSessionManager, SessionStore
+
+    sessions_db = vault_dir() / "mcp_sessions.sqlite"
+    session_store = SessionStore(sessions_db)
+    expired = session_store.expire_old()
+    if expired:
+        print(
+            f"Pruned {expired} expired MCP session(s) from {sessions_db}",
+            file=sys.stderr,
+        )
+    mcp._session_manager = PersistentSessionManager(
+        app=mcp._mcp_server,
+        session_store=session_store,
+        event_store=mcp._event_store,
+        retry_interval=mcp._retry_interval,
+        json_response=mcp.settings.json_response,
+        stateless=mcp.settings.stateless_http,
+        security_settings=mcp.settings.transport_security,
+    )
+    print(
+        f"MCP sessions persisted to {sessions_db} "
+        f"(survives cold-stops, TTL {session_store.ttl_seconds}s)",
+        file=sys.stderr,
+    )
+
     mcp_app = mcp.streamable_http_app()
     wrapped = OAuthMiddleware(mcp_app, config, as_config=as_config)
     uvicorn.run(wrapped, host="0.0.0.0", port=PORT, log_level="info")

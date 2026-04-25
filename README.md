@@ -193,6 +193,10 @@ The extractor and handoff generator use LLM-based extraction when `mnemon[llm]` 
 
 A self-hosted mnemon Fly app with `auto_stop_machines = "stop"` (the default in `fly.toml.example`) will autostop after a few minutes of idle. The warm-keeper resets Fly's idle timer on every prompt, so the machine stays warm during an active Claude Code session and only autostops once you've been idle for a while. Cost stays the same — Fly bills only running time — but you get reliable mid-session access without paying for an always-on machine. The `|| true` ensures a slow Fly cold-start never blocks your prompt.
 
+### What if a cold-stop happens anyway?
+
+The server persists every issued MCP session ID to `<vault_dir>/mcp_sessions.sqlite` (7-day TTL). When a request bearing a known-but-not-in-memory session ID arrives at a fresh process — typical after a cold-stop or redeploy — the session is transparently resumed: a new transport is spawned with the same ID, and the underlying `ServerSession` is born already-initialized so tool calls succeed without a re-handshake. The MCP client sees no break in continuity. This is the safety net under the warm-keeper, not a replacement for it.
+
 ## Uninstall
 
 Remove mnemon state from this machine. Nothing user-owned in the cloud is touched.
