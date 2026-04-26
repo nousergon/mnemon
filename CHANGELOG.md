@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.6.0rc6] - 2026-04-26
+
+### Added
+
+- **`--mnemon-version <ver>` flag on `mnemon upgrade web`.** Pins the
+  version in the deployed Dockerfile explicitly instead of always
+  inheriting from the locally-installed `__version__`. Closes the trap
+  where a user publishes a new RC to PyPI then forgets to `pip install
+  -U` locally before redeploying, silently shipping the prior version.
+  The internal redeploy path already supported the parameter; this
+  exposes it on the CLI.
+- **`examples/quickstart.py`** demonstrating the public Python API
+  (`mnemon.store.Store` + `mnemon.search.search`) without an MCP
+  transport. Three queries cover lexical, semantic, and diagnostic
+  cases.
+- **`bench/search_stress.py`** + a JSON baseline at 1k memories.
+  Hybrid BM25 + vector search measures p50 / p95 / p99 over a
+  deterministic synthetic corpus. Initial numbers on consumer hardware:
+  sub-4 ms p99 at 1k memories, sub-8 ms p99 at 5k.
+- **`CONTRIBUTING.md`** with dev setup, style, PR conventions, and a
+  pointer to `SECURITY.md`.
+- **Hourly health-monitor GitHub Actions workflow.** Hits
+  `https://mnemon-memory.fly.dev/health`, asserts on the metrics shape,
+  and opens / comments on / closes a single tracker GH issue
+  automatically. Resets to green when the next run passes.
+- **Fresh-install CI workflow.** Builds the wheel from PR source,
+  installs it in clean `python:X.Y-slim` containers (3.10 / 3.12 /
+  3.13), verifies CLI + import. Weekly schedule also smoke-tests the
+  latest published version on PyPI.
+- **Daily `pip-audit --strict .` CI** scanning the declared dependency
+  graph for CVEs.
+- **`/health` session-routing metrics counters.** New `metrics` key on
+  the `/health` payload exposes `in_memory_hits`, `resume_hits`,
+  `fresh_inits`, `stale_session_misses`, `persisted_sessions_total`,
+  and `in_memory_sessions_current` — for cold-start diagnostics and
+  regression detection. Backward-compatible: clients that only check
+  `status == "ok"` are unaffected.
+
+### Changed
+
+- **`mnemon setup claude-code` and `mnemon setup claude-desktop` no
+  longer frame the claude.ai-synced + stdio dual config as a "shadow"
+  problem.** New copy reads as state-of-the-world: `ℹ Both local + web
+  mnemon configured. <Client> will use the web version (claude.ai-
+  synced) by default.` Behavior is unchanged — both registrations
+  still written, web wins by default, stdio activates automatically if
+  the user later removes the claude.ai entry. The previous "⚠ shadow"
+  alarm framing implied the user did something wrong; they didn't.
+- **`mnemon setup claude-desktop` now surfaces the dual-config notice
+  too.** Claude Desktop syncs MCP from claude.ai (same Anthropic
+  account) the same way Claude Code does, so the same coexistence
+  applies.
+- **`mnemon uninstall` no longer says "no mnemon registration found
+  (or CLI errored silently)"** when the claude CLI returns non-zero.
+  The non-zero case is the common one (registration was already gone);
+  reworded to "no user-scope mnemon registration to remove" and
+  surfaces stderr if it doesn't look like a "not found"-family error.
+- **README PyPI badge is now dynamic** via `shields.io/pypi/v/...`.
+  Previously hardcoded to a specific RC and went stale across releases.
+
+## [0.6.0rc5] - 2026-04-26
+
+### Added
+
+- **`/health` exposes session-routing metrics.** Same shape and feature
+  as listed in 0.6.0rc6 — listed here for traceability since rc5 was
+  the first version on PyPI to ship the counters. (rc5 was published
+  without a CHANGELOG entry; this back-fills it.)
+
 ## [0.6.0rc4] - 2026-04-25
 
 ### Added
