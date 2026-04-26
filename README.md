@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
-[![PyPI](https://img.shields.io/badge/PyPI-v0.6.0rc1-blue.svg)](https://pypi.org/project/mnemon-memory/)
+[![PyPI](https://img.shields.io/pypi/v/mnemon-memory.svg)](https://pypi.org/project/mnemon-memory/)
 
 > One memory vault. Every MCP client. Self-hosted.
 >

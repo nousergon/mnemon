@@ -174,10 +174,19 @@ def _claude_mcp_remove() -> str | None:
     except FileNotFoundError:
         return None
     if out.returncode == 0:
-        return "  claude mcp:    mnemon registration removed"
-    # Non-zero is expected if mnemon was never registered. Still worth
-    # noting so the user sees the attempt happened.
-    return "  claude mcp:    no mnemon registration found (or CLI errored silently)"
+        return "  claude mcp:    user-scope mnemon registration removed"
+    # Non-zero is the common case — the user-scope registration was
+    # already gone (fresh setup, prior uninstall, or claude.ai-only).
+    # Surface stderr if it looks like a real error (anything not in
+    # the "not found" family) so unusual failures aren't swallowed.
+    detail = (out.stderr or out.stdout or "").strip()
+    if detail and not any(
+        marker in detail.lower()
+        for marker in ("not found", "no such", "no mcp server", "does not exist")
+    ):
+        first_line = detail.splitlines()[0]
+        return f"  claude mcp:    skipped — {first_line}"
+    return "  claude mcp:    no user-scope mnemon registration to remove"
 
 
 def _strip_from_json(path: Path, keys_to_strip: dict[str, list[str]]) -> bool:

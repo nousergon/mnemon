@@ -209,6 +209,9 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         self._server_instances = _PersistingInstanceDict(session_store)
         # Process-lifetime counters scraped via /health for cold-stop diagnosis.
         # Single-event-loop server, so plain ints are race-free without a Lock.
+        # NOTE: scripts/check_health.py reads these key names directly. If you
+        # rename, add, or remove a key here, update the GHA monitor in the same
+        # PR — the workflow hard-fails on missing keys ("schema drift").
         self._counters: dict[str, int] = {
             "in_memory_hits": 0,
             "resume_hits": 0,
