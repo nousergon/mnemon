@@ -1,0 +1,73 @@
+name: Fresh Install Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly Mondays. Catches transient PyPI / FastEmbed CDN regressions
+    # that wouldn't bite us until a new user hits them.
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+jobs:
+  built-wheel:
+    # Builds a wheel from the PR's source, installs it in a clean
+    # Python container, runs the smoke flow. Closest CI signal to
+    # "this PR will install cleanly when published to PyPI" —
+    # ci.yml's editable install masks artifact-only issues.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Python versions classifiers in pyproject.toml claim support for.
+        # 3.10 is the floor (matches `requires-python`).
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheel from source
+        run: |
+          pip install --upgrade build
+          python -m build --wheel
+          ls -lh dist/
+
+      - name: Install built wheel in clean container
+        # python:${{ matrix.python-version }}-slim has nothing pre-installed.
+        # Volume-mount dist/ so we can pip install the freshly built wheel.
+        run: |
+          docker run --rm -v "$PWD/dist:/dist" \
+            python:${{ matrix.python-version }}-slim \
+            sh -c "pip install /dist/mnemon_memory-*.whl && \
+                   mnemon --version && \
+                   mnemon --help > /dev/null && \
+                   python -c 'import mnemon; print(mnemon.__version__)'"
+
+  pypi-published:
+    # Schedules-only; validates the latest mnemon-memory on PyPI still
+    # installs cleanly. Catches dep-resolution drift, PyPI hiccups, and
+    # FastEmbed model-cache breakage that the built-wheel job won't see
+    # (since it tests the PR source, not the artifact already published).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+    container:
+      image: python:${{ matrix.python-version }}-slim
+    steps:
+      - name: Install latest mnemon-memory from PyPI
+        run: pip install mnemon-memory
+
+      - name: Verify CLI + import
+        run: |
+          mnemon --version
+          mnemon --help > /dev/null
+          python -c "import mnemon; print(mnemon.__version__)"
