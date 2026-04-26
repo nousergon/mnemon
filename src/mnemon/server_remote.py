@@ -163,5 +163,10 @@ def run_remote() -> None:
     )
 
     mcp_app = mcp.streamable_http_app()
-    wrapped = OAuthMiddleware(mcp_app, config, as_config=as_config)
+    wrapped = OAuthMiddleware(
+        mcp_app,
+        config,
+        as_config=as_config,
+        metrics_provider=mcp._session_manager.metrics,
+    )
     uvicorn.run(wrapped, host="0.0.0.0", port=PORT, log_level="info")

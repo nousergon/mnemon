@@ -236,3 +236,116 @@ class TestResumeFlow:
         await manager._handle_stateful_request(scope, receive, send)
         assert resume_called is False
         assert super_called is True
+
+
+# ---------------------------------------------------------------------------
+# Counters / metrics surface — feeds /health for cold-stop diagnostics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+class TestMetricsCounters:
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    @staticmethod
+    def _make_manager(tmp_path):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        return PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+        )
+
+    @staticmethod
+    def _scope(session_id: bytes | None):
+        headers = []
+        if session_id is not None:
+            headers.append((b"mcp-session-id", session_id))
+        return {"type": "http", "method": "POST", "path": "/mcp", "headers": headers}
+
+    @staticmethod
+    async def _noop_receive():  # pragma: no cover — never invoked
+        return {"type": "http.disconnect"}
+
+    @staticmethod
+    async def _noop_send(_):  # pragma: no cover — never invoked
+        pass
+
+    def test_metrics_initial_state(self, tmp_path):
+        manager = self._make_manager(tmp_path)
+        m = manager.metrics()
+        assert m["in_memory_hits"] == 0
+        assert m["resume_hits"] == 0
+        assert m["fresh_inits"] == 0
+        assert m["stale_session_misses"] == 0
+        assert m["persisted_sessions_total"] == 0
+        assert m["in_memory_sessions_current"] == 0
+
+    async def test_in_memory_hit_increments_counter(self, tmp_path, monkeypatch):
+        manager = self._make_manager(tmp_path)
+        manager._server_instances["live-id"] = MagicMock(name="transport")
+
+        async def fake_super(self, scope, receive, send):  # noqa: ANN001
+            pass
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPSessionManager."
+            "_handle_stateful_request",
+            fake_super,
+        )
+        await manager._handle_stateful_request(
+            self._scope(b"live-id"), self._noop_receive, self._noop_send
+        )
+        assert manager.metrics()["in_memory_hits"] == 1
+
+    async def test_resume_hit_increments_counter(self, tmp_path, monkeypatch):
+        manager = self._make_manager(tmp_path)
+        manager._session_store.register("survivor")
+
+        async def fake_resume(*args, **kwargs):
+            pass
+
+        monkeypatch.setattr(manager, "_resume_session", fake_resume)
+        await manager._handle_stateful_request(
+            self._scope(b"survivor"), self._noop_receive, self._noop_send
+        )
+        assert manager.metrics()["resume_hits"] == 1
+
+    async def test_fresh_init_increments_counter(self, tmp_path, monkeypatch):
+        manager = self._make_manager(tmp_path)
+
+        async def fake_super(self, scope, receive, send):  # noqa: ANN001
+            pass
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPSessionManager."
+            "_handle_stateful_request",
+            fake_super,
+        )
+        await manager._handle_stateful_request(
+            self._scope(None), self._noop_receive, self._noop_send
+        )
+        assert manager.metrics()["fresh_inits"] == 1
+
+    async def test_stale_session_miss_increments_counter_and_warns(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        manager = self._make_manager(tmp_path)
+
+        async def fake_super(self, scope, receive, send):  # noqa: ANN001
+            pass
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPSessionManager."
+            "_handle_stateful_request",
+            fake_super,
+        )
+        with caplog.at_level("WARNING", logger="mnemon.persistent_sessions"):
+            await manager._handle_stateful_request(
+                self._scope(b"phantom"), self._noop_receive, self._noop_send
+            )
+        assert manager.metrics()["stale_session_misses"] == 1
+        assert any(
+            "Stale session_id phantom" in rec.message for rec in caplog.records
+        )

@@ -96,6 +96,7 @@ class OAuthMiddleware:
         app: ASGIApp,
         config: OAuthConfig,
         as_config: "AuthorizationServerConfig | None" = None,
+        metrics_provider: "Callable[[], dict[str, int]] | None" = None,
     ) -> None:
         self.app = app
         self.config = config
@@ -103,6 +104,10 @@ class OAuthMiddleware:
         # enabled, the middleware serves the AS endpoints and validates
         # bearer JWTs against the local keypair.
         self.as_config = as_config
+        # Optional callable returning a counters dict — surfaced via
+        # /health for cold-stop diagnostics. Failures are swallowed so
+        # /health stays a reliable Fly health check.
+        self._metrics_provider = metrics_provider
 
     async def __call__(
         self, scope: ASGIScope, receive: ASGIReceive, send: ASGISend
@@ -116,7 +121,15 @@ class OAuthMiddleware:
 
         # Unauthenticated endpoints.
         if path == "/health":
-            await _send_json(send, 200, {"status": "ok"})
+            payload: dict[str, object] = {"status": "ok"}
+            if self._metrics_provider is not None:
+                try:
+                    payload["metrics"] = self._metrics_provider()
+                except Exception:  # noqa: BLE001
+                    # Never let a metrics-collection bug 500 the health
+                    # check — Fly relies on /health for liveness.
+                    logger.exception("metrics_provider failed")
+            await _send_json(send, 200, payload)
             return
 
         if path == "/.well-known/oauth-protected-resource":
