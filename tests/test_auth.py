@@ -127,6 +127,38 @@ async def test_health_works_with_no_auth_configured(no_auth_config):
     assert status == 200
 
 
+@pytest.mark.asyncio
+async def test_health_includes_metrics_when_provider_wired(local_token_config):
+    """Health surfaces session-routing counters when a provider is supplied."""
+    app = _stub_downstream_factory([])
+    mw = OAuthMiddleware(
+        app,
+        local_token_config,
+        metrics_provider=lambda: {"resume_hits": 7, "stale_session_misses": 2},
+    )
+    status, _, body = await _call_middleware(mw, "/health")
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["status"] == "ok"
+    assert payload["metrics"] == {"resume_hits": 7, "stale_session_misses": 2}
+
+
+@pytest.mark.asyncio
+async def test_health_swallows_metrics_provider_failure(local_token_config, caplog):
+    """A broken metrics_provider must NOT 500 the health check."""
+    app = _stub_downstream_factory([])
+
+    def boom():
+        raise RuntimeError("counters on fire")
+
+    mw = OAuthMiddleware(app, local_token_config, metrics_provider=boom)
+    with caplog.at_level("ERROR", logger="mnemon.auth"):
+        status, _, body = await _call_middleware(mw, "/health")
+    assert status == 200
+    assert json.loads(body) == {"status": "ok"}
+    assert any("metrics_provider failed" in rec.message for rec in caplog.records)
+
+
 # --- Pass-through mode (no auth configured) --------------------------------
 
 

@@ -207,6 +207,28 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         )
         self._session_store = session_store
         self._server_instances = _PersistingInstanceDict(session_store)
+        # Process-lifetime counters scraped via /health for cold-stop diagnosis.
+        # Single-event-loop server, so plain ints are race-free without a Lock.
+        self._counters: dict[str, int] = {
+            "in_memory_hits": 0,
+            "resume_hits": 0,
+            "fresh_inits": 0,
+            "stale_session_misses": 0,
+        }
+
+    def metrics(self) -> dict[str, int]:
+        """Snapshot of session-routing counters for /health introspection.
+
+        ``stale_session_misses`` counts requests bearing a session ID that
+        is neither in memory nor in SQLite — the actual "Session not found"
+        surface. ``resume_hits`` counts the cold-stop recovery path firing.
+        Persistent across process lifetime; resets on cold-stop.
+        """
+        return {
+            **self._counters,
+            "persisted_sessions_total": self._session_store.count(),
+            "in_memory_sessions_current": len(self._server_instances),
+        }
 
     async def _handle_stateful_request(
         self,
@@ -219,6 +241,7 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
 
         # In-memory hit: refresh persistence + delegate to upstream.
         if session_id is not None and session_id in self._server_instances:
+            self._counters["in_memory_hits"] += 1
             self._session_store.touch(session_id)
             await super()._handle_stateful_request(scope, receive, send)
             return
@@ -226,6 +249,7 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         # Persisted but not in memory: this is the resume case (post
         # cold-start, redeploy, or process restart).
         if session_id is not None and self._session_store.is_known(session_id):
+            self._counters["resume_hits"] += 1
             logger.info("Resuming persisted MCP session %s", session_id)
             await self._resume_session(session_id, scope, receive, send)
             return
@@ -233,6 +257,18 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         # Either a brand-new session (no header) or an unknown session
         # ID we never issued / has expired. Upstream handles both — new
         # session creation will write through _PersistingInstanceDict.
+        if session_id is None:
+            self._counters["fresh_inits"] += 1
+        else:
+            # Stale: client sent a session ID we never issued or that
+            # expired. Upstream returns 404 — this is the actual
+            # "Session not found" surface seen by clients.
+            self._counters["stale_session_misses"] += 1
+            logger.warning(
+                "Stale session_id %s — not in memory, not in SQLite. "
+                "Upstream will return 404 per MCP spec.",
+                session_id,
+            )
         await super()._handle_stateful_request(scope, receive, send)
 
     async def _resume_session(
