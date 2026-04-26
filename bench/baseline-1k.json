@@ -1,0 +1,15 @@
+{
+  "memories": 1000,
+  "queries": 50,
+  "limit": 10,
+  "seed": 42,
+  "save_total_seconds": 0.1,
+  "embed_total_seconds": 7.95,
+  "search_ms": {
+    "mean": 3.23,
+    "p50": 3.11,
+    "p95": 3.88,
+    "p99": 4.2,
+    "max": 4.2
+  }
+}
