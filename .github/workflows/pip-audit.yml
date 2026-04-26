@@ -1,0 +1,38 @@
+name: pip-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Daily at 14:00 UTC. CVE feeds publish on rolling cadence; daily
+    # is the smallest cadence that's actually useful (more frequent
+    # would mostly catch the same advisory N times before any fix).
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit project dependencies
+        # `pip-audit . --strict` audits only the deps declared in
+        # pyproject.toml (the things mnemon ships). Distinct from the
+        # default behavior of auditing the entire active environment,
+        # which would also flag the toolchain (pip, setuptools) — useful
+        # signals but not actionable from this repo. Any vulnerability
+        # in a runtime/dev dep fails the workflow. If a transitive dep
+        # has no fix available, file an upstream issue + add
+        # `--ignore-vuln <ID>` here with a comment explaining why.
+        run: pip-audit --strict .
