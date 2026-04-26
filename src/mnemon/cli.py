@@ -214,11 +214,15 @@ def main() -> None:
             print(
                 "Usage: mnemon upgrade web --app-name <name> "
                 "[--s3-bucket NAME] [--token TOKEN] [--region REGION] "
-                "[--skip-doctor]",
+                "[--mnemon-version VER] [--skip-doctor]",
                 file=sys.stderr,
             )
             sys.exit(1)
-        parsed = _parse_upgrade_args(args[2:])
+        try:
+            parsed = _parse_upgrade_args(args[2:])
+        except ValueError as exc:
+            print(f"upgrade failed: {exc}", file=sys.stderr)
+            sys.exit(1)
         if not parsed["app_name"]:
             print("--app-name is required.", file=sys.stderr)
             sys.exit(1)
@@ -230,6 +234,7 @@ def main() -> None:
                     s3_bucket=parsed["s3_bucket"],
                     token=parsed["token"],
                     region=parsed["region"] or "sjc",
+                    mnemon_version=parsed["mnemon_version"],
                     skip_doctor=parsed["skip_doctor"],
                 )
             )
@@ -287,12 +292,20 @@ def main() -> None:
 
 
 def _parse_upgrade_args(args: list[str]) -> dict:
-    """Parse ``mnemon upgrade web`` flags."""
+    """Parse ``mnemon upgrade web`` flags.
+
+    Raises ``ValueError`` if ``--mnemon-version`` is malformed — the
+    string is interpolated into a Dockerfile shell context, so we
+    refuse anything outside ``[A-Za-z0-9._+-]``.
+    """
+    import re
+
     result: dict[str, str | bool | None] = {
         "app_name": None,
         "s3_bucket": None,
         "token": None,
         "region": None,
+        "mnemon_version": None,
         "skip_doctor": False,
     }
     i = 0
@@ -309,6 +322,15 @@ def _parse_upgrade_args(args: list[str]) -> dict:
             i += 2
         elif flag == "--region" and i + 1 < len(args):
             result["region"] = args[i + 1]
+            i += 2
+        elif flag == "--mnemon-version" and i + 1 < len(args):
+            value = args[i + 1]
+            if not re.fullmatch(r"[A-Za-z0-9._+-]+", value):
+                raise ValueError(
+                    f"--mnemon-version must match [A-Za-z0-9._+-]+; "
+                    f"got: {value!r}"
+                )
+            result["mnemon_version"] = value
             i += 2
         elif flag == "--skip-doctor":
             result["skip_doctor"] = True
@@ -361,11 +383,15 @@ Upgrade local → web (deploys a Fly.io app + reconfigures every client).
 Idempotent: rerun to redeploy an existing app with the current mnemon
 version (clients keep their URL + token):
   mnemon upgrade web --app-name <name> [--s3-bucket NAME] [--token TOKEN]
-                             [--region REGION] [--skip-doctor]
+                             [--region REGION] [--mnemon-version VER]
+                             [--skip-doctor]
                              First-time deploy requires: flyctl, aws CLI
                              with credentials, and an S3 bucket
                              (MNEMON_S3_BUCKET or --s3-bucket). Redeploy
                              against an existing app only needs flyctl.
+                             --mnemon-version pins a specific PyPI version
+                             in the deployed Dockerfile (defaults to the
+                             locally-installed __version__).
 
 Downgrade web → local (pull remote vault back, reconfigure clients to stdio):
   mnemon downgrade local    [--destroy-fly-app] [--yes] [--app-name NAME]
