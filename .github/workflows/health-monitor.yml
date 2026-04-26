@@ -9,6 +9,10 @@ on:
     - cron: "5 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   health:
     runs-on: ubuntu-latest
@@ -21,8 +25,67 @@ jobs:
           python-version: "3.13"
 
       - name: Check /health
+        id: check
         # exits 1 on hard failures (status drift, stale_session_misses>0,
         # missing metrics keys) → red workflow run. exits 2 on soft
         # warnings (persisted_sessions_total > threshold) → also red so
         # they don't go silent. exit 0 = all green.
-        run: python scripts/check_health.py
+        # tee captures the full output so the issue body below has it.
+        run: |
+          set -o pipefail
+          python scripts/check_health.py 2>&1 | tee /tmp/health.txt
+
+      - name: Open or comment on tracking issue if check failed
+        # On non-zero exit from the check, find an open issue tagged
+        # `health-monitor` (one canonical tracker) and append a comment;
+        # if none exists, open a new one. GitHub emails the maintainer
+        # automatically on issue create + comment, no extra channel
+        # needed. Skipped on PRs to avoid surfacing transient failures
+        # as noisy issues against PR head SHAs.
+        if: failure() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          BODY=$(cat <<EOF
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Trigger: ${{ github.event_name }}
+          Time (UTC): $(date -u +"%Y-%m-%d %H:%M")
+
+          \`\`\`
+          $(cat /tmp/health.txt)
+          \`\`\`
+          EOF
+          )
+          # Idempotently ensure the label exists. `|| true` because
+          # `gh label create` returns 422 if it already exists.
+          gh label create health-monitor \
+            --description "Auto-opened by .github/workflows/health-monitor.yml" \
+            --color FF6B6B 2>/dev/null || true
+
+          # Reuse a single open tracker issue (label `health-monitor`)
+          # so we don't spam one issue per failure.
+          EXISTING=$(gh issue list --label health-monitor --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            echo "Appending to existing issue #$EXISTING"
+            gh issue comment "$EXISTING" --body "$BODY"
+          else
+            echo "Opening new tracker issue"
+            gh issue create \
+              --title "health-monitor: /health check failing" \
+              --label health-monitor \
+              --body "$BODY"
+          fi
+
+      - name: Auto-close tracker issue if check passed
+        # On a green run, close any open `health-monitor` issue with a
+        # comment pointing at the recovering run. Keeps the issue
+        # tracker honest without manual triage.
+        if: success() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          for n in $(gh issue list --label health-monitor --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Resolved — health-monitor run ${{ github.run_id }} green at $(date -u +"%Y-%m-%d %H:%M") UTC."
+          done

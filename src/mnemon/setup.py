@@ -201,6 +201,41 @@ def _ensure_local_token(token: str | None = None) -> str:
     return new_token
 
 
+def _dual_config_info_lines(target_label: str) -> list[str]:
+    """Return a list of info lines when a claude.ai-synced mnemon
+    registration coexists with the stdio one we just wrote.
+
+    This is **not** a problem state — it's a legitimate dual config.
+    When a user has added mnemon via claude.ai (Settings → Connected
+    Apps), that registration syncs to every Anthropic-first-party
+    client on the same account: Claude Code, Claude Desktop, Claude
+    mobile. ``mnemon setup`` writing a stdio entry on top of that just
+    means both are configured. In Claude Code + Claude Desktop, the
+    web (claude.ai-synced) one takes precedence — that's the default.
+    The stdio entry stays on disk and activates automatically if the
+    user later removes the claude.ai entry, with no re-run needed.
+
+    Cursor + Gemini CLI don't sync MCP from claude.ai, so this dual
+    state can't arise there.
+
+    ``target_label`` is the user-facing client name (e.g.
+    ``"Claude Code"``, ``"Claude Desktop"``) used in the message.
+    """
+    from .uninstall import detect_claude_ai_mnemon
+
+    if not detect_claude_ai_mnemon():
+        return []
+
+    return [
+        "",
+        f"  ℹ Both local + web mnemon configured. {target_label} will "
+        "use the web version (claude.ai-synced) by default.",
+        "    To switch to local: open claude.ai → Settings → "
+        "Connected Apps and remove the mnemon entry. The local stdio "
+        "config stays on disk and activates automatically.",
+    ]
+
+
 def _refuse_if_remote_configured(target_label: str) -> None:
     """Raise :class:`SetupError` if ``~/.mnemon/remote_url`` exists.
 
@@ -488,30 +523,13 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
     if remote_url:
         lines.append("  SessionStart: pre-warm polling (90s background)")
 
-    # Warn if a claude.ai-synced mnemon entry exists. It can't be removed
-    # by any `claude mcp remove` command; it'll shadow the stdio
-    # registration we just added. Surface it here so the user knows the
-    # setup "succeeded" but Claude Code will still prefer the remote.
+    # If a claude.ai-synced mnemon entry exists alongside the stdio
+    # entry we just wrote, surface the dual-config state. Web wins by
+    # default in Claude Code's resolution; the stdio entry stays
+    # on-disk as standby (auto-activates if the user later removes the
+    # claude.ai entry).
     if remote_url is None:
-        from .uninstall import detect_claude_ai_mnemon
-
-        if detect_claude_ai_mnemon():
-            lines.append("")
-            lines.append(
-                "  ⚠ claude.ai-synced mnemon MCP registration detected."
-            )
-            lines.append(
-                "    Claude Code will PREFER that entry over the stdio "
-                "registration we just added."
-            )
-            lines.append(
-                "    To use local for Claude Code too: open claude.ai → "
-                "Settings → Connected Apps and remove the mnemon entry."
-            )
-            lines.append(
-                "    (Cursor + Claude Desktop are unaffected — they use "
-                "their own local configs.)"
-            )
+        lines.extend(_dual_config_info_lines("Claude Code"))
 
     _write_json(settings_path, settings)
 
@@ -630,11 +648,19 @@ def setup_claude_desktop(
 
     _write_json(desktop_path, config)
 
-    return (
+    summary = (
         f"Claude Desktop MCP configured at {desktop_path}\n"
-        f"  Mode: {mode}\n"
-        "Restart Claude Desktop to activate."
+        f"  Mode: {mode}"
     )
+    # Claude Desktop also syncs MCP from claude.ai, so the same
+    # dual-config state can arise. Only surface the info in stdio
+    # mode — when configuring remote, the user already wants remote.
+    if remote_url is None:
+        info_lines = _dual_config_info_lines("Claude Desktop")
+        if info_lines:
+            summary += "\n" + "\n".join(info_lines)
+    summary += "\nRestart Claude Desktop to activate."
+    return summary
 
 
 def setup_gemini() -> str:

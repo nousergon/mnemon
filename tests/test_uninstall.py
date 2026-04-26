@@ -256,7 +256,7 @@ class TestClaudeAiWarnings:
 
         # Pre-action loud warning went to stderr
         err = capsys.readouterr().err
-        assert "claude.ai-synced mnemon MCP detected" in err
+        assert "claude.ai-synced mnemon MCP also configured" in err
         # Post-action summary has the REQUIRED bullet
         assert "REQUIRED" in result
         assert "claude.ai → Settings → Connected Apps" in result
@@ -269,7 +269,7 @@ class TestClaudeAiWarnings:
             result = uninstall(yes=True)
 
         err = capsys.readouterr().err
-        assert "claude.ai-synced mnemon MCP detected" not in err
+        assert "claude.ai-synced mnemon MCP also configured" not in err
         assert "REQUIRED" not in result
         # The generic hypothetical reminder still appears
         assert "If you use claude.ai" in result

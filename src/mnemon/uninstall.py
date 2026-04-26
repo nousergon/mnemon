@@ -174,10 +174,19 @@ def _claude_mcp_remove() -> str | None:
     except FileNotFoundError:
         return None
     if out.returncode == 0:
-        return "  claude mcp:    mnemon registration removed"
-    # Non-zero is expected if mnemon was never registered. Still worth
-    # noting so the user sees the attempt happened.
-    return "  claude mcp:    no mnemon registration found (or CLI errored silently)"
+        return "  claude mcp:    user-scope mnemon registration removed"
+    # Non-zero is the common case — the user-scope registration was
+    # already gone (fresh setup, prior uninstall, or claude.ai-only).
+    # Surface stderr if it looks like a real error (anything not in
+    # the "not found" family) so unusual failures aren't swallowed.
+    detail = (out.stderr or out.stdout or "").strip()
+    if detail and not any(
+        marker in detail.lower()
+        for marker in ("not found", "no such", "no mcp server", "does not exist")
+    ):
+        first_line = detail.splitlines()[0]
+        return f"  claude mcp:    skipped — {first_line}"
+    return "  claude mcp:    no user-scope mnemon registration to remove"
 
 
 def _strip_from_json(path: Path, keys_to_strip: dict[str, list[str]]) -> bool:
@@ -278,16 +287,16 @@ def uninstall(*, yes: bool = False, keep_vault: bool = False) -> str:
     # think the command didn't work.
     if state["claude_ai_registration"]:
         ca_warning = (
-            "⚠ claude.ai-synced mnemon MCP detected.\n"
+            "ℹ claude.ai-synced mnemon MCP also configured.\n"
             "  `claude mcp list` shows a `claude.ai mnemon: …` entry. "
             "This registration lives in your Anthropic account and is "
             "synced to Claude Code from claude.ai — it CANNOT be removed "
             "by `mnemon uninstall` or any `claude mcp remove` command.\n"
             "  To finish the uninstall, open claude.ai → Settings → "
             "Connected Apps and remove the mnemon entry there.\n"
-            "  If you leave it in place: it will shadow any local stdio "
-            "registration from a future `mnemon setup`, and Claude Code "
-            "will keep talking to the remote vault.\n"
+            "  If you leave it in place: any future `mnemon setup` will "
+            "configure both local + web; Claude Code will use the web "
+            "version (claude.ai-synced) by default.\n"
         )
         print(ca_warning, file=sys.stderr)
 
