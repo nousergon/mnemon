@@ -753,39 +753,35 @@ class TestFailOnWarnPropagation:
         assert "including warnings" in result
 
 
-class TestClaudeAiShadowWarning:
-    """Local-mode setup_claude_code now surfaces a warning when a
-    claude.ai-synced mnemon MCP registration is detected. The stdio
-    registration the function just added will be shadowed by the
-    claude.ai one because Claude Code prefers the synced-from-account
-    source. Users need to know the setup technically succeeded but
-    Claude Code behavior won't reflect it until they remove the entry
-    in claude.ai's web UI."""
+class TestDualConfigInfo:
+    """Local-mode setup_claude_code + setup_claude_desktop surface an
+    informational notice when a claude.ai-synced mnemon registration
+    coexists with the stdio one being written. This isn't a problem
+    state — it's a legitimate dual config (web wins by default in
+    Anthropic-first-party clients; the stdio entry stays on-disk as
+    standby). Cursor + Gemini CLI don't sync from claude.ai so this
+    notice never fires for them."""
 
-    def test_warning_surfaced_when_claude_ai_entry_exists(self):
+    def test_info_surfaced_when_claude_ai_entry_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
                  patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=True):
                 result = setup_claude_code()
-        assert "claude.ai-synced mnemon MCP registration detected" in result
-        assert "Claude Code will PREFER" in result
-        # Cursor + Gemini CLI are the not-synced clients (the unaffected
-        # ones); Claude Desktop DOES sync from claude.ai and is now
-        # warned about separately in setup_claude_desktop.
-        assert "Cursor + Gemini CLI are unaffected" in result
+        assert "Both local + web mnemon configured" in result
+        assert "Claude Code will use the web version (claude.ai-synced)" in result
+        assert "stays on disk and activates automatically" in result
 
-    def test_no_warning_when_no_claude_ai_entry(self):
+    def test_no_info_when_no_claude_ai_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
                  patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=False):
                 result = setup_claude_code()
-        assert "claude.ai-synced mnemon MCP registration detected" not in result
+        assert "Both local + web mnemon configured" not in result
 
-    def test_no_warning_in_remote_mode(self):
+    def test_no_info_in_remote_mode(self):
         """Remote-mode setup intentionally uses the HTTP MCP via
-        `claude mcp add`. It doesn't matter whether a claude.ai entry
-        also exists — we're explicitly in remote mode. No need for
-        the shadow warning."""
+        `claude mcp add`. The user explicitly chose web — the dual-
+        config notice would be redundant."""
         with tempfile.TemporaryDirectory() as tmpdir:
             mnemon_dir = Path(tmpdir) / ".mnemon"
             with patch("mnemon.setup.Path.home", return_value=Path(tmpdir)), \
@@ -797,14 +793,14 @@ class TestClaudeAiShadowWarning:
                 result = setup_claude_code(
                     remote_url="https://test.fly.dev/mcp", token="tok"
                 )
-        assert "claude.ai-synced mnemon MCP registration detected" not in result
+        assert "Both local + web mnemon configured" not in result
 
-    def test_warning_surfaced_for_claude_desktop_when_entry_exists(
+    def test_info_surfaced_for_claude_desktop_when_entry_exists(
         self, tmp_path, monkeypatch
     ):
         """Claude Desktop syncs MCP from claude.ai (same Anthropic
-        account), so the same shadow problem applies. Warning text
-        names Claude Desktop in the precedence message."""
+        account), so the same dual-config state can arise. Notice
+        names Claude Desktop in the precedence sentence."""
         from mnemon.setup import setup_claude_desktop
 
         monkeypatch.setattr("mnemon.setup.sys.platform", "darwin")
@@ -812,11 +808,10 @@ class TestClaudeAiShadowWarning:
 
         with patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=True):
             result = setup_claude_desktop()
-        assert "claude.ai-synced mnemon MCP registration detected" in result
-        assert "Claude Desktop will PREFER" in result
-        assert "Cursor + Gemini CLI are unaffected" in result
+        assert "Both local + web mnemon configured" in result
+        assert "Claude Desktop will use the web version (claude.ai-synced)" in result
 
-    def test_no_warning_for_claude_desktop_when_no_entry(
+    def test_no_info_for_claude_desktop_when_no_entry(
         self, tmp_path, monkeypatch
     ):
         from mnemon.setup import setup_claude_desktop
@@ -826,13 +821,13 @@ class TestClaudeAiShadowWarning:
 
         with patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=False):
             result = setup_claude_desktop()
-        assert "claude.ai-synced mnemon MCP registration detected" not in result
+        assert "Both local + web mnemon configured" not in result
 
-    def test_no_warning_for_claude_desktop_in_remote_mode(
+    def test_no_info_for_claude_desktop_in_remote_mode(
         self, tmp_path, monkeypatch
     ):
-        """As with Claude Code, remote-mode setup explicitly wants the
-        remote — no need for the shadow warning."""
+        """As with Claude Code, remote-mode setup explicitly wants
+        the remote — the dual-config notice would be redundant."""
         from mnemon.setup import setup_claude_desktop
 
         monkeypatch.setattr("mnemon.setup.sys.platform", "darwin")
@@ -850,7 +845,7 @@ class TestClaudeAiShadowWarning:
             result = setup_claude_desktop(
                 remote_url="https://test.fly.dev/mcp", token="tok"
             )
-        assert "claude.ai-synced mnemon MCP registration detected" not in result
+        assert "Both local + web mnemon configured" not in result
 
 
 class TestRefuseIfRemoteConfigured:
