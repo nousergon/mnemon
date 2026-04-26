@@ -1,0 +1,28 @@
+name: Health Monitor
+
+on:
+  schedule:
+    # Hourly. Catches stale_session_misses regressions within ~1h of the
+    # offending request. Adjust upward if GitHub Actions minute usage
+    # becomes a concern (free tier is 2,000/mo on private repos; public
+    # repos are unmetered).
+    - cron: "5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Check /health
+        # exits 1 on hard failures (status drift, stale_session_misses>0,
+        # missing metrics keys) → red workflow run. exits 2 on soft
+        # warnings (persisted_sessions_total > threshold) → also red so
+        # they don't go silent. exit 0 = all green.
+        run: python scripts/check_health.py
