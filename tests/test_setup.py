@@ -769,7 +769,10 @@ class TestClaudeAiShadowWarning:
                 result = setup_claude_code()
         assert "claude.ai-synced mnemon MCP registration detected" in result
         assert "Claude Code will PREFER" in result
-        assert "Cursor + Claude Desktop are unaffected" in result
+        # Cursor + Gemini CLI are the not-synced clients (the unaffected
+        # ones); Claude Desktop DOES sync from claude.ai and is now
+        # warned about separately in setup_claude_desktop.
+        assert "Cursor + Gemini CLI are unaffected" in result
 
     def test_no_warning_when_no_claude_ai_entry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -794,6 +797,59 @@ class TestClaudeAiShadowWarning:
                 result = setup_claude_code(
                     remote_url="https://test.fly.dev/mcp", token="tok"
                 )
+        assert "claude.ai-synced mnemon MCP registration detected" not in result
+
+    def test_warning_surfaced_for_claude_desktop_when_entry_exists(
+        self, tmp_path, monkeypatch
+    ):
+        """Claude Desktop syncs MCP from claude.ai (same Anthropic
+        account), so the same shadow problem applies. Warning text
+        names Claude Desktop in the precedence message."""
+        from mnemon.setup import setup_claude_desktop
+
+        monkeypatch.setattr("mnemon.setup.sys.platform", "darwin")
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+
+        with patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=True):
+            result = setup_claude_desktop()
+        assert "claude.ai-synced mnemon MCP registration detected" in result
+        assert "Claude Desktop will PREFER" in result
+        assert "Cursor + Gemini CLI are unaffected" in result
+
+    def test_no_warning_for_claude_desktop_when_no_entry(
+        self, tmp_path, monkeypatch
+    ):
+        from mnemon.setup import setup_claude_desktop
+
+        monkeypatch.setattr("mnemon.setup.sys.platform", "darwin")
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+
+        with patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=False):
+            result = setup_claude_desktop()
+        assert "claude.ai-synced mnemon MCP registration detected" not in result
+
+    def test_no_warning_for_claude_desktop_in_remote_mode(
+        self, tmp_path, monkeypatch
+    ):
+        """As with Claude Code, remote-mode setup explicitly wants the
+        remote — no need for the shadow warning."""
+        from mnemon.setup import setup_claude_desktop
+
+        monkeypatch.setattr("mnemon.setup.sys.platform", "darwin")
+        monkeypatch.setattr("mnemon.setup.Path.home", lambda: tmp_path)
+        mnemon_dir = tmp_path / ".mnemon"
+        monkeypatch.setattr("mnemon.setup.MNEMON_DIR", mnemon_dir)
+        monkeypatch.setattr(
+            "mnemon.setup.LOCAL_TOKEN_FILE", mnemon_dir / "local_token"
+        )
+        monkeypatch.setattr(
+            "mnemon.setup.REMOTE_URL_FILE", mnemon_dir / "remote_url"
+        )
+        with patch("mnemon.setup._preflight_remote_endpoint"), \
+             patch("mnemon.uninstall.detect_claude_ai_mnemon", return_value=True):
+            result = setup_claude_desktop(
+                remote_url="https://test.fly.dev/mcp", token="tok"
+            )
         assert "claude.ai-synced mnemon MCP registration detected" not in result
 
 

@@ -201,6 +201,39 @@ def _ensure_local_token(token: str | None = None) -> str:
     return new_token
 
 
+def _claude_ai_shadow_warning_lines(target_label: str) -> list[str]:
+    """Return a list of warning lines if a claude.ai-synced mnemon
+    registration exists, otherwise an empty list.
+
+    The shadow problem: when a user has installed mnemon via the
+    claude.ai web UI (Settings → Connected Apps), that registration
+    syncs to every Anthropic-first-party client signed in to the same
+    account — Claude Code (CLI), Claude Desktop, Claude mobile. The
+    synced entry takes precedence over a local stdio entry written by
+    ``mnemon setup``, so a "setup succeeded" message is misleading
+    until the user removes the claude.ai entry. Cursor + Gemini CLI
+    are not synced from claude.ai and are not affected.
+
+    ``target_label`` is the user-facing name (e.g. ``"Claude Code"``,
+    ``"Claude Desktop"``) shown in the warning text.
+    """
+    from .uninstall import detect_claude_ai_mnemon
+
+    if not detect_claude_ai_mnemon():
+        return []
+
+    return [
+        "",
+        "  ⚠ claude.ai-synced mnemon MCP registration detected.",
+        f"    {target_label} will PREFER that entry over the stdio "
+        f"registration we just added.",
+        f"    To use local for {target_label} too: open claude.ai → "
+        f"Settings → Connected Apps and remove the mnemon entry.",
+        "    (Cursor + Gemini CLI are unaffected — they don't sync "
+        "MCP from claude.ai.)",
+    ]
+
+
 def _refuse_if_remote_configured(target_label: str) -> None:
     """Raise :class:`SetupError` if ``~/.mnemon/remote_url`` exists.
 
@@ -488,30 +521,12 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
     if remote_url:
         lines.append("  SessionStart: pre-warm polling (90s background)")
 
-    # Warn if a claude.ai-synced mnemon entry exists. It can't be removed
-    # by any `claude mcp remove` command; it'll shadow the stdio
-    # registration we just added. Surface it here so the user knows the
-    # setup "succeeded" but Claude Code will still prefer the remote.
+    # Warn if a claude.ai-synced mnemon entry exists — it'll shadow the
+    # stdio registration we just added and can't be removed by any
+    # `claude mcp remove` command (lives in the user's Anthropic
+    # account, not on disk).
     if remote_url is None:
-        from .uninstall import detect_claude_ai_mnemon
-
-        if detect_claude_ai_mnemon():
-            lines.append("")
-            lines.append(
-                "  ⚠ claude.ai-synced mnemon MCP registration detected."
-            )
-            lines.append(
-                "    Claude Code will PREFER that entry over the stdio "
-                "registration we just added."
-            )
-            lines.append(
-                "    To use local for Claude Code too: open claude.ai → "
-                "Settings → Connected Apps and remove the mnemon entry."
-            )
-            lines.append(
-                "    (Cursor + Claude Desktop are unaffected — they use "
-                "their own local configs.)"
-            )
+        lines.extend(_claude_ai_shadow_warning_lines("Claude Code"))
 
     _write_json(settings_path, settings)
 
@@ -630,11 +645,20 @@ def setup_claude_desktop(
 
     _write_json(desktop_path, config)
 
-    return (
+    summary = (
         f"Claude Desktop MCP configured at {desktop_path}\n"
-        f"  Mode: {mode}\n"
-        "Restart Claude Desktop to activate."
+        f"  Mode: {mode}"
     )
+    # Claude Desktop syncs MCP servers from claude.ai (same Anthropic
+    # account), so the shadow problem applies here too. Only surface
+    # the warning in stdio mode — when configuring remote, the user
+    # already wants the remote.
+    if remote_url is None:
+        shadow_lines = _claude_ai_shadow_warning_lines("Claude Desktop")
+        if shadow_lines:
+            summary += "\n" + "\n".join(shadow_lines)
+    summary += "\nRestart Claude Desktop to activate."
+    return summary
 
 
 def setup_gemini() -> str:
