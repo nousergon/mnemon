@@ -404,9 +404,55 @@ class TestUpgradeCli:
             s3_bucket="my-bucket",
             token=None,
             region="sjc",
+            mnemon_version=None,
             skip_doctor=True,
         )
         assert "upgrade output" in capsys.readouterr().out
+
+    @patch("mnemon.upgrade.upgrade_web")
+    def test_mnemon_version_flag_passes_through(self, mock_upgrade, capsys):
+        """--mnemon-version pins the version in the deployed Dockerfile,
+        sidestepping the local-install-must-match-PyPI gotcha."""
+        mock_upgrade.return_value = "ok"
+        with patch(
+            "sys.argv",
+            [
+                "mnemon",
+                "upgrade",
+                "web",
+                "--app-name",
+                "mnemon-test-cli",
+                "--mnemon-version",
+                "0.6.0rc5",
+                "--skip-doctor",
+            ],
+        ):
+            main()
+        kwargs = mock_upgrade.call_args.kwargs
+        assert kwargs["mnemon_version"] == "0.6.0rc5"
+        assert kwargs["app_name"] == "mnemon-test-cli"
+
+    def test_malformed_mnemon_version_exits_1(self, capsys):
+        """Refuse anything outside [A-Za-z0-9._+-] — the string is
+        interpolated into a Dockerfile shell context."""
+        with patch(
+            "sys.argv",
+            [
+                "mnemon",
+                "upgrade",
+                "web",
+                "--app-name",
+                "mnemon-test",
+                "--mnemon-version",
+                "0.6.0'; rm -rf /; '",
+            ],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "upgrade failed" in err
+        assert "--mnemon-version must match" in err
 
     def test_web_subcommand_missing_prints_usage(self, capsys):
         with patch("sys.argv", ["mnemon", "upgrade"]):
