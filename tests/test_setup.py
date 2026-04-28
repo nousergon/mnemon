@@ -62,8 +62,35 @@ class TestMcpConfig:
     def test_hooks_config_has_all_events(self):
         hooks = _hooks_config()
         assert "UserPromptSubmit" in hooks
+        assert "PostToolUse" in hooks
         assert "Stop" in hooks
         assert len(hooks["Stop"][0]["hooks"]) == 2  # extractor + handoff
+
+    def test_hooks_config_post_tool_use_targets_write_edit_multiedit(self):
+        """PostToolUse auto-mirror entry must scope to write-class tools
+        (added 0.6.0rc7). A wider matcher (e.g. ``*``) would fire on
+        every Bash/Read/Grep call — large per-prompt overhead and
+        irrelevant work."""
+        hooks = _hooks_config()
+        post = hooks["PostToolUse"]
+        assert len(post) == 1
+        entry = post[0]
+        assert entry["matcher"] == "Write|Edit|MultiEdit"
+        assert len(entry["hooks"]) == 1
+        cmd = entry["hooks"][0]["command"]
+        assert "mnemon.hooks.auto_mirror" in cmd
+        # Timeout sized for both local-vault dispatch and remote HTTP
+        # round-trip without queuing the user-visible Claude Code event
+        # loop.
+        assert entry["hooks"][0]["timeout"] == 12
+
+    def test_hooks_config_post_tool_use_present_in_remote_mode_too(self):
+        """The auto-mirror hook fires in remote mode too — the dispatch
+        path is the same MemoryClient abstraction in both modes."""
+        hooks = _hooks_config(remote_url="https://example.fly.dev/mcp")
+        assert "PostToolUse" in hooks
+        cmd = hooks["PostToolUse"][0]["hooks"][0]["command"]
+        assert "auto_mirror" in cmd
 
     def test_hooks_config_no_session_start_without_remote_url(self):
         hooks = _hooks_config()
@@ -181,6 +208,11 @@ class TestSetupClaudeCode:
             settings = json.loads(settings_path.read_text())
             assert settings.get("mcpServers", {}).get("mnemon") is None
             assert "UserPromptSubmit" in settings["hooks"]
+            assert "PostToolUse" in settings["hooks"]
+            # Auto-mirror hook (0.6.0rc7) — verify the entry shape
+            ptu = settings["hooks"]["PostToolUse"]
+            assert ptu[0]["matcher"] == "Write|Edit|MultiEdit"
+            assert "auto_mirror" in ptu[0]["hooks"][0]["command"]
             assert "Stop" in settings["hooks"]
             assert "SessionStart" not in settings["hooks"]
             assert "local (in-process)" in result

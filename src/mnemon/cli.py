@@ -188,6 +188,18 @@ def main() -> None:
             print("  MNEMON_VAULT_NAME  vault name (default: default)")
             sys.exit(1)
 
+    elif command == "mirror":
+        # ``mnemon mirror <path>`` saves the contents of a memory file
+        # to mnemon. The path's frontmatter (``name``, ``description``,
+        # ``type``) drives the mnemon record's title/content/type. Used
+        # by the PostToolUse hook installed by ``mnemon setup`` so any
+        # Claude Code auto-memory write also lands in mnemon — closes
+        # the 2026-04-28 gap where local-memory writes silently
+        # diverged from the central vault. ``--auto`` short-circuits
+        # when the path doesn't match an auto-memory directory pattern.
+        from .mirror import run_cli
+        sys.exit(run_cli(args[1:]))
+
     elif command == "setup":
         # `mnemon setup` with no target auto-detects every installed
         # client and configures each. Explicit target names
@@ -408,6 +420,11 @@ Uninstall (remove all mnemon state from this machine):
 Server:
   mnemon serve              Start MCP server (stdio, local development)
   mnemon serve-remote       Start HTTP server (Streamable HTTP, production)
+
+Auto-mirror (PostToolUse hook installed by `mnemon setup`):
+  mnemon mirror <path>      Save a memory file (frontmatter-aware) to mnemon
+                            [--auto] no-op when path is outside auto-memory dirs
+                            [--timeout SEC] per-call client timeout (default 10)
 
 Local vault (development/server-side only):
   mnemon status             Show local vault health stats
