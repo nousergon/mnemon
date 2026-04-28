@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.6.0rc7] - 2026-04-28
+
+### Added
+
+- **PostToolUse auto-mirror hook.** Closes the longstanding gap where
+  Claude Code (and any other MCP client with a local auto-memory
+  system) writes memory files to its private store but never
+  propagates them to the central mnemon vault. The hook installed by
+  `mnemon setup` fires on every `Write` / `Edit` / `MultiEdit` tool
+  call, no-ops unless the touched file lives under an auto-memory
+  directory (`~/.claude/projects/*/memory/*.md` or
+  `~/.config/mnemon/auto-memory/*.md`), and otherwise dispatches the
+  file's contents to mnemon via the same `MemoryClient` abstraction
+  used by the existing UserPromptSubmit / Stop hooks. Local + remote
+  modes both supported. Errors are surfaced via stderr per the
+  no-silent-fails posture; the hook never blocks Claude Code's
+  continued operation. Motivated by the 2026-04-28 alpha-test
+  incident where a session handoff written to local memory was never
+  mirrored to mnemon. With auto-mirror installed, `mnemon setup` is
+  the only step required: subsequent client memory writes appear in
+  mnemon automatically.
+- **`mnemon mirror <path> [--auto] [--timeout SEC]`** CLI subcommand
+  that the hook shells out to. Reads the file, parses YAML
+  frontmatter (PyYAML when available, minimal fallback parser
+  otherwise), dispatches `memory_save` with `title` from the `name`
+  frontmatter field, `content_type` from `type` (default `note`),
+  `description` prepended to the body as an italicized line, and
+  `source_client = "mnemon-mirror"`. `--auto` short-circuits when the
+  path doesn't match an auto-memory pattern. Idempotent: SHA-256
+  (title + content) dedup with a 600s window via
+  `~/.mnemon/mirror_dedup.json` so repeat saves of the same content
+  within ten minutes skip cleanly. Sync-loop guard: files with
+  `mnemon_sync_source: <doc_id>` in frontmatter are skipped
+  (placeholder for future `mnemon sync down` integration).
+- **`mnemon.mirror`** module exposing `mirror_path()` for programmatic
+  use and `run_cli()` for the subcommand entry.
+
+### Tests
+
+- 22 new tests in `tests/test_mirror.py` covering the auto-memory
+  path filter, frontmatter parsing, the four save/skip outcomes,
+  error paths, and CLI exit codes.
+- 13 new tests in `tests/test_hooks_auto_mirror.py` for the hook
+  handler — file_path extraction, trigger-tool whitelist
+  (Write/Edit/MultiEdit), unrelated-tool no-op, malformed stdin
+  absorption, expected `MirrorError` surfacing, and unexpected
+  exception swallow with stderr surfacing.
+- 3 new assertions in `tests/test_setup.py` locking the PostToolUse
+  entry shape (matcher = `Write|Edit|MultiEdit`, command points at
+  `mnemon.hooks.auto_mirror`, 12s timeout) in both local and remote
+  modes, plus a `setup_claude_code` integration check that the entry
+  reaches `~/.claude/settings.json`.
+
+Full suite: 675 passed (+38 from this feature; 4 sandbox-only setup
+errors in `tests/test_integration_remote.py` pre-exist on `main`,
+not introduced here).
+
 ## [0.6.0rc6] - 2026-04-26
 
 ### Added

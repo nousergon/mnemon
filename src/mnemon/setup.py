@@ -110,6 +110,27 @@ def _hooks_config(remote_url: str | None = None) -> dict:
                 "hooks": user_prompt_hooks,
             },
         ],
+        # PostToolUse auto-mirror — added 2026-04-28 (mnemon 0.6.0rc7)
+        # to close the gap surfaced when Claude wrote handoff files to
+        # local auto-memory but failed to mirror them to mnemon. Hook
+        # fires on Write/Edit/MultiEdit, no-ops unless the touched file
+        # matches an auto-memory directory pattern. The hook itself
+        # absorbs all errors (exit 0) and surfaces failures via stderr
+        # so Claude sees them per feedback_surface_mnemon_unreachable.
+        # 12s timeout: the dispatch path is local-fast or remote-fast
+        # via the same MemoryClient abstraction; hookd doesn't queue.
+        "PostToolUse": [
+            {
+                "matcher": "Write|Edit|MultiEdit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{py} -m mnemon.hooks.auto_mirror",
+                        "timeout": 12,
+                    },
+                ],
+            },
+        ],
         "Stop": [
             {
                 "matcher": "",
@@ -496,6 +517,7 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
     if "hooks" not in settings:
         settings["hooks"] = {}
     settings["hooks"]["UserPromptSubmit"] = hooks["UserPromptSubmit"]
+    settings["hooks"]["PostToolUse"] = hooks["PostToolUse"]
     settings["hooks"]["Stop"] = hooks["Stop"]
     if "SessionStart" in hooks:
         settings["hooks"]["SessionStart"] = hooks["SessionStart"]
@@ -519,6 +541,7 @@ def setup_claude_code(*, remote_url: str | None = None, token: str | None = None
 
     hook_mode_tag = "remote" if remote_url else "local (in-process)"
     lines.append(f"  UserPromptSubmit: context-surfacing (8s, {hook_mode_tag})")
+    lines.append(f"  PostToolUse: auto-mirror (12s, {hook_mode_tag}) [Write|Edit|MultiEdit]")
     lines.append(f"  Stop: session-extractor (30s), handoff-generator (30s) [{hook_mode_tag}]")
     if remote_url:
         lines.append("  SessionStart: pre-warm polling (90s background)")
@@ -703,6 +726,7 @@ def setup_hooks(*, remote_url: str | None = None, token: str | None = None) -> s
     if "hooks" not in settings:
         settings["hooks"] = {}
     settings["hooks"]["UserPromptSubmit"] = hooks["UserPromptSubmit"]
+    settings["hooks"]["PostToolUse"] = hooks["PostToolUse"]
     settings["hooks"]["Stop"] = hooks["Stop"]
     if "SessionStart" in hooks:
         settings["hooks"]["SessionStart"] = hooks["SessionStart"]
@@ -721,6 +745,7 @@ def setup_hooks(*, remote_url: str | None = None, token: str | None = None) -> s
         ]
     out_lines += [
         "  UserPromptSubmit: context-surfacing (8s)",
+        "  PostToolUse: auto-mirror (12s) [Write|Edit|MultiEdit]",
         "  Stop: session-extractor (30s), handoff-generator (30s)",
     ]
     if remote_url:
