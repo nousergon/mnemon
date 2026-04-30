@@ -232,6 +232,124 @@ class TestReadTranscript:
         # With a budget of 30 chars, should pick up the last message first
         assert "Second message" in result
 
+    # ── Nested Claude Code wire format ─────────────────────────────────────
+    # Real Claude Code JSONL nests {role, content} under a ``message`` field
+    # alongside metadata (parentUuid, sessionId, timestamp, cwd, etc.).
+    # Before this support, read_transcript returned an empty string against
+    # every real session, silently breaking handoff_generator and
+    # session_extractor. Diagnosed 2026-04-29.
+
+    def test_reads_nested_claude_code_user_message(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        envelope = {
+            "type": "user",
+            "message": {"role": "user", "content": "How does X work?"},
+            "parentUuid": "abc",
+            "sessionId": "session-1",
+            "timestamp": "2026-04-29T22:30:00Z",
+            "cwd": "/tmp",
+        }
+        transcript.write_text(json.dumps(envelope))
+        result = read_transcript(str(transcript))
+        assert "[user]: How does X work?" in result
+
+    def test_reads_nested_claude_code_assistant_with_text_blocks(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        envelope = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "First reasoning step."},
+                    {"type": "tool_use", "name": "bash", "input": {"command": "ls"}},
+                    {"type": "text", "text": "Second reasoning step."},
+                ],
+            },
+            "uuid": "u1",
+        }
+        transcript.write_text(json.dumps(envelope))
+        result = read_transcript(str(transcript))
+        assert "First reasoning step." in result
+        assert "Second reasoning step." in result
+        # tool_use blocks are not text — must be excluded
+        assert "bash" not in result
+        assert "ls" not in result
+
+    def test_skips_non_message_envelopes(self, tmp_path):
+        # Real transcripts include lines like {"type": "file-history-snapshot",
+        # "snapshot": {...}} — no message field, no role. Must skip cleanly.
+        transcript = tmp_path / "transcript.jsonl"
+        lines = [
+            json.dumps({
+                "type": "file-history-snapshot",
+                "messageId": "xyz",
+                "snapshot": {"files": []},
+                "isSnapshotUpdate": False,
+            }),
+            json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": "Real message"},
+            }),
+        ]
+        transcript.write_text("\n".join(lines))
+        result = read_transcript(str(transcript))
+        assert "[user]: Real message" in result
+        assert "snapshot" not in result.lower()
+
+    def test_supports_both_flat_and_nested_in_same_transcript(self, tmp_path):
+        # Belt-and-suspenders: existing fixtures (flat) and real Claude Code
+        # output (nested) must both work. Don't regress the flat format.
+        transcript = tmp_path / "transcript.jsonl"
+        lines = [
+            json.dumps({"role": "user", "content": "Flat-format question"}),
+            json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": "Nested-format reply"},
+            }),
+        ]
+        transcript.write_text("\n".join(lines))
+        result = read_transcript(str(transcript))
+        assert "[user]: Flat-format question" in result
+        assert "[assistant]: Nested-format reply" in result
+
+    def test_nested_format_filters_non_user_assistant_roles(self, tmp_path):
+        transcript = tmp_path / "transcript.jsonl"
+        lines = [
+            json.dumps({
+                "type": "system",
+                "message": {"role": "system", "content": "Hidden system context"},
+            }),
+            json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": "Visible user turn"},
+            }),
+        ]
+        transcript.write_text("\n".join(lines))
+        result = read_transcript(str(transcript))
+        assert "[user]: Visible user turn" in result
+        assert "Hidden system context" not in result
+
+    def test_nested_format_assistant_with_only_tool_calls_yields_no_text(
+        self, tmp_path,
+    ):
+        # Common during agent runs: an assistant turn that's pure tool_use,
+        # no text. Should not contribute anything to the transcript (no
+        # [assistant]: empty entries).
+        transcript = tmp_path / "transcript.jsonl"
+        envelope = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "name": "bash", "input": {"command": "ls"}},
+                ],
+            },
+        }
+        transcript.write_text(json.dumps(envelope))
+        result = read_transcript(str(transcript))
+        # No text → no message line emitted → empty transcript
+        assert result == ""
+
 
 # ── context_surfacing.py: build_context ───────────────────────────────────────
 #
