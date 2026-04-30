@@ -115,7 +115,36 @@ def log_hook_error(hook_name: str, context: str, exc: BaseException) -> None:
 
 
 def read_transcript(transcript_path: str, max_chars: int = 8000) -> str:
-    """Read the last N characters from the transcript JSONL file."""
+    """Read the last N characters from the transcript JSONL file.
+
+    Supports two wire formats for the per-line message envelope:
+
+    1. **Flat (legacy / synthesized fixtures):** ``{"role": "user",
+       "content": "..."}`` — role and content at the top level of the
+       JSON object.
+    2. **Nested (real Claude Code JSONL):** ``{"type": "user", "message":
+       {"role": "user", "content": "..."}, ...}`` — role and content
+       under a nested ``message`` object alongside metadata fields like
+       ``parentUuid``, ``sessionId``, ``timestamp``, ``cwd``, etc.
+
+    Real Claude Code uses the nested format; before this was supported,
+    ``read_transcript`` returned an empty string against every real
+    session, silently breaking ``handoff_generator`` and
+    ``session_extractor`` (both call into this function).
+
+    ``content`` itself can be either a string or a list of content
+    blocks (Anthropic API tool-use shape — ``[{"type": "text", "text":
+    "..."}, {"type": "tool_use", ...}]``). Non-text blocks (tool_use,
+    tool_result, image, etc.) are skipped; only text blocks contribute
+    to the extracted transcript.
+
+    Skipped lines (no meaningful content):
+
+    - Lines without a recognizable user/assistant message envelope
+      (e.g. Claude Code's ``file-history-snapshot`` lines).
+    - Messages with no text content (e.g. an assistant turn that was
+      pure tool calls — common during agent runs).
+    """
     if not transcript_path:
         return ""
     path = Path(transcript_path)
@@ -131,22 +160,36 @@ def read_transcript(transcript_path: str, max_chars: int = 8000) -> str:
             if total_chars >= max_chars:
                 break
             try:
-                msg = json.loads(line)
-                role = msg.get("role", "unknown")
-                content = ""
-
-                if isinstance(msg.get("content"), str):
-                    content = msg["content"]
-                elif isinstance(msg.get("content"), list):
-                    content = "\n".join(
-                        c.get("text", "") for c in msg["content"] if c.get("type") == "text"
-                    )
-
-                if content and role in ("user", "assistant"):
-                    messages.insert(0, f"[{role}]: {content}")
-                    total_chars += len(content)
-            except (json.JSONDecodeError, KeyError):
+                envelope = json.loads(line)
+            except json.JSONDecodeError:
                 continue
+
+            # Accept both flat and nested wire formats. Nested is what
+            # real Claude Code emits; flat is what synthesized test
+            # fixtures use historically. ``inner`` is the dict that
+            # carries ``role`` + ``content``.
+            inner = envelope.get("message")
+            if not isinstance(inner, dict):
+                inner = envelope
+
+            role = inner.get("role", "unknown")
+            if role not in ("user", "assistant"):
+                continue
+
+            content = ""
+            raw_content = inner.get("content")
+            if isinstance(raw_content, str):
+                content = raw_content
+            elif isinstance(raw_content, list):
+                content = "\n".join(
+                    block.get("text", "")
+                    for block in raw_content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+
+            if content:
+                messages.insert(0, f"[{role}]: {content}")
+                total_chars += len(content)
 
         return "\n\n".join(messages)
     except Exception:
