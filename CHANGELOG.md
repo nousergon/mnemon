@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.6.0rc8] - 2026-04-29
+
+### Fixed
+
+- **`read_transcript` supports Claude Code's nested message envelope.**
+  Real Claude Code JSONL nests `{role, content}` under
+  `msg.message.role` / `msg.message.content` alongside metadata fields
+  (`parentUuid`, `sessionId`, `timestamp`, `cwd`, etc.). The existing
+  parser only handled the flat top-level `{"role": ..., "content":
+  ...}` format used by synthesized test fixtures, so it silently
+  returned an empty string against every real Claude Code session.
+  Result: `handoff_generator` and `session_extractor` Stop hooks both
+  short-circuit on the `len(transcript) < 200` check before saving
+  anything. Fix accepts both wire formats and tightens content-block
+  parsing so non-text blocks (`tool_use`, `tool_result`, `image`) are
+  explicitly skipped — only `{"type": "text", "text": ...}` blocks
+  contribute. PR #101.
+
+  Diagnosed against a real session JSONL: 1,151 lines, 0 with
+  top-level `role`, 814 with nested `message.role`. Live verified on
+  the same session post-fix: extracted 7,156 chars (was 0). Both Stop
+  hooks now save reliably from real Claude Code usage; the
+  productized auto-handoff infra finally works end-to-end against
+  the wire format Claude Code actually emits.
+
+### Tests
+
+- 6 new regression cases in `TestReadTranscript` using the nested
+  Claude Code wire format (envelope + metadata siblings + content as
+  list-of-blocks + `file-history-snapshot` lines + mixed flat/nested
+  in the same transcript). Test count 675 → 681.
+
 ## [0.6.0rc7] - 2026-04-28
 
 ### Added
