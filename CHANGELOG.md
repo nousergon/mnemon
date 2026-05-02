@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.6.0rc10] - 2026-05-02
+
+### Fixed
+
+- **MCP fresh-session deadlock — `json_response=True` for the
+  StreamableHTTP session manager.** `mnemon doctor`, any
+  `streamablehttp_client` consumer, and direct curl POSTs to `/mcp`
+  were hanging past 60s on `session.initialize()` against a freshly-
+  deployed rc9 server. Reproduces immediately on a fresh
+  `fly machine restart` — not stale state. Root cause: upstream's
+  `StreamableHTTPSessionManager._handle_stateful_request` holds
+  `_session_creation_lock` for the full duration of `handle_request`,
+  and in SSE response mode (`json_response=False`, the previous
+  default) `handle_request` keeps the per-session SSE stream open
+  until the client disconnects — so once one session is alive,
+  every fresh-session POST queues behind the lock indefinitely.
+  mnemon's tools are all single-shot RPCs, so the SSE channel buys
+  nothing and only exposes this hang. Fix: pin `json_response=True`
+  in `server_remote.run_remote` so each POST is a discrete request/
+  response pair. Symptom user-side was Claude Desktop `memory_save`
+  calls stalling indefinitely. PR #109.
+
+### Tests
+
+- New `TestSessionManagerConfig::test_session_manager_uses_json_response`
+  in `tests/test_server_remote.py` captures
+  `PersistentSessionManager` kwargs during `run_remote()` and asserts
+  `json_response=True` so this can't silently flip back. 688 → 689
+  passing.
+
 ## [0.6.0rc9] - 2026-05-02
 
 ### Fixed
