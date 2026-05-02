@@ -147,12 +147,24 @@ def run_remote() -> None:
             f"Pruned {expired} expired MCP session(s) from {sessions_db}",
             file=sys.stderr,
         )
+    # json_response=True flips StreamableHTTP into discrete request/
+    # response mode (one POST → one JSON body, no long-lived SSE stream
+    # per session). Required for mnemon: upstream's session-creation
+    # lock is held for the full duration of `handle_request`, and in
+    # SSE mode `handle_request` keeps the stream open until the client
+    # disconnects — so once one session is open, every fresh-session
+    # POST queues behind it indefinitely. mnemon's tools are all
+    # single-shot RPCs (no streaming, no server-initiated messages),
+    # so the SSE channel buys nothing and only exposes this hang.
+    # Symptom this fixes: `mnemon doctor` and any `streamablehttp_client`
+    # consumer timing out at session.initialize() while concurrent
+    # requests sit in the lock queue.
     mcp._session_manager = PersistentSessionManager(
         app=mcp._mcp_server,
         session_store=session_store,
         event_store=mcp._event_store,
         retry_interval=mcp._retry_interval,
-        json_response=mcp.settings.json_response,
+        json_response=True,
         stateless=mcp.settings.stateless_http,
         security_settings=mcp.settings.transport_security,
     )
