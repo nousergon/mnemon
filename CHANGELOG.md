@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.6.0rc9] - 2026-05-02
+
+### Fixed
+
+- **OAuth refresh-token rotation grace window.** A retried `/oauth/token`
+  call presenting an already-rotated refresh token within 60 seconds
+  now returns the *same* new pair (idempotent retry) instead of
+  `invalid_grant`. Closes a class of spontaneous claude.ai connector
+  disconnects: when Fly auto-stops the machine and a wake-on-request
+  cold-start delays the response, claude.ai's mcp-proxy retries the
+  refresh; the original request had already rotated the RT, so the
+  retry would brick the connector and force the user to manually
+  reconnect. The cache (`{key_dir}/rotated_tokens.json`) is persisted
+  to the same volume as `refresh_tokens.json` so it survives the very
+  Fly restarts that trigger the bug. Replay after the grace window
+  still returns `invalid_grant` — leaked-token defense preserved.
+  PR #107.
+
+### Tests
+
+- 3 new tests in `TestServeTokenRefreshGrant`: replay-within-grace
+  returns identical pair (covering 3 retries), replay-after-grace
+  rejected, and rotation-cache persists across simulated restart
+  (the Fly cold-start scenario). 1 existing test updated to reflect
+  the new replay-within-grace behavior. 684 → 688 passing.
+
 ## [0.6.0rc8] - 2026-04-29
 
 ### Fixed
