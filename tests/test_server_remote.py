@@ -49,6 +49,54 @@ class TestRemoteConfig:
             assert not config.enabled
 
 
+class TestSessionManagerConfig:
+    """Regression tests for the StreamableHTTP session manager wiring.
+
+    These pin ``json_response=True`` because flipping it back to False
+    re-introduces a hang: upstream's ``_session_creation_lock`` is held
+    for the full duration of ``handle_request``, and in SSE response
+    mode ``handle_request`` keeps the per-session SSE stream open until
+    the client disconnects — so once one session is alive, every
+    fresh-session POST queues behind the lock indefinitely. mnemon's
+    tools are all single-shot RPCs, so json_response=True is the
+    correct mode and must stay pinned True.
+    """
+
+    def test_session_manager_uses_json_response(self, monkeypatch, tmp_path):
+        """Capture the kwargs passed to PersistentSessionManager when
+        ``server_remote.main`` runs and assert ``json_response=True``.
+        Bails out via SystemExit after the manager is instantiated so
+        we don't actually start uvicorn."""
+        import sys
+
+        captured: dict = {}
+
+        def fake_manager(*args, **kwargs):
+            captured.update(kwargs)
+            raise SystemExit("captured — abort before uvicorn.run")
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.PersistentSessionManager", fake_manager
+        )
+        monkeypatch.setenv("MNEMON_LOCAL_TOKEN", "x" * 32)
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+        monkeypatch.setenv("MNEMON_PUBLIC_URL", "http://127.0.0.1:8502")
+        monkeypatch.setenv("MNEMON_ALLOWED_HOSTS", "127.0.0.1,127.0.0.1:8502")
+        monkeypatch.delenv("MNEMON_AS_ENABLED", raising=False)
+
+        for mod_name in ("mnemon.server_remote",):
+            sys.modules.pop(mod_name, None)
+        from mnemon.server_remote import run_remote
+
+        with pytest.raises(SystemExit):
+            run_remote()
+
+        assert captured.get("json_response") is True, (
+            f"PersistentSessionManager must be wired with json_response=True; "
+            f"got {captured.get('json_response')!r}. See class docstring for why."
+        )
+
+
 class TestMcpServer:
     def test_mcp_has_tools(self):
         from mnemon.server import mcp
