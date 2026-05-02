@@ -308,8 +308,19 @@ _AUTH_CODE_TTL_SEC = 600          # 10 min — RFC recommends ≤ 10 min
 _ACCESS_TOKEN_TTL_SEC = 3600      # 1 hour
 _REFRESH_TOKEN_TTL_SEC = 30 * 24 * 3600  # 30 days
 
+# After a refresh token is rotated, the old RT remains exchangeable for
+# the *same* new pair for this many seconds. Covers the case where the
+# token endpoint succeeded but the response didn't reach the client
+# (network blip, Fly cold-start delay, mcp-proxy retry) — the client's
+# retry presents the old RT, gets the same response back, and avoids
+# being kicked into a "reconnect required" state. Replay after this
+# window still returns invalid_grant. OAuth 2.1 recommends exactly this
+# pattern for rotating refresh tokens.
+_REFRESH_TOKEN_GRACE_SEC = 60
+
 _AUTH_CODES_FILENAME = "auth_codes.json"
 _REFRESH_TOKENS_FILENAME = "refresh_tokens.json"
+_ROTATED_TOKENS_FILENAME = "rotated_tokens.json"
 
 # Per-IP rate limit on failed /oauth/authorize passphrase attempts.
 # Deliberately in-memory (resets on restart) — this is best-effort
@@ -373,6 +384,23 @@ def _save_auth_codes(
 
 def _load_refresh_tokens(config: AuthorizationServerConfig) -> dict[str, dict[str, Any]]:
     return _load_token_file(_refresh_tokens_path(config), "refresh_tokens.json")
+
+
+def _rotated_tokens_path(config: AuthorizationServerConfig) -> Path:
+    return config.key_dir / _ROTATED_TOKENS_FILENAME
+
+
+def _load_rotated_tokens(config: AuthorizationServerConfig) -> dict[str, dict[str, Any]]:
+    """Load the rotated-RT idempotency cache, pruning entries past their
+    grace window. Used by /oauth/token to return the same new pair for a
+    retried refresh of an already-rotated RT."""
+    return _load_token_file(_rotated_tokens_path(config), "rotated_tokens.json")
+
+
+def _save_rotated_tokens(
+    config: AuthorizationServerConfig, entries: dict[str, dict[str, Any]]
+) -> None:
+    _save_token_file(_rotated_tokens_path(config), entries)
 
 
 def _save_refresh_tokens(
@@ -985,10 +1013,22 @@ async def _token_refresh(
         return
 
     # Rotation: consume the old refresh token regardless of outcome so a
-    # leaked token can only be used once.
+    # leaked token can only be used once. A small grace window (see
+    # _REFRESH_TOKEN_GRACE_SEC) lets a retried refresh of an already-
+    # rotated RT return the same new pair — without it, a network blip
+    # between the token endpoint and the client (claude.ai's mcp-proxy,
+    # in particular) silently bricks the connector.
     tokens = _load_refresh_tokens(config)
     record = tokens.pop(refresh_token, None)
     if record is None:
+        # Not in the live set. Check the rotated-RT cache: if this RT was
+        # rotated within the grace window, return the same pair we
+        # issued then (idempotent retry).
+        rotated = _load_rotated_tokens(config)
+        cached = rotated.get(refresh_token)
+        if cached is not None:
+            await _send_json(send, 200, cached["response"])
+            return
         await _send_json(send, 400, {
             "error": "invalid_grant",
             "error_description": "unknown, expired, or already-rotated refresh token",
@@ -1002,13 +1042,24 @@ async def _token_refresh(
         })
         return
 
-    tokens = _issue_token_pair(
+    new_pair = _issue_token_pair(
         config,
         subject=record["subject"],
         scope=record["scope"],
         client_id=record["client_id"],
     )
-    await _send_json(send, 200, tokens)
+
+    # Cache the response keyed by the *old* RT so a retried request with
+    # that RT gets the same pair back. expires_at drives the prune in
+    # _load_token_file, so the entry self-cleans after the grace window.
+    rotated = _load_rotated_tokens(config)
+    rotated[refresh_token] = {
+        "response": new_pair,
+        "expires_at": _now() + _REFRESH_TOKEN_GRACE_SEC,
+    }
+    _save_rotated_tokens(config, rotated)
+
+    await _send_json(send, 200, new_pair)
 
 
 # ── /oauth/register — Dynamic Client Registration (RFC 7591) ────────────────

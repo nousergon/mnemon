@@ -830,12 +830,143 @@ class TestServeTokenRefreshGrant:
         assert second["access_token"] != first["access_token"]
         assert second["refresh_token"] != first["refresh_token"]
 
-        # Old refresh token is now invalid.
+        # Old refresh token still works *within the grace window*, but
+        # returns the same new pair (idempotent retry support — see
+        # _REFRESH_TOKEN_GRACE_SEC). Replay after the window is rejected;
+        # that case is exercised in test_refresh_token_replay_after_grace_rejected.
         status3, _, body3 = await _run_asgi(
             serve_token, as_config, method="POST", body=refresh_form
         )
-        assert status3 == 400
-        assert b"invalid_grant" in body3
+        assert status3 == 200
+        third = json.loads(body3)
+        assert third == second
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_replay_within_grace_returns_same_pair(
+        self, as_config, registered_client
+    ):
+        """A retried /oauth/token call presenting an already-rotated RT
+        within the grace window must return the exact same response —
+        same access_token, same refresh_token. This is the bug that
+        spontaneously disconnected the claude.ai mnemon connector when
+        a network blip caused mcp-proxy to retry a successful refresh."""
+        from mnemon.oauth_as import serve_token
+
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
+        from urllib.parse import urlencode
+        code_form = urlencode({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": params["redirect_uri"],
+            "client_id": params["client_id"],
+            "code_verifier": verifier,
+        }).encode()
+        _, _, body1 = await _run_asgi(serve_token, as_config, method="POST", body=code_form)
+        first = json.loads(body1)
+
+        refresh_form = urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": first["refresh_token"],
+        }).encode()
+        _, _, body2 = await _run_asgi(serve_token, as_config, method="POST", body=refresh_form)
+        rotated_pair = json.loads(body2)
+
+        # Three more retries with the *same* old RT — all within the
+        # grace window — must each return the same rotated pair.
+        for _ in range(3):
+            status, _, body = await _run_asgi(
+                serve_token, as_config, method="POST", body=refresh_form
+            )
+            assert status == 200
+            assert json.loads(body) == rotated_pair
+
+    @pytest.mark.asyncio
+    async def test_refresh_token_replay_after_grace_rejected(
+        self, as_config, registered_client, monkeypatch
+    ):
+        """Replay of an already-rotated RT *after* the grace window
+        expires must fail with invalid_grant — the grace window is for
+        idempotent retries, not indefinite token reuse."""
+        import mnemon.oauth_as as oauth_as
+        from mnemon.oauth_as import serve_token
+
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
+        from urllib.parse import urlencode
+        code_form = urlencode({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": params["redirect_uri"],
+            "client_id": params["client_id"],
+            "code_verifier": verifier,
+        }).encode()
+        _, _, body1 = await _run_asgi(serve_token, as_config, method="POST", body=code_form)
+        first = json.loads(body1)
+
+        refresh_form = urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": first["refresh_token"],
+        }).encode()
+        await _run_asgi(serve_token, as_config, method="POST", body=refresh_form)
+
+        # Advance the clock past the grace window. The cached entry's
+        # expires_at < now means _load_token_file's prune drops it on
+        # next read, so the replay falls through to invalid_grant.
+        real_now = oauth_as._now
+        monkeypatch.setattr(
+            oauth_as, "_now", lambda: real_now() + oauth_as._REFRESH_TOKEN_GRACE_SEC + 1
+        )
+        status, _, body = await _run_asgi(
+            serve_token, as_config, method="POST", body=refresh_form
+        )
+        assert status == 400
+        assert b"invalid_grant" in body
+
+    @pytest.mark.asyncio
+    async def test_rotation_grace_persists_across_restart(
+        self, as_config, registered_client
+    ):
+        """The rotation cache lives in rotated_tokens.json on the same
+        volume as refresh_tokens.json, so a Fly cold-start between the
+        original rotation and the retry must still serve the cached
+        pair. Without persistence, a wake-on-request retry would brick
+        the connector — exactly the regression we're guarding against."""
+        from mnemon.oauth_as import (
+            serve_token,
+            _load_rotated_tokens,
+            _save_rotated_tokens,
+        )
+
+        code, verifier, params = await _issue_code(as_config, registered_client["client_id"])
+        from urllib.parse import urlencode
+        code_form = urlencode({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": params["redirect_uri"],
+            "client_id": params["client_id"],
+            "code_verifier": verifier,
+        }).encode()
+        _, _, body1 = await _run_asgi(serve_token, as_config, method="POST", body=code_form)
+        first = json.loads(body1)
+
+        refresh_form = urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": first["refresh_token"],
+        }).encode()
+        _, _, body2 = await _run_asgi(serve_token, as_config, method="POST", body=refresh_form)
+        rotated_pair = json.loads(body2)
+
+        # Simulate a process restart by round-tripping the rotated cache
+        # through the on-disk file. If persistence is broken, the retry
+        # below will fail with invalid_grant.
+        cache = _load_rotated_tokens(as_config)
+        assert first["refresh_token"] in cache
+        _save_rotated_tokens(as_config, cache)
+
+        status, _, body = await _run_asgi(
+            serve_token, as_config, method="POST", body=refresh_form
+        )
+        assert status == 200
+        assert json.loads(body) == rotated_pair
 
     @pytest.mark.asyncio
     async def test_unknown_refresh_token_rejected(self, as_config):
