@@ -314,16 +314,15 @@ class TestMetricsCounters:
         assert manager.metrics()["resume_hits"] == 1
 
     async def test_fresh_init_increments_counter(self, tmp_path, monkeypatch):
+        """Fresh-init now flows through ``_create_new_session`` rather
+        than upstream's locked path. Patch that directly so we don't
+        have to spin up a real task group."""
         manager = self._make_manager(tmp_path)
 
-        async def fake_super(self, scope, receive, send):  # noqa: ANN001
+        async def fake_create(scope, receive, send):
             pass
 
-        monkeypatch.setattr(
-            "mnemon.persistent_sessions.StreamableHTTPSessionManager."
-            "_handle_stateful_request",
-            fake_super,
-        )
+        monkeypatch.setattr(manager, "_create_new_session", fake_create)
         await manager._handle_stateful_request(
             self._scope(None), self._noop_receive, self._noop_send
         )
@@ -500,3 +499,257 @@ class TestPeriodicExpireTask:
             "Periodic session prune raised" in rec.message
             for rec in caplog.records
         )
+
+
+# ---------------------------------------------------------------------------
+# Narrow-lock contract — _session_creation_lock must be released BEFORE
+# transport.handle_request is awaited, so a wedged handler can't block
+# subsequent fresh-init / resume requests from acquiring the lock
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+class TestSessionCreationLockNarrowing:
+    """Regression coverage for the 2026-05-06 lock-held wedge.
+
+    Symptom: upstream's ``_handle_stateful_request`` held
+    ``_session_creation_lock`` for the full duration of a fresh-init
+    request including ``transport.handle_request``. When that handler
+    wedged for any reason (observed in prod), every subsequent fresh-
+    init queued behind the lock and timed out at the client side.
+
+    Fix: narrow the lock to only the ``_server_instances`` mutation in
+    both ``_create_new_session`` and ``_resume_session``. After the
+    lock releases, the dispatch (``transport.handle_request``) runs
+    outside it, so concurrent fresh-init / resume requests can proceed
+    even if one handler is stuck.
+    """
+
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    @staticmethod
+    def _make_manager(tmp_path):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        return PersistentSessionManager(
+            app=MagicMock(name="mcp_server"), session_store=store
+        )
+
+    @staticmethod
+    def _scope(session_id: bytes | None):
+        headers = []
+        if session_id is not None:
+            headers.append((b"mcp-session-id", session_id))
+        return {"type": "http", "method": "POST", "path": "/mcp", "headers": headers}
+
+    @staticmethod
+    async def _noop_receive():  # pragma: no cover
+        return {"type": "http.disconnect"}
+
+    @staticmethod
+    async def _noop_send(_):  # pragma: no cover
+        pass
+
+    async def test_create_new_session_releases_lock_before_handle_request(
+        self, tmp_path, monkeypatch
+    ):
+        """Probe the narrow-lock invariant: when ``transport.handle_request``
+        is awaited, ``_session_creation_lock`` must already be released.
+
+        We patch ``handle_request`` to assert the lock is non-locked at
+        call time. Pre-fix this would have failed (lock still held).
+        """
+        import anyio
+
+        manager = self._make_manager(tmp_path)
+
+        # Stub task_group so _create_new_session doesn't need a real run().
+        class _FakeTaskGroup:
+            async def start(self, _coro):
+                return None
+
+        manager._task_group = _FakeTaskGroup()  # type: ignore[assignment]
+
+        observed = {"locked_during_dispatch": None}
+
+        async def fake_handle_request(self_transport, scope, receive, send):
+            # If the lock is held here, the narrow-lock invariant is broken.
+            observed["locked_during_dispatch"] = (
+                manager._session_creation_lock.locked()
+            )
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPServerTransport."
+            "handle_request",
+            fake_handle_request,
+        )
+
+        await manager._create_new_session(
+            self._scope(None), self._noop_receive, self._noop_send
+        )
+
+        assert observed["locked_during_dispatch"] is False, (
+            "_session_creation_lock was still held when handle_request was "
+            "awaited — narrow-lock invariant broken"
+        )
+
+    async def test_resume_session_releases_lock_before_handle_request(
+        self, tmp_path, monkeypatch
+    ):
+        manager = self._make_manager(tmp_path)
+        manager._session_store.register("survivor")
+
+        class _FakeTaskGroup:
+            async def start(self, _coro):
+                return None
+
+        manager._task_group = _FakeTaskGroup()  # type: ignore[assignment]
+
+        observed = {"locked_during_dispatch": None}
+
+        async def fake_handle_request(self_transport, scope, receive, send):
+            observed["locked_during_dispatch"] = (
+                manager._session_creation_lock.locked()
+            )
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPServerTransport."
+            "handle_request",
+            fake_handle_request,
+        )
+
+        await manager._resume_session(
+            "survivor", self._scope(b"survivor"), self._noop_receive, self._noop_send
+        )
+
+        assert observed["locked_during_dispatch"] is False
+
+    async def test_wedged_handler_does_not_block_concurrent_fresh_init(
+        self, tmp_path, monkeypatch
+    ):
+        """The reproduction we lived through: one fresh-init handler
+        hangs forever (simulated). A second fresh-init request must
+        still be able to acquire the lock + register its session and
+        reach its own ``handle_request`` call. Pre-fix this hung
+        forever; post-fix it completes."""
+        import anyio
+
+        manager = self._make_manager(tmp_path)
+
+        class _FakeTaskGroup:
+            async def start(self, _coro):
+                return None
+
+        manager._task_group = _FakeTaskGroup()  # type: ignore[assignment]
+
+        wedge_event = anyio.Event()
+        second_dispatched = anyio.Event()
+
+        async def fake_handle_request(self_transport, scope, receive, send):
+            # First call hangs forever; second completes immediately.
+            if not wedge_event.is_set():
+                wedge_event.set()
+                await anyio.sleep_forever()
+            else:
+                second_dispatched.set()
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPServerTransport."
+            "handle_request",
+            fake_handle_request,
+        )
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                manager._create_new_session,
+                self._scope(None),
+                self._noop_receive,
+                self._noop_send,
+            )
+            # Wait for the first request to be IN handle_request (lock
+            # released, hang in progress).
+            await wedge_event.wait()
+            # Second request should sail through.
+            tg.start_soon(
+                manager._create_new_session,
+                self._scope(None),
+                self._noop_receive,
+                self._noop_send,
+            )
+            with anyio.fail_after(2.0):
+                await second_dispatched.wait()
+            tg.cancel_scope.cancel()
+
+        assert second_dispatched.is_set()
+
+    async def test_concurrent_fresh_inits_get_distinct_session_ids(
+        self, tmp_path, monkeypatch
+    ):
+        """Sanity: each fresh-init mints its own session_id. The narrow
+        lock still serializes ``_server_instances`` writes so two
+        sessions can't end up with the same key."""
+        manager = self._make_manager(tmp_path)
+
+        class _FakeTaskGroup:
+            async def start(self, _coro):
+                return None
+
+        manager._task_group = _FakeTaskGroup()  # type: ignore[assignment]
+
+        async def fake_handle_request(self_transport, scope, receive, send):
+            return None
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPServerTransport."
+            "handle_request",
+            fake_handle_request,
+        )
+
+        import anyio
+
+        async with anyio.create_task_group() as tg:
+            for _ in range(5):
+                tg.start_soon(
+                    manager._create_new_session,
+                    self._scope(None),
+                    self._noop_receive,
+                    self._noop_send,
+                )
+
+        assert len(manager._server_instances) == 5
+        # All session_ids unique
+        assert len(set(manager._server_instances.keys())) == 5
+
+    async def test_resume_race_lost_falls_through_to_in_memory_path(
+        self, tmp_path, monkeypatch
+    ):
+        """Race-guard: if another coroutine resumed the session while
+        we were waiting for the lock, drop our minted transport and
+        delegate to upstream's lock-free in-memory hit branch."""
+        import anyio
+
+        manager = self._make_manager(tmp_path)
+        manager._session_store.register("survivor")
+        # Pre-populate _server_instances so the race-guard fires.
+        manager._server_instances["survivor"] = MagicMock(name="winning_transport")
+
+        super_called = {"yes": False}
+
+        async def fake_super(self, scope, receive, send):
+            super_called["yes"] = True
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPSessionManager."
+            "_handle_stateful_request",
+            fake_super,
+        )
+
+        await manager._resume_session(
+            "survivor",
+            self._scope(b"survivor"),
+            self._noop_receive,
+            self._noop_send,
+        )
+
+        assert super_called["yes"] is True

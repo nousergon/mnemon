@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.6.0rc13] - 2026-05-06
+
+### Fixed
+
+- **Fresh-init MCP requests wedged the server-wide session-creation lock.**
+  Diagnosed live during the rc12 soak: `mnemon doctor` and any
+  `streamablehttp_client` consumer that opens a new MCP session
+  ([no `Mcp-Session-Id` header) hung past 15s while warm-keeper
+  PingRequests and tool calls on existing sessions kept working. Direct
+  curl confirmed: `tools/list` with the persisted session ID returned
+  in <300ms; `initialize` with no session ID hung 20s with no
+  `Processing request of type` log on the server. Root cause: upstream
+  `StreamableHTTPSessionManager._handle_stateful_request` holds
+  `_session_creation_lock` for the **full** duration of the new-session
+  branch — including the `await transport.handle_request(...)` that
+  dispatches the JSON-RPC payload and waits for the response. If that
+  handler wedges for any reason (we never identified the underlying
+  trigger, but the wedge reproduced reliably across rc11 and rc12
+  fresh-deploys), every subsequent fresh-init queues behind the lock
+  and times out at the client side. PR #109 patched the SSE-mode
+  variant of this same lock-held-too-long pattern; the
+  `json_response=True` variant still had its own way to wedge.
+
+  Fix: `PersistentSessionManager` now bypasses upstream's locked path
+  for fresh-init via a new `_create_new_session` method that holds
+  `_session_creation_lock` only for the brief `_server_instances`
+  mutation, then releases before `task_group.start()` and
+  `transport.handle_request()`. `_resume_session` got the same
+  narrowing — the lock now covers only the race-guard read + dict
+  write, not the dispatch. One wedged handler can no longer take down
+  the server's ability to accept new sessions.
+
+### Tests
+
+- `TestSessionCreationLockNarrowing` (5 cases) in
+  `tests/test_persistent_sessions.py`: lock-released-before-dispatch
+  invariant for both `_create_new_session` and `_resume_session`,
+  wedged-handler-doesn't-block-concurrent-fresh-init reproduction
+  (this directly mirrors the live-prod symptom), 5-concurrent-fresh-
+  inits-get-distinct-ids sanity, and resume-race-lost-falls-through
+  coverage. 708 → 713 passing.
+
 ## [0.6.0rc12] - 2026-05-06
 
 ### Fixed

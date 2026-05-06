@@ -33,6 +33,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskStatus
@@ -314,21 +315,25 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
             await self._resume_session(session_id, scope, receive, send)
             return
 
-        # Either a brand-new session (no header) or an unknown session
-        # ID we never issued / has expired. Upstream handles both — new
-        # session creation will write through _PersistingInstanceDict.
+        # Fresh-init or stale. Branch BEFORE delegating: fresh-init
+        # takes our narrow-lock path (see _create_new_session); stale
+        # delegates to upstream's lock-free 404 path.
         if session_id is None:
             self._counters["fresh_inits"] += 1
-        else:
-            # Stale: client sent a session ID we never issued or that
-            # expired. Upstream returns 404 — this is the actual
-            # "Session not found" surface seen by clients.
-            self._counters["stale_session_misses"] += 1
-            logger.warning(
-                "Stale session_id %s — not in memory, not in SQLite. "
-                "Upstream will return 404 per MCP spec.",
-                session_id,
-            )
+            await self._create_new_session(scope, receive, send)
+            return
+
+        # Stale: client sent a session ID we never issued or that
+        # expired. Upstream returns 404 — this is the actual
+        # "Session not found" surface seen by clients. The 404 branch
+        # in upstream does NOT acquire _session_creation_lock, so
+        # delegating here is safe even when the lock is contended.
+        self._counters["stale_session_misses"] += 1
+        logger.warning(
+            "Stale session_id %s — not in memory, not in SQLite. "
+            "Upstream will return 404 per MCP spec.",
+            session_id,
+        )
         await super()._handle_stateful_request(scope, receive, send)
 
     async def _resume_session(
@@ -344,68 +349,163 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         but reuses the supplied session_id instead of minting a fresh one
         and runs the MCP app stateless so the server-side ServerSession
         is born already-initialized.
+
+        Lock scope is deliberately narrow: ``_session_creation_lock`` is
+        held only for the race-guard read + ``_server_instances`` write,
+        then released before ``transport.handle_request`` is awaited.
+        See :meth:`_create_new_session` for the rationale; same wedge
+        risk applies here.
         """
+        transport = StreamableHTTPServerTransport(
+            mcp_session_id=session_id,
+            is_json_response_enabled=self.json_response,
+            event_store=self.event_store,
+            security_settings=self.security_settings,
+            retry_interval=self.retry_interval,
+        )
+
+        async def run_server(
+            *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+        ) -> None:
+            async with transport.connect() as streams:
+                read_stream, write_stream = streams
+                task_status.started()
+                try:
+                    idle_scope = anyio.CancelScope()
+                    if self.session_idle_timeout is not None:
+                        idle_scope.deadline = (
+                            anyio.current_time() + self.session_idle_timeout
+                        )
+                        transport.idle_scope = idle_scope
+
+                    with idle_scope:
+                        # stateless=True is the resume trick: the
+                        # ServerSession is constructed with
+                        # InitializationState.Initialized so it does
+                        # not block waiting for an InitializeRequest
+                        # the client will never re-send.
+                        await self.app.run(
+                            read_stream,
+                            write_stream,
+                            self.app.create_initialization_options(),
+                            stateless=True,
+                        )
+
+                    if idle_scope.cancelled_caught:
+                        logger.info(
+                            "Resumed session %s idle timeout", session_id
+                        )
+                        self._server_instances.pop(session_id, None)
+                        await transport.terminate()
+                except Exception:
+                    logger.exception("Resumed session %s crashed", session_id)
+                finally:
+                    if (
+                        transport.mcp_session_id
+                        and transport.mcp_session_id in self._server_instances
+                        and not transport.is_terminated
+                    ):
+                        del self._server_instances[transport.mcp_session_id]
+
+        # Narrow lock: race-guard + dict mutation only.
         async with self._session_creation_lock:
-            # Race guard: another concurrent request may have already
-            # resumed this session while we were waiting for the lock.
             if session_id in self._server_instances:
+                # Race lost: another concurrent request resumed the
+                # session while we were minting our transport. Drop
+                # ours and fall through to the in-memory hit path.
                 self._session_store.touch(session_id)
-                await super()._handle_stateful_request(scope, receive, send)
-                return
+                race_lost = True
+            else:
+                self._server_instances[session_id] = transport
+                self._session_store.touch(session_id)
+                race_lost = False
 
-            transport = StreamableHTTPServerTransport(
-                mcp_session_id=session_id,
-                is_json_response_enabled=self.json_response,
-                event_store=self.event_store,
-                security_settings=self.security_settings,
-                retry_interval=self.retry_interval,
-            )
-            self._server_instances[session_id] = transport
-            self._session_store.touch(session_id)
+        if race_lost:
+            # Outside the lock — upstream's in-memory hit path is
+            # lock-free, so delegating here can't reintroduce the
+            # bottleneck.
+            await super()._handle_stateful_request(scope, receive, send)
+            return
 
-            async def run_server(
-                *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
-            ) -> None:
-                async with transport.connect() as streams:
-                    read_stream, write_stream = streams
-                    task_status.started()
-                    try:
-                        idle_scope = anyio.CancelScope()
-                        if self.session_idle_timeout is not None:
-                            idle_scope.deadline = (
-                                anyio.current_time() + self.session_idle_timeout
-                            )
-                            transport.idle_scope = idle_scope
+        assert self._task_group is not None
+        await self._task_group.start(run_server)
+        await transport.handle_request(scope, receive, send)
 
-                        with idle_scope:
-                            # stateless=True is the resume trick: the
-                            # ServerSession is constructed with
-                            # InitializationState.Initialized so it does
-                            # not block waiting for an InitializeRequest
-                            # the client will never re-send.
-                            await self.app.run(
-                                read_stream,
-                                write_stream,
-                                self.app.create_initialization_options(),
-                                stateless=True,
-                            )
+    async def _create_new_session(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        """Mint + register a fresh MCP session, then dispatch outside the lock.
 
-                        if idle_scope.cancelled_caught:
-                            logger.info(
-                                "Resumed session %s idle timeout", session_id
-                            )
-                            self._server_instances.pop(session_id, None)
-                            await transport.terminate()
-                    except Exception:
-                        logger.exception("Resumed session %s crashed", session_id)
-                    finally:
-                        if (
-                            transport.mcp_session_id
-                            and transport.mcp_session_id in self._server_instances
-                            and not transport.is_terminated
-                        ):
-                            del self._server_instances[transport.mcp_session_id]
+        Mirrors upstream's new-session creation logic but narrows
+        ``_session_creation_lock`` to cover only the brief
+        ``_server_instances`` mutation. Upstream holds the lock for the
+        full ``handle_request`` await, which made the lock a single
+        point of failure: on 2026-05-06 a wedged fresh-init handler
+        held the lock and every subsequent fresh-init request queued
+        behind it and timed out at the client side, while in-memory
+        hits and resumes (which don't need the lock) kept working.
+        Releasing earlier means one wedged handler can't take down the
+        server's ability to accept new sessions.
+        """
+        new_session_id = uuid4().hex
+        transport = StreamableHTTPServerTransport(
+            mcp_session_id=new_session_id,
+            is_json_response_enabled=self.json_response,
+            event_store=self.event_store,
+            security_settings=self.security_settings,
+            retry_interval=self.retry_interval,
+        )
 
-            assert self._task_group is not None
-            await self._task_group.start(run_server)
-            await transport.handle_request(scope, receive, send)
+        async def run_server(
+            *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+        ) -> None:
+            async with transport.connect() as streams:
+                read_stream, write_stream = streams
+                task_status.started()
+                try:
+                    idle_scope = anyio.CancelScope()
+                    if self.session_idle_timeout is not None:
+                        idle_scope.deadline = (
+                            anyio.current_time() + self.session_idle_timeout
+                        )
+                        transport.idle_scope = idle_scope
+
+                    with idle_scope:
+                        await self.app.run(
+                            read_stream,
+                            write_stream,
+                            self.app.create_initialization_options(),
+                            stateless=False,
+                        )
+
+                    if idle_scope.cancelled_caught:
+                        logger.info(
+                            "Session %s idle timeout", new_session_id
+                        )
+                        self._server_instances.pop(new_session_id, None)
+                        await transport.terminate()
+                except Exception:
+                    logger.exception(
+                        "Session %s crashed", new_session_id
+                    )
+                finally:
+                    if (
+                        transport.mcp_session_id
+                        and transport.mcp_session_id in self._server_instances
+                        and not transport.is_terminated
+                    ):
+                        del self._server_instances[transport.mcp_session_id]
+
+        # Narrow lock: only the dict mutation needs to be serialized.
+        # transport.connect() / app.run() / transport.handle_request()
+        # are all per-session — no shared state between concurrent
+        # fresh-init requests.
+        async with self._session_creation_lock:
+            self._server_instances[new_session_id] = transport
+
+        assert self._task_group is not None
+        await self._task_group.start(run_server)
+        await transport.handle_request(scope, receive, send)
