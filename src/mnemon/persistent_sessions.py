@@ -26,9 +26,11 @@ stop, deploy).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +50,13 @@ from starlette.types import Receive, Scope, Send
 logger = logging.getLogger(__name__)
 
 DEFAULT_TTL_SECONDS = 7 * 24 * 3600
+
+# How often the in-process periodic prune task wakes up to call
+# SessionStore.expire_old(). Bounded growth of mcp_sessions.sqlite under
+# long warm uptimes — 6h matches the soak-watch-list note in ROADMAP.
+# Set to 0 to disable (e.g. tests that don't want a background task
+# bleeding into other test files).
+DEFAULT_EXPIRE_INTERVAL_SECONDS = 6 * 3600
 
 
 class SessionStore:
@@ -195,6 +204,7 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         security_settings: TransportSecuritySettings | None = None,
         retry_interval: int | None = None,
         session_idle_timeout: float | None = None,
+        expire_interval_seconds: int = DEFAULT_EXPIRE_INTERVAL_SECONDS,
     ) -> None:
         super().__init__(
             app=app,
@@ -207,6 +217,13 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         )
         self._session_store = session_store
         self._server_instances = _PersistingInstanceDict(session_store)
+        # 0 disables periodic pruning entirely (startup-only, the prior
+        # behavior). Non-zero spawns a background task during run() that
+        # ticks every N seconds and calls expire_old(). This matters for
+        # long warm uptimes (no cold-stop, no redeploy): the persisted-
+        # sessions table otherwise grows monotonically until the next
+        # restart.
+        self._expire_interval_seconds = expire_interval_seconds
         # Process-lifetime counters scraped via /health for cold-stop diagnosis.
         # Single-event-loop server, so plain ints are race-free without a Lock.
         # NOTE: scripts/check_health.py reads these key names directly. If you
@@ -232,6 +249,46 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
             "persisted_sessions_total": self._session_store.count(),
             "in_memory_sessions_current": len(self._server_instances),
         }
+
+    @contextlib.asynccontextmanager
+    async def run(self) -> AsyncIterator[None]:
+        """Lifespan wrapper that adds a periodic ``expire_old()`` task.
+
+        Upstream's ``run()`` creates the task group + sets
+        ``self._task_group``. We layer on a background coroutine that
+        ticks every ``expire_interval_seconds`` and prunes the
+        persisted-sessions table. The task is started inside the parent
+        task group so it auto-cancels on lifespan shutdown — no explicit
+        teardown needed.
+        """
+        async with super().run():
+            if self._expire_interval_seconds > 0:
+                assert self._task_group is not None
+                await self._task_group.start(self._run_periodic_expire)
+            yield
+
+    async def _run_periodic_expire(
+        self, *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+    ) -> None:
+        """Wake every ``expire_interval_seconds`` and prune expired rows.
+
+        Failures are logged and swallowed — losing one prune cycle to a
+        transient SQLite hiccup must not crash the manager and take
+        every active session with it. The next tick retries.
+        """
+        task_status.started()
+        while True:
+            await anyio.sleep(self._expire_interval_seconds)
+            try:
+                expired = self._session_store.expire_old()
+            except Exception:  # noqa: BLE001
+                logger.exception("Periodic session prune raised; retrying next tick")
+                continue
+            if expired:
+                logger.info(
+                    "Periodic prune: removed %d expired MCP session(s)",
+                    expired,
+                )
 
     async def _handle_stateful_request(
         self,

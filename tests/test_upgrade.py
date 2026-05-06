@@ -50,6 +50,10 @@ def _isolate_env(monkeypatch, tmp_path):
     # Provide AWS creds so _fly_set_secrets doesn't error out.
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "SECRETTEST")
+    # Disable the post-deploy settle wait so Layer 1 tests don't pay
+    # 30s of real wall-clock time on every doctor-invoking path.
+    # The settle test class re-enables it explicitly.
+    monkeypatch.setenv("MNEMON_UPGRADE_SETTLE_SECONDS", "0")
     yield
 
 
@@ -526,3 +530,136 @@ class TestUpgradeWebRedeploy:
         mock_exists.assert_not_called()
         mock_deploy.assert_not_called()
         assert "http://localhost:8502/mcp" in result
+
+
+class TestPostDeploySettleWindow:
+    """The post-deploy settle wait gives a freshly-redeployed Fly machine
+    a quiet window before doctor's 7 rapid-fire probes hit it. This is
+    the rc11-deploy fix from 2026-05-06 — without it, doctor wedges
+    against an in-progress FastEmbed pre-load + cold session manager.
+    """
+
+    def test_settle_called_between_deploy_and_doctor_on_redeploy(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "mnemon.config.vault_dir", lambda: tmp_path / ".mnemon"
+        )
+
+        order: list[str] = []
+
+        def _record_deploy(workdir, app_name):  # noqa: ARG001
+            order.append("deploy")
+
+        def _record_settle():
+            order.append("settle")
+
+        def _record_doctor(*_args, **_kwargs):
+            order.append("doctor")
+            return 0
+
+        with patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=True), \
+            patch("mnemon.upgrade._fly_deploy", side_effect=_record_deploy), \
+            patch(
+                "mnemon.upgrade._settle_after_deploy",
+                side_effect=_record_settle,
+            ), \
+            patch(
+                "mnemon.doctor.run_doctor",
+                side_effect=_record_doctor,
+            ):
+            upgrade_web(
+                app_name="mnemon-test-existing",
+                mnemon_version="0.6.0rc12",
+                skip_doctor=False,
+            )
+
+        assert order == ["deploy", "settle", "doctor"]
+
+    def test_settle_skipped_when_skip_doctor_true(self, tmp_path, monkeypatch):
+        """If the user opted out of doctor, there's no probe to settle
+        before — don't make them wait 30s for nothing."""
+        monkeypatch.setattr(
+            "mnemon.config.vault_dir", lambda: tmp_path / ".mnemon"
+        )
+
+        with patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=True), \
+            patch("mnemon.upgrade._fly_deploy"), \
+            patch("mnemon.upgrade._settle_after_deploy") as mock_settle:
+            upgrade_web(
+                app_name="mnemon-test-existing",
+                mnemon_version="0.6.0rc12",
+                skip_doctor=True,
+            )
+
+        mock_settle.assert_not_called()
+
+    def test_settle_honors_env_override_to_zero(self, monkeypatch):
+        """Tests + scripted upgrades disable the wait via env var.
+        ``0`` returns immediately without sleeping."""
+        import time as _time
+
+        monkeypatch.setenv("MNEMON_UPGRADE_SETTLE_SECONDS", "0")
+        with patch.object(_time, "sleep") as mock_sleep:
+            upgrade._settle_after_deploy()
+        mock_sleep.assert_not_called()
+
+    def test_settle_honors_env_override_to_custom_seconds(self, monkeypatch):
+        """Non-zero env override is forwarded to ``time.sleep``."""
+        import time as _time
+
+        monkeypatch.setenv("MNEMON_UPGRADE_SETTLE_SECONDS", "3")
+        with patch.object(_time, "sleep") as mock_sleep:
+            upgrade._settle_after_deploy()
+        mock_sleep.assert_called_once_with(3)
+
+    def test_settle_falls_back_to_default_on_garbage_env(self, monkeypatch):
+        """Malformed env value falls back to the default — never
+        crashes the upgrade flow over a typo."""
+        import time as _time
+
+        monkeypatch.setenv("MNEMON_UPGRADE_SETTLE_SECONDS", "not-a-number")
+        with patch.object(_time, "sleep") as mock_sleep:
+            upgrade._settle_after_deploy()
+        mock_sleep.assert_called_once()
+        (called_with,), _ = mock_sleep.call_args
+        assert called_with == upgrade._DEFAULT_DEPLOY_SETTLE_SECONDS
+
+    def test_settle_called_on_first_time_upgrade_path_too(
+        self, tmp_path, monkeypatch
+    ):
+        """The post-deploy doctor probe in the first-time upgrade path
+        has the same fragility window — settle there too."""
+        vdir = tmp_path / ".mnemon"
+        vdir.mkdir()
+        (vdir / "default.sqlite").write_bytes(b"seeded")
+        monkeypatch.setattr("mnemon.config.vault_dir", lambda: vdir)
+        monkeypatch.setenv(
+            "MNEMON_FLY_ENDPOINT_OVERRIDE", "http://localhost:8502/mcp"
+        )
+
+        with patch(
+            "mnemon.sync.push",
+            return_value={"pushed": [], "errors": []},
+        ), \
+            patch("mnemon.upgrade._require_aws"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=False), \
+            patch(
+                "mnemon.upgrade._reconfigure_clients",
+                return_value=[],
+            ), \
+            patch(
+                "mnemon.upgrade._settle_after_deploy"
+            ) as mock_settle, \
+            patch(
+                "mnemon.doctor.run_doctor", return_value=0
+            ):
+            upgrade_web(
+                app_name="mnemon-test",
+                s3_bucket="test-bucket",
+                skip_doctor=False,
+            )
+
+        mock_settle.assert_called_once()

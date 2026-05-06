@@ -170,7 +170,8 @@ def run_remote() -> None:
     )
     print(
         f"MCP sessions persisted to {sessions_db} "
-        f"(survives cold-stops, TTL {session_store.ttl_seconds}s)",
+        f"(survives cold-stops, TTL {session_store.ttl_seconds}s, "
+        f"periodic prune every {mcp._session_manager._expire_interval_seconds}s)",
         file=sys.stderr,
     )
 
