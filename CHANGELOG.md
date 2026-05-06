@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.6.0rc12] - 2026-05-06
+
+### Fixed
+
+- **Post-deploy doctor probe wedged a freshly-redeployed Fly machine.**
+  During the 0.6.0rc11 redeploy, `mnemon doctor` failed twice in a row
+  immediately after `mnemon upgrade web` returned. The deploy itself
+  succeeded, but doctor's 7 rapid-fire checks landed on the machine
+  while FastEmbed pre-load was still finishing and the in-memory
+  session manager was fresh — exactly the request-pile-up shape that
+  exposes the latent CallToolRequest hang. `fly machine restart`
+  cleared it; doctor passed clean after. Fix: `_redeploy_web` (and the
+  first-time `upgrade_web` path) now sleeps for a configurable settle
+  window (default 30s) between `flyctl deploy` returning and the
+  inline doctor invocation. Override via
+  `MNEMON_UPGRADE_SETTLE_SECONDS` (set to `0` to disable).
+- **`mcp_sessions.sqlite` grew unbounded under long warm uptimes.**
+  `expire_old()` previously ran only at server startup
+  (`server_remote.run_remote`), which is fine under
+  `auto_stop_machines = "stop"` (every wake = a prune) but lets the
+  table drift up under any long-running configuration or between
+  cold-stops. Pre-restart on 2026-05-06 the table held 4,171 persisted
+  sessions with the 7-day TTL. Fix: `PersistentSessionManager` now
+  spawns an in-process anyio task during the lifespan that ticks every
+  6h (default) and calls `SessionStore.expire_old()`. Failures are
+  logged and swallowed so a transient SQLite hiccup can't take active
+  sessions down. Pass `expire_interval_seconds=0` to disable.
+
+### Roadmap
+
+- `--mnemon-version` flag on `mnemon upgrade web` and `CONTRIBUTING.md`
+  marked done in `private/ROADMAP.md` — both shipped earlier; the
+  rc11-deploy P0 audit caught the missing strikethroughs.
+
+### Tests
+
+- `TestPostDeploySettleWindow` (5 cases) in `tests/test_upgrade.py`
+  covers ordering (deploy → settle → doctor), `--skip-doctor`
+  short-circuit, env-var override to zero/custom/garbage, and the
+  first-time upgrade path. Autouse fixture sets
+  `MNEMON_UPGRADE_SETTLE_SECONDS=0` so existing tests don't pay 30s
+  per doctor-invoking case.
+- `TestPeriodicExpireConfig` + `TestPeriodicExpireTask` (5 cases) in
+  `tests/test_persistent_sessions.py` cover the default 6h interval,
+  zero-disables-prune, per-tick `expire_old()` call, log-on-prune,
+  and swallow-then-retry on failure.
+
 ## [0.6.0rc11] - 2026-05-06
 
 ### Fixed

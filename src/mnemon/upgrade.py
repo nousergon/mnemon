@@ -50,7 +50,44 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
+
+# Seconds to wait between a successful `flyctl deploy` and the first
+# inline `mnemon doctor` invocation. The post-deploy machine is most
+# fragile during its first warm requests — FastEmbed pre-load is just
+# finishing, the in-memory session manager is fresh, and uvicorn's
+# accept loop has only just bound. Doctor's 7 rapid-fire checks against
+# this state are exactly the request-pile-up shape that wedged us on
+# 2026-05-06 (rc11 redeploy). Give the machine a quiet window to settle
+# before probing it. Override via MNEMON_UPGRADE_SETTLE_SECONDS for
+# tests (which set it to 0).
+_DEFAULT_DEPLOY_SETTLE_SECONDS = 30
+
+
+def _settle_after_deploy() -> None:
+    """Sleep briefly between deploy completion and the next doctor probe.
+
+    Prints a status line to stderr so users don't think the CLI hung.
+    Honors ``MNEMON_UPGRADE_SETTLE_SECONDS`` (int) for test overrides;
+    a value of ``0`` disables the wait entirely.
+    """
+    raw = os.environ.get("MNEMON_UPGRADE_SETTLE_SECONDS")
+    if raw is None:
+        seconds = _DEFAULT_DEPLOY_SETTLE_SECONDS
+    else:
+        try:
+            seconds = max(0, int(raw))
+        except ValueError:
+            seconds = _DEFAULT_DEPLOY_SETTLE_SECONDS
+    if seconds <= 0:
+        return
+    print(
+        f"Waiting {seconds}s for the redeployed machine to settle "
+        "before running doctor...",
+        file=sys.stderr,
+    )
+    time.sleep(seconds)
 
 
 class UpgradeError(Exception):
@@ -496,6 +533,8 @@ def _redeploy_web(
 
     from .doctor import run_doctor
 
+    _settle_after_deploy()
+
     buf = io.StringIO()
     print("", file=buf)
     print("Running mnemon doctor against the remote...", file=buf)
@@ -680,6 +719,8 @@ def upgrade_web(
     import io
 
     from .doctor import run_doctor
+
+    _settle_after_deploy()
 
     # Point doctor at the new remote for the post-upgrade check.
     prior_url = os.environ.get("MNEMON_REMOTE_URL")

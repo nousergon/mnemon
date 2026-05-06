@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mnemon.persistent_sessions import (
+    DEFAULT_EXPIRE_INTERVAL_SECONDS,
     DEFAULT_TTL_SECONDS,
     PersistentSessionManager,
     SessionStore,
@@ -348,4 +349,154 @@ class TestMetricsCounters:
         assert manager.metrics()["stale_session_misses"] == 1
         assert any(
             "Stale session_id phantom" in rec.message for rec in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
+# Periodic expire_old() background task — bounds mcp_sessions.sqlite under
+# long warm uptimes (no cold-stop, no redeploy)
+# ---------------------------------------------------------------------------
+
+
+class TestPeriodicExpireConfig:
+    def test_default_interval_is_six_hours(self):
+        assert DEFAULT_EXPIRE_INTERVAL_SECONDS == 6 * 3600
+
+    def test_default_interval_applied_when_unspecified(self, tmp_path):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"), session_store=store
+        )
+        assert manager._expire_interval_seconds == DEFAULT_EXPIRE_INTERVAL_SECONDS
+
+    def test_zero_interval_disables_periodic_prune(self, tmp_path):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            expire_interval_seconds=0,
+        )
+        assert manager._expire_interval_seconds == 0
+
+
+@pytest.mark.anyio
+class TestPeriodicExpireTask:
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    async def test_periodic_task_calls_expire_old_on_each_tick(
+        self, tmp_path, monkeypatch
+    ):
+        """Drive the periodic loop directly: replace anyio.sleep with a
+        cancel-after-N-ticks shim and assert expire_old fires N times."""
+        import anyio
+        import mnemon.persistent_sessions as mod
+
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            expire_interval_seconds=1,
+        )
+        # Track expire_old calls without actually pruning anything.
+        calls: list[None] = []
+        original_expire = store.expire_old
+
+        def _counting_expire():
+            calls.append(None)
+            return original_expire()
+
+        store.expire_old = _counting_expire  # type: ignore[method-assign]
+
+        # Replace anyio.sleep so the loop doesn't actually sleep — and
+        # cancel after 3 iterations to exit the otherwise-forever loop.
+        sleep_count = {"n": 0}
+
+        async def fake_sleep(_seconds):
+            sleep_count["n"] += 1
+            if sleep_count["n"] >= 3:
+                raise anyio.get_cancelled_exc_class()()
+
+        monkeypatch.setattr(mod.anyio, "sleep", fake_sleep)
+
+        with pytest.raises(BaseException):
+            await manager._run_periodic_expire()
+        assert len(calls) == 2  # ran on tick 1, tick 2; tick 3 cancelled before expire
+
+    async def test_periodic_task_logs_pruned_count_when_nonzero(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import anyio
+        import mnemon.persistent_sessions as mod
+
+        store = SessionStore(tmp_path / "sessions.sqlite", ttl_seconds=1)
+        store.register("doomed")
+        time.sleep(1.1)
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            expire_interval_seconds=1,
+        )
+
+        async def fake_sleep_then_cancel(_seconds):
+            raise anyio.get_cancelled_exc_class()()
+
+        # First call ticks; second call cancels.
+        first_call = {"done": False}
+
+        async def fake_sleep(_seconds):
+            if not first_call["done"]:
+                first_call["done"] = True
+                return
+            raise anyio.get_cancelled_exc_class()()
+
+        monkeypatch.setattr(mod.anyio, "sleep", fake_sleep)
+
+        with caplog.at_level("INFO", logger="mnemon.persistent_sessions"), \
+            pytest.raises(BaseException):
+            await manager._run_periodic_expire()
+
+        assert any(
+            "Periodic prune" in rec.message and "1 expired" in rec.message
+            for rec in caplog.records
+        )
+
+    async def test_periodic_task_swallows_expire_failures(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A transient SQLite hiccup must not kill the task and take
+        every active session with it."""
+        import anyio
+        import mnemon.persistent_sessions as mod
+
+        store = MagicMock(spec=SessionStore)
+        store.expire_old.side_effect = [
+            RuntimeError("disk on fire"),  # tick 1: bang
+            0,  # tick 2: recovers
+        ]
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            expire_interval_seconds=1,
+        )
+
+        ticks = {"n": 0}
+
+        async def fake_sleep(_seconds):
+            ticks["n"] += 1
+            if ticks["n"] >= 3:
+                raise anyio.get_cancelled_exc_class()()
+
+        monkeypatch.setattr(mod.anyio, "sleep", fake_sleep)
+
+        with caplog.at_level("ERROR", logger="mnemon.persistent_sessions"), \
+            pytest.raises(BaseException):
+            await manager._run_periodic_expire()
+
+        # Both calls happened — second one wasn't blocked by the first failure
+        assert store.expire_old.call_count == 2
+        assert any(
+            "Periodic session prune raised" in rec.message
+            for rec in caplog.records
         )
