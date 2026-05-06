@@ -1058,6 +1058,8 @@ class TestHandoffGeneratorMain:
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
              patch.object(handoff_generator, "generate_with_llm", return_value=None), \
              patch.object(handoff_generator, "generate_with_regex", return_value={"title": "Regex handoff", "summary": "- Did stuff"}) as mock_regex, \
+             patch.object(handoff_generator, "is_duplicate_remote", return_value=False), \
+             patch.object(handoff_generator, "_record_session_save"), \
              patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("Saved doc-456", 0.4)) as mock_call:
             main()
         mock_regex.assert_called_once()
@@ -1087,6 +1089,8 @@ class TestHandoffGeneratorMain:
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
              patch.object(handoff_generator, "generate_with_llm", return_value={"title": "LLM summary", "summary": "- Deployed feature X"}), \
+             patch.object(handoff_generator, "is_duplicate_remote", return_value=False), \
+             patch.object(handoff_generator, "_record_session_save"), \
              patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("Saved doc-789", 0.5)) as mock_call:
             main()
         mock_call.assert_called_once()
@@ -1103,6 +1107,7 @@ class TestHandoffGeneratorMain:
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
              patch.object(handoff_generator, "generate_with_llm", return_value={"title": "X", "summary": "Y"}), \
+             patch.object(handoff_generator, "is_duplicate_remote", return_value=False), \
              patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=RemoteClientConfigError("no url")):
             main()
         captured = capsys.readouterr()
@@ -1115,8 +1120,255 @@ class TestHandoffGeneratorMain:
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 300), \
              patch.object(handoff_generator, "generate_with_llm", return_value={"title": "X", "summary": "Y"}), \
+             patch.object(handoff_generator, "is_duplicate_remote", return_value=False), \
              patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=ConnectionError("timeout")):
             main()
         captured = capsys.readouterr()
         assert "save error" in captured.err
         assert "ConnectionError" in captured.err
+
+
+# ── handoff_generator.py: trivial-prompt skip ─────────────────────────────────
+
+
+class TestHandoffGeneratorTrivialPromptSkip:
+    """The first ``[user]:`` line is the de-facto session title. Slash-
+    command bodies, system payloads, pasted tool output, and one-word
+    replies should all bounce before the LLM runs."""
+
+    def test_is_trivial_loop_slash_command(self):
+        from mnemon.hooks.handoff_generator import is_trivial_first_prompt
+        assert is_trivial_first_prompt("# /loop — schedule a recurring or self-paced prompt")
+        assert is_trivial_first_prompt("#/loop foo")
+
+    def test_is_trivial_notification_payloads(self):
+        from mnemon.hooks.handoff_generator import is_trivial_first_prompt
+        assert is_trivial_first_prompt("<task-notification> something happened")
+        assert is_trivial_first_prompt("<local-command-caveat>caveat text")
+        assert is_trivial_first_prompt("<command-name>foo</command-name>")
+
+    def test_is_trivial_test_output_paste(self):
+        from mnemon.hooks.handoff_generator import is_trivial_first_prompt
+        assert is_trivial_first_prompt("=========================== short test summary info ====")
+        assert is_trivial_first_prompt("short test summary info: 1 failed")
+
+    def test_is_trivial_short_replies(self):
+        from mnemon.hooks.handoff_generator import is_trivial_first_prompt
+        assert is_trivial_first_prompt("yes")
+        assert is_trivial_first_prompt("done")
+        assert is_trivial_first_prompt("pr merged")
+        assert is_trivial_first_prompt("")
+
+    def test_is_not_trivial_real_prompts(self):
+        from mnemon.hooks.handoff_generator import is_trivial_first_prompt
+        assert not is_trivial_first_prompt(
+            "do we need to add linkedin/contact info to the about page"
+        )
+        assert not is_trivial_first_prompt(
+            "lets continue with counterfactual rule fit"
+        )
+
+    def test_first_user_line_extracted_from_transcript(self):
+        from mnemon.hooks.handoff_generator import _first_user_line
+        transcript = (
+            "[user]: real prompt that has enough chars\n\n"
+            "[assistant]: reply\n\n"
+            "[user]: yes\n"
+        )
+        assert _first_user_line(transcript) == "real prompt that has enough chars"
+
+    def test_main_skips_trivial_first_prompt(self):
+        from mnemon.hooks import handoff_generator
+        from mnemon.hooks.handoff_generator import main
+
+        transcript = "[user]: # /loop — schedule\n\n[assistant]: " + "x" * 250
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
+             patch("mnemon.hooks.framework.read_transcript", return_value=transcript), \
+             patch.object(handoff_generator, "generate_with_llm") as mock_llm, \
+             patch("mnemon.hooks._remote_client.call_tool_sync") as mock_call:
+            main()
+        mock_llm.assert_not_called()
+        mock_call.assert_not_called()
+
+    def test_main_proceeds_when_first_prompt_is_real(self):
+        from mnemon.hooks import handoff_generator
+        from mnemon.hooks.handoff_generator import main
+
+        transcript = (
+            "[user]: please refactor the dedup logic in handoff_generator\n\n"
+            "[assistant]: " + "x" * 250
+        )
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
+             patch("mnemon.hooks.framework.read_transcript", return_value=transcript), \
+             patch.object(handoff_generator, "generate_with_llm", return_value={"title": "Refactor", "summary": "- Did it"}), \
+             patch.object(handoff_generator, "is_duplicate_remote", return_value=False), \
+             patch.object(handoff_generator, "_record_session_save"), \
+             patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("Saved doc-1", 0.1)) as mock_call:
+            main()
+        mock_call.assert_called_once()
+
+
+# ── handoff_generator.py: per-session debounce ────────────────────────────────
+
+
+class TestHandoffGeneratorSessionDebounce:
+    """Stop fires per turn; debounce keyed on session_id collapses
+    repeat fires within the cooldown window to a single save."""
+
+    def test_should_save_when_session_unseen(self, tmp_path, monkeypatch):
+        from mnemon.hooks import handoff_generator
+
+        monkeypatch.setattr(
+            handoff_generator,
+            "_SESSION_STATE_PATH",
+            tmp_path / "handoff_session_state.json",
+        )
+        assert handoff_generator.should_save_for_session("sess-new") is True
+
+    def test_should_not_save_inside_cooldown(self, tmp_path, monkeypatch):
+        from mnemon.hooks import handoff_generator
+
+        path = tmp_path / "handoff_session_state.json"
+        path.write_text(json.dumps({"sess-recent": time.time()}))
+        monkeypatch.setattr(handoff_generator, "_SESSION_STATE_PATH", path)
+        assert handoff_generator.should_save_for_session("sess-recent") is False
+
+    def test_should_save_after_cooldown_expires(self, tmp_path, monkeypatch):
+        from mnemon.hooks import handoff_generator
+
+        path = tmp_path / "handoff_session_state.json"
+        # 1 hour ago, well beyond the 600s cooldown
+        path.write_text(json.dumps({"sess-old": time.time() - 3600}))
+        monkeypatch.setattr(handoff_generator, "_SESSION_STATE_PATH", path)
+        assert handoff_generator.should_save_for_session("sess-old") is True
+
+    def test_should_save_when_session_id_empty(self, tmp_path, monkeypatch):
+        """Empty session_id degrades to legacy 'always save' so a malformed
+        hook payload doesn't silently drop work."""
+        from mnemon.hooks import handoff_generator
+
+        monkeypatch.setattr(
+            handoff_generator,
+            "_SESSION_STATE_PATH",
+            tmp_path / "handoff_session_state.json",
+        )
+        assert handoff_generator.should_save_for_session("") is True
+
+    def test_state_file_corrupt_treated_as_empty(self, tmp_path, monkeypatch):
+        from mnemon.hooks import handoff_generator
+
+        path = tmp_path / "handoff_session_state.json"
+        path.write_text("not json")
+        monkeypatch.setattr(handoff_generator, "_SESSION_STATE_PATH", path)
+        assert handoff_generator.should_save_for_session("sess-x") is True
+
+    def test_record_session_save_persists_timestamp(self, tmp_path, monkeypatch):
+        from mnemon.hooks import handoff_generator
+
+        path = tmp_path / "handoff_session_state.json"
+        monkeypatch.setattr(handoff_generator, "_SESSION_STATE_PATH", path)
+        handoff_generator._record_session_save("sess-1", {})
+        loaded = json.loads(path.read_text())
+        assert "sess-1" in loaded
+        assert isinstance(loaded["sess-1"], (int, float))
+
+    def test_main_skips_when_session_is_in_cooldown(self, tmp_path, monkeypatch):
+        from mnemon.hooks import handoff_generator
+        from mnemon.hooks.handoff_generator import main
+
+        path = tmp_path / "handoff_session_state.json"
+        path.write_text(json.dumps({"sess-cooldown": time.time()}))
+        monkeypatch.setattr(handoff_generator, "_SESSION_STATE_PATH", path)
+
+        transcript = (
+            "[user]: a real prompt that should normally save\n\n"
+            "[assistant]: " + "x" * 250
+        )
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={
+                  "transcript_path": "/tmp/t.jsonl",
+                  "session_id": "sess-cooldown",
+              }), \
+             patch("mnemon.hooks.framework.read_transcript", return_value=transcript), \
+             patch.object(handoff_generator, "generate_with_llm") as mock_llm, \
+             patch("mnemon.hooks._remote_client.call_tool_sync") as mock_call:
+            main()
+        # Cooldown skip happens BEFORE the LLM call.
+        mock_llm.assert_not_called()
+        mock_call.assert_not_called()
+
+    def test_main_records_session_after_successful_save(self, tmp_path, monkeypatch):
+        from mnemon.hooks import handoff_generator
+        from mnemon.hooks.handoff_generator import main
+
+        path = tmp_path / "handoff_session_state.json"
+        monkeypatch.setattr(handoff_generator, "_SESSION_STATE_PATH", path)
+
+        transcript = (
+            "[user]: please ship the dedup fix already\n\n"
+            "[assistant]: " + "x" * 250
+        )
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={
+                  "transcript_path": "/tmp/t.jsonl",
+                  "session_id": "sess-fresh",
+              }), \
+             patch("mnemon.hooks.framework.read_transcript", return_value=transcript), \
+             patch.object(handoff_generator, "generate_with_llm", return_value={"title": "Ship", "summary": "- shipped"}), \
+             patch.object(handoff_generator, "is_duplicate_remote", return_value=False), \
+             patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("Saved doc-1", 0.1)):
+            main()
+
+        loaded = json.loads(path.read_text())
+        assert "sess-fresh" in loaded
+
+
+# ── handoff_generator.py: remote vector dedup ────────────────────────────────
+
+
+class TestHandoffGeneratorRemoteDedup:
+    """Belt-and-suspenders: catches near-duplicates that slip past the
+    session debounce (e.g. session_id rotated but content unchanged)."""
+
+    def test_returns_true_above_threshold(self):
+        from mnemon.hooks import handoff_generator
+
+        with patch("mnemon.hooks._remote_client.call_tool_sync",
+                   return_value=(json.dumps([{"vector_similarity": 0.95}]), 0.1)):
+            assert handoff_generator.is_duplicate_remote("t", "c") is True
+
+    def test_returns_false_below_threshold(self):
+        from mnemon.hooks import handoff_generator
+
+        with patch("mnemon.hooks._remote_client.call_tool_sync",
+                   return_value=(json.dumps([{"vector_similarity": 0.5}]), 0.1)):
+            assert handoff_generator.is_duplicate_remote("t", "c") is False
+
+    def test_returns_false_on_remote_error(self):
+        """A flaky remote should never block a novel handoff — fail open."""
+        from mnemon.hooks import handoff_generator
+
+        with patch("mnemon.hooks._remote_client.call_tool_sync",
+                   side_effect=ConnectionError("network down")):
+            assert handoff_generator.is_duplicate_remote("t", "c") is False
+
+    def test_main_skips_save_on_dedup_hit(self, capsys):
+        from mnemon.hooks import handoff_generator
+        from mnemon.hooks.handoff_generator import main
+
+        transcript = (
+            "[user]: a real prompt that almost matches a recent save\n\n"
+            "[assistant]: " + "x" * 250
+        )
+
+        with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
+             patch("mnemon.hooks.framework.read_transcript", return_value=transcript), \
+             patch.object(handoff_generator, "generate_with_llm", return_value={"title": "Near dup", "summary": "- close"}), \
+             patch.object(handoff_generator, "is_duplicate_remote", return_value=True), \
+             patch("mnemon.hooks._remote_client.call_tool_sync") as mock_call:
+            main()
+        mock_call.assert_not_called()
+        captured = capsys.readouterr()
+        assert "skipping duplicate handoff" in captured.err
