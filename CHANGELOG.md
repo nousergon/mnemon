@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.6.0rc11] - 2026-05-06
+
+### Fixed
+
+- **Per-Stop handoff noise — `handoff_generator` now gates on three
+  conditions before saving.** Stop fires after every assistant turn,
+  not once per session, and `handoff_generator` previously had no dedup
+  — every turn produced a fresh `handoff` memory. Observed in the
+  production vault as 710/1376 documents (51.6%) being `handoff`-typed,
+  dominated by `claude-code-hook`-sourced rows whose first-user-line
+  was a `/loop` body, `<task-notification>`, pasted test output, or a
+  one-word reply ("yes", "done", "pr merged"). Three gates now run in
+  `main()` cheapest-first: trivial-prompt skip (regex match against
+  slash-command / notification / test-output patterns plus a 15-char
+  floor), per-session debounce (`~/.mnemon/handoff_session_state.json`
+  keyed by hook-payload `session_id` with 600s cooldown, degrades to
+  legacy "always save" on empty session_id), and a final remote vector
+  dedup mirroring `session_extractor.is_duplicate_remote` posture. PR
+  #112.
+
+### Tests
+
+- 20 new tests across `TestHandoffGeneratorTrivialPromptSkip`,
+  `TestHandoffGeneratorSessionDebounce`, and
+  `TestHandoffGeneratorRemoteDedup` in `tests/test_hooks_extended.py`.
+  4 existing `TestHandoffGeneratorMain` tests updated to patch
+  `is_duplicate_remote` so they keep exercising the save path. 689 →
+  709 passing.
+
 ## [0.6.0rc10] - 2026-05-02
 
 ### Fixed
