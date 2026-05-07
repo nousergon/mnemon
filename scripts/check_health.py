@@ -31,7 +31,11 @@ DEFAULT_URL = "https://mnemon-memory.fly.dev/health"
 PERSISTED_SESSIONS_WARN_THRESHOLD = 5_000
 
 
-def fetch_health(url: str, timeout: float = 10.0) -> dict:
+def fetch_health(url: str, timeout: float = 30.0) -> dict:
+    # 30s tolerates a Fly cold-start (machine wake + Python boot + bge-small
+    # ONNX load + SQLite/FastMCP startup). With min_machines_running=0 the
+    # overnight idle window auto-stops the machine; a 10s read timeout raced
+    # the wake-up on 2026-05-07 (issue #117). /health responds in <200ms once warm.
     req = urllib.request.Request(url, headers={"User-Agent": "mnemon-health-monitor/1"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         if resp.status != 200:
