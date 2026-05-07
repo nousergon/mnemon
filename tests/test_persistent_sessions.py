@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from mnemon.persistent_sessions import (
+    DEFAULT_DECAY_INTERVAL_SECONDS,
     DEFAULT_EXPIRE_INTERVAL_SECONDS,
     DEFAULT_TTL_SECONDS,
     PersistentSessionManager,
@@ -497,6 +498,156 @@ class TestPeriodicExpireTask:
         assert store.expire_old.call_count == 2
         assert any(
             "Periodic session prune raised" in rec.message
+            for rec in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
+# Periodic memory-decay sweep — wired alongside the prune task in run().
+# Runs apply_confidence_decay() on the vault every decay_interval_seconds
+# in a worker thread. Failures swallowed; counts logged when nonzero.
+# ---------------------------------------------------------------------------
+
+
+class TestPeriodicDecayConfig:
+    def test_default_interval_is_twenty_four_hours(self):
+        assert DEFAULT_DECAY_INTERVAL_SECONDS == 24 * 3600
+
+    def test_default_interval_applied_when_unspecified(self, tmp_path):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"), session_store=store
+        )
+        assert manager._decay_interval_seconds == DEFAULT_DECAY_INTERVAL_SECONDS
+
+    def test_decay_fn_defaults_to_none(self, tmp_path):
+        """Without an injected decay_fn the periodic decay task is a no-op."""
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"), session_store=store
+        )
+        assert manager._decay_fn is None
+
+
+@pytest.mark.anyio
+class TestPeriodicDecayTask:
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    async def test_periodic_task_calls_decay_fn_on_each_tick(
+        self, tmp_path, monkeypatch
+    ):
+        """Drive the periodic loop directly: replace anyio.sleep with a
+        cancel-after-N-ticks shim and assert decay_fn fires N times."""
+        import anyio
+        import mnemon.persistent_sessions as mod
+
+        calls: list[None] = []
+
+        def _decay_fn() -> int:
+            calls.append(None)
+            return 0
+
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            decay_fn=_decay_fn,
+            decay_interval_seconds=1,
+        )
+
+        sleep_count = {"n": 0}
+
+        async def fake_sleep(_seconds):
+            sleep_count["n"] += 1
+            if sleep_count["n"] >= 3:
+                raise anyio.get_cancelled_exc_class()()
+
+        monkeypatch.setattr(mod.anyio, "sleep", fake_sleep)
+
+        with pytest.raises(BaseException):
+            await manager._run_periodic_decay()
+        assert len(calls) == 2  # ran on tick 1, tick 2; tick 3 cancelled before decay
+
+    async def test_periodic_task_logs_decayed_count_when_nonzero(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        import anyio
+        import mnemon.persistent_sessions as mod
+
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            decay_fn=lambda: 7,
+            decay_interval_seconds=1,
+        )
+
+        first_call = {"done": False}
+
+        async def fake_sleep(_seconds):
+            if not first_call["done"]:
+                first_call["done"] = True
+                return
+            raise anyio.get_cancelled_exc_class()()
+
+        monkeypatch.setattr(mod.anyio, "sleep", fake_sleep)
+
+        with caplog.at_level("INFO", logger="mnemon.persistent_sessions"), \
+            pytest.raises(BaseException):
+            await manager._run_periodic_decay()
+
+        assert any(
+            "Periodic decay" in rec.message and "7 memory" in rec.message
+            for rec in caplog.records
+        )
+
+    async def test_periodic_task_swallows_decay_failures(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Same contract as the prune task: a transient failure in the
+        decay sweep must not crash the manager and take active sessions
+        with it. The next tick must retry."""
+        import anyio
+        import mnemon.persistent_sessions as mod
+
+        side_effects: list[Exception | int] = [
+            RuntimeError("disk on fire"),  # tick 1: bang
+            0,  # tick 2: recovers
+        ]
+
+        def _decay_fn() -> int:
+            value = side_effects.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            decay_fn=_decay_fn,
+            decay_interval_seconds=1,
+        )
+
+        ticks = {"n": 0}
+
+        async def fake_sleep(_seconds):
+            ticks["n"] += 1
+            if ticks["n"] >= 3:
+                raise anyio.get_cancelled_exc_class()()
+
+        monkeypatch.setattr(mod.anyio, "sleep", fake_sleep)
+
+        with caplog.at_level("ERROR", logger="mnemon.persistent_sessions"), \
+            pytest.raises(BaseException):
+            await manager._run_periodic_decay()
+
+        # Both ticks happened — second one wasn't blocked by the first failure
+        assert side_effects == []
+        assert any(
+            "Periodic memory decay raised" in rec.message
             for rec in caplog.records
         )
 

@@ -30,7 +30,7 @@ import contextlib
 import logging
 import sqlite3
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -58,6 +58,15 @@ DEFAULT_TTL_SECONDS = 7 * 24 * 3600
 # Set to 0 to disable (e.g. tests that don't want a background task
 # bleeding into other test files).
 DEFAULT_EXPIRE_INTERVAL_SECONDS = 6 * 3600
+
+# How often the in-process periodic decay task wakes up to run
+# contradiction.apply_confidence_decay() over the memory vault. Decay is
+# orthogonal to session pruning — it ages confidence on stored memories
+# so older facts sort lower in search — but it lives next to the prune
+# task because both are background hygiene that the lifespan task group
+# is the right place to schedule. Set to 0 (or pass decay_fn=None) to
+# disable.
+DEFAULT_DECAY_INTERVAL_SECONDS = 24 * 3600
 
 
 class SessionStore:
@@ -206,6 +215,8 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         retry_interval: int | None = None,
         session_idle_timeout: float | None = None,
         expire_interval_seconds: int = DEFAULT_EXPIRE_INTERVAL_SECONDS,
+        decay_fn: Callable[[], int] | None = None,
+        decay_interval_seconds: int = DEFAULT_DECAY_INTERVAL_SECONDS,
     ) -> None:
         super().__init__(
             app=app,
@@ -225,6 +236,12 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         # sessions table otherwise grows monotonically until the next
         # restart.
         self._expire_interval_seconds = expire_interval_seconds
+        # Decay sweep is opt-in via an injected callable so this module
+        # doesn't import Store directly — keeps the session-management
+        # layer decoupled from the memory-vault layer. server_remote.py
+        # passes a closure that opens its own thread-local Store.
+        self._decay_fn = decay_fn
+        self._decay_interval_seconds = decay_interval_seconds
         # Process-lifetime counters scraped via /health for cold-stop diagnosis.
         # Single-event-loop server, so plain ints are race-free without a Lock.
         # NOTE: scripts/check_health.py reads these key names directly. If you
@@ -266,6 +283,9 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
             if self._expire_interval_seconds > 0:
                 assert self._task_group is not None
                 await self._task_group.start(self._run_periodic_expire)
+            if self._decay_fn is not None and self._decay_interval_seconds > 0:
+                assert self._task_group is not None
+                await self._task_group.start(self._run_periodic_decay)
             yield
 
     async def _run_periodic_expire(
@@ -289,6 +309,35 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
                 logger.info(
                     "Periodic prune: removed %d expired MCP session(s)",
                     expired,
+                )
+
+    async def _run_periodic_decay(
+        self, *, task_status: TaskStatus[None] = anyio.TASK_STATUS_IGNORED
+    ) -> None:
+        """Wake every ``decay_interval_seconds`` and apply confidence decay.
+
+        Mirrors ``_run_periodic_expire``: failures logged + swallowed so a
+        transient SQLite hiccup in the decay sweep cannot crash the
+        manager and take every active MCP session with it.
+
+        ``decay_fn`` is run in a worker thread via ``anyio.to_thread``
+        because ``apply_confidence_decay`` walks the full vault and does
+        blocking SQL — keeping it off the event loop avoids stalling
+        request handling during the sweep.
+        """
+        task_status.started()
+        assert self._decay_fn is not None
+        while True:
+            await anyio.sleep(self._decay_interval_seconds)
+            try:
+                updated = await anyio.to_thread.run_sync(self._decay_fn)
+            except Exception:  # noqa: BLE001
+                logger.exception("Periodic memory decay raised; retrying next tick")
+                continue
+            if updated:
+                logger.info(
+                    "Periodic decay: aged %d memory document(s)",
+                    updated,
                 )
 
     async def _handle_stateful_request(
