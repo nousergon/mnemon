@@ -159,6 +159,22 @@ def run_remote() -> None:
     # Symptom this fixes: `mnemon doctor` and any `streamablehttp_client`
     # consumer timing out at session.initialize() while concurrent
     # requests sit in the lock queue.
+    # Periodic confidence-decay sweep over the memory vault. Opens a
+    # thread-local Store each tick because the sweep is dispatched via
+    # anyio.to_thread.run_sync (sqlite3 connections default to
+    # check_same_thread=True, so reusing the foreground singleton from
+    # server.py would raise across the thread boundary). Decay is non-
+    # destructive — it only adjusts the confidence column on aged
+    # documents — so a transient failure here is safe to swallow.
+    def _decay_sweep() -> int:
+        from .contradiction import apply_confidence_decay
+        from .store import Store
+        store = Store()
+        try:
+            return apply_confidence_decay(store)
+        finally:
+            store.close()
+
     mcp._session_manager = PersistentSessionManager(
         app=mcp._mcp_server,
         session_store=session_store,
@@ -167,11 +183,13 @@ def run_remote() -> None:
         json_response=True,
         stateless=mcp.settings.stateless_http,
         security_settings=mcp.settings.transport_security,
+        decay_fn=_decay_sweep,
     )
     print(
         f"MCP sessions persisted to {sessions_db} "
         f"(survives cold-stops, TTL {session_store.ttl_seconds}s, "
-        f"periodic prune every {mcp._session_manager._expire_interval_seconds}s)",
+        f"periodic prune every {mcp._session_manager._expire_interval_seconds}s, "
+        f"periodic memory decay every {mcp._session_manager._decay_interval_seconds}s)",
         file=sys.stderr,
     )
 
