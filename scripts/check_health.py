@@ -25,9 +25,13 @@ import urllib.request
 
 DEFAULT_URL = "https://mnemon-memory.fly.dev/health"
 
-# Soft cap. SessionStore.expire_old() runs only at startup, so this drifts
-# up during long uptime between Fly cold-stops; an unbounded climb means
-# either pruning is broken or the TTL is too long for the request rate.
+# Soft cap. Since 0.6.0rc12, PersistentSessionManager runs a periodic
+# expire_old() task on a 6h tick (DEFAULT_EXPIRE_INTERVAL_SECONDS in
+# persistent_sessions.py), so unbounded growth is no longer the failure
+# mode this guarded against. The remaining drift is steady-state count
+# under the 7-day TTL; the threshold trips when actual session volume
+# outpaces the prune cadence — investigate by lowering TTL or tightening
+# the prune interval rather than assuming pruning is broken.
 PERSISTED_SESSIONS_WARN_THRESHOLD = 5_000
 
 
@@ -86,9 +90,10 @@ def main() -> int:
     elif persisted >= PERSISTED_SESSIONS_WARN_THRESHOLD:
         warnings.append(
             f"metrics.persisted_sessions_total = {persisted} "
-            f"(>= {PERSISTED_SESSIONS_WARN_THRESHOLD}); SessionStore.expire_old() "
-            f"runs only at startup — long uptime drifts this up. Consider "
-            f"adding a periodic prune."
+            f"(>= {PERSISTED_SESSIONS_WARN_THRESHOLD}). Periodic prune runs "
+            f"every 6h since rc12, so this is steady-state count under the "
+            f"7-day TTL — investigate by lowering TTL or tightening the prune "
+            f"interval if the warning fires repeatedly."
         )
 
     print(f"OK: status={payload['status']}, metrics={json.dumps(metrics)}")

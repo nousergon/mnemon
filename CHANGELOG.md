@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.6.0rc14] - 2026-05-07
+
+### Added
+
+- **Periodic confidence-decay sweep on the Fly server lifespan** (#119).
+  `apply_confidence_decay()` in `contradiction.py` was an orphan helper
+  with no caller — stored memories never aged after save, so search
+  ranking treated a 6-month-old memory the same as one written
+  yesterday. `PersistentSessionManager.run()` now schedules a daily
+  decay sweep next to the existing prune task; both share the same
+  failure-isolation contract (logged + swallowed). Default interval
+  `DEFAULT_DECAY_INTERVAL_SECONDS = 24h`. Sweep runs in a worker thread
+  via `anyio.to_thread.run_sync` so the full-vault SQL walk doesn't
+  stall the event loop. `decay_fn` is injected as a callable so
+  `persistent_sessions.py` stays decoupled from `Store`;
+  `server_remote.py` supplies a closure that opens its own thread-local
+  `Store` (sqlite3 default `check_same_thread=True` forbids reusing the
+  foreground singleton across the worker thread).
+
+### Fixed
+
+- **Health-monitor false alarms during Fly cold-start window** (#118).
+  `scripts/check_health.py` had a 10s `urllib` read timeout that raced
+  the Fly cold-start (machine wake + Python boot + bge-small ONNX load
+  + SQLite/FastMCP startup) when the SJC machine auto-stopped during
+  the overnight idle window. Four false-alarm comments landed on issue
+  #117 between 03:54–11:56 UTC on 2026-05-07 before the timeout was
+  bumped to 30s. App was healthy throughout (`/health` <200ms warm).
+
+- **Stale comment + WARN message in `scripts/check_health.py`.** The
+  `PERSISTED_SESSIONS_WARN_THRESHOLD` block claimed `expire_old()` runs
+  only at startup; that fact has been false since rc12 added the
+  periodic prune (#115). Updated the comment + the WARN body to point
+  operators at TTL or prune-interval tuning instead of "pruning is
+  broken."
+
+### Tests
+
+- 6 new cases in `TestPeriodicDecayConfig` / `TestPeriodicDecayTask`
+  shipped in #119 mirror the existing prune-task suite: default
+  interval, opt-in via `decay_fn`, fires-on-each-tick,
+  logs-decayed-count-when-nonzero, swallows-decay-failures. Full repo
+  suite: 732 passing on the rc14 cut.
+
 ## [0.6.0rc13] - 2026-05-06
 
 ### Fixed
