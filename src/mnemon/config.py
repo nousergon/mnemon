@@ -60,6 +60,16 @@ DEFAULT_CONFIDENCE: dict[ContentType, float] = {
     ContentType.NOTE: 0.50,
 }
 
+# Source clients whose saves are best-effort transcripts of a chat
+# session, not deliberate user assertions. Their confidence is capped
+# at HOOK_SOURCE_CONFIDENCE_CEILING below explicit `mnemon-mirror`
+# saves (which carry the per-type default — handoff = 0.60) so an
+# explicit mirror always outranks an extracted fragment at recall time.
+# Closes the 2026-05-10 fragment-confidence regression (default vault
+# ids 1994/1997/1998 saved as preference@0.80 / decision@0.85).
+HOOK_SOURCE_CLIENTS: frozenset[str] = frozenset({"claude-code-hook"})
+HOOK_SOURCE_CONFIDENCE_CEILING = 0.5
+
 # Scoring constants
 RRF_K = 60
 MMR_THRESHOLD = 0.6                    # bigram Jaccard ≥ this → candidate is "too similar" to a selected result

@@ -18,6 +18,8 @@ import numpy as np
 
 from .config import (
     HALF_LIVES,
+    HOOK_SOURCE_CLIENTS,
+    HOOK_SOURCE_CONFIDENCE_CEILING,
     MEMORY_TYPE_MAP,
     DEFAULT_CONFIDENCE,
     PIN_BOOST,
@@ -194,6 +196,8 @@ class Store:
         ct = ContentType(content_type)
         mt = MEMORY_TYPE_MAP.get(ct, MemoryType.SEMANTIC)
         conf = confidence if confidence is not None else DEFAULT_CONFIDENCE[ct]
+        if source_client in HOOK_SOURCE_CLIENTS:
+            conf = min(conf, HOOK_SOURCE_CONFIDENCE_CEILING)
 
         # Upsert content (idempotent)
         self.db.execute(
