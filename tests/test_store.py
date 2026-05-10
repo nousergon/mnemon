@@ -58,6 +58,78 @@ class TestSave:
         assert id1 != id2
 
 
+class TestSaveHookConfidenceCap:
+    """Hook-sourced saves are capped below the explicit-mirror band so
+    fragments can't outrank deliberate mirror saves at recall time.
+    Closes the 2026-05-10 fragment-confidence regression (default vault
+    ids 1994/1997/1998 saved as preference@0.80 / decision@0.85)."""
+
+    def test_hook_sourced_preference_capped(self, store):
+        doc_id = store.save(
+            title="t",
+            content="An observation worth remembering.",
+            content_type="preference",
+            source_client="claude-code-hook",
+        )
+        doc = store.get(doc_id)
+        assert doc.confidence == 0.5
+
+    def test_hook_sourced_decision_capped(self, store):
+        doc_id = store.save(
+            title="t",
+            content="An observation worth remembering.",
+            content_type="decision",
+            source_client="claude-code-hook",
+        )
+        doc = store.get(doc_id)
+        assert doc.confidence == 0.5
+
+    def test_explicit_mirror_uses_per_type_default(self, store):
+        doc_id = store.save(
+            title="t",
+            content="An observation worth remembering.",
+            content_type="handoff",
+            source_client="mnemon-mirror",
+        )
+        doc = store.get(doc_id)
+        assert doc.confidence == 0.6
+
+    def test_no_source_client_uses_per_type_default(self, store):
+        doc_id = store.save(
+            title="t",
+            content="An observation worth remembering.",
+            content_type="preference",
+        )
+        doc = store.get(doc_id)
+        assert doc.confidence == 0.8
+
+    def test_hook_cap_does_not_raise_below_default(self, store):
+        """min(default, ceiling) — a default lower than the ceiling is
+        kept as-is, never inflated up to the ceiling."""
+        doc_id = store.save(
+            title="t",
+            content="An observation worth remembering.",
+            content_type="note",
+            source_client="claude-code-hook",
+        )
+        doc = store.get(doc_id)
+        assert doc.confidence == 0.5  # NOTE default == ceiling, no movement
+
+    def test_explicit_confidence_arg_still_capped_for_hook(self, store):
+        """Explicit confidence arg is still subject to the hook ceiling —
+        the hook itself never passes a confidence, but if it did, we want
+        defense-in-depth."""
+        doc_id = store.save(
+            title="t",
+            content="An observation worth remembering.",
+            content_type="decision",
+            source_client="claude-code-hook",
+            confidence=0.95,
+        )
+        doc = store.get(doc_id)
+        assert doc.confidence == 0.5
+
+
 class TestGet:
     def test_get_returns_content(self, store):
         doc_id = store.save(title="Test", content="Hello world")

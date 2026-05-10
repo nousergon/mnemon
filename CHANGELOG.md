@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.6.0rc15] - 2026-05-10
+
+### Fixed
+
+- **Auto-mirror hook captures sentence fragments as high-confidence
+  semantic memories.** `claude-code-hook` was saving substrings of
+  assistant chat output as standalone `preference` / `decision`
+  memories at confidence 0.8 / 0.85. Examples from the live default
+  vault: `"argmax-routed"` (id 1998), `"repeat the pattern?"`
+  (id 1994), 200-char regex truncations cut mid-word (id 1997). At
+  confidence 0.80 these crowded out explicit `mnemon-mirror` saves
+  (which carry the per-type default — handoff = 0.60) at recall
+  time, and `preference` / `decision` half-lives are `None` so the
+  noise would never decay.
+
+  Two-layer fix:
+
+  - **Hook-side shape gate** (`hooks/session_extractor.py`):
+    `is_well_shaped()` runs before the dedup roundtrip. Drops
+    captures shorter than `MIN_OBSERVATION_CHARS` (20), captures
+    ending with `?` (questions, not assertions), captures missing a
+    sentence terminator (mid-cut fragments), and captures whose
+    content equals the title (no expansion).
+  - **Server-side confidence cap** (`store.py` /`config.py`): saves
+    where `source_client in HOOK_SOURCE_CLIENTS` are capped at
+    `HOOK_SOURCE_CONFIDENCE_CEILING = 0.5`, below the 0.6 explicit
+    `mnemon-mirror` band. Defense in depth — even if a future
+    extractor path slips a fragment past the shape gate, it can
+    never outrank a deliberate mirror save.
+
+  Existing fragments (default vault ids 1994/1997/1998/2000) were
+  soft-deleted via `memory_forget` as part of the rollout.
+
 ## [0.6.0rc14] - 2026-05-07
 
 ### Added

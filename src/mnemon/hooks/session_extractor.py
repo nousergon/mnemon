@@ -55,6 +55,46 @@ VALID_TYPES = {"decision", "preference", "observation", "antipattern", "research
 
 CLIENT_LABEL = "claude-code-session-extractor"
 
+# Shape gate for hook-extracted observations. Both the local 1.7B LLM and
+# the regex fallback can emit fragments that pass downstream as
+# high-confidence semantic memories: one-word matches ("argmax-routed"),
+# mid-sentence cuts truncated at the regex `.{20,200}` ceiling, or
+# questions misclassified as preferences. Per the 2026-05-10 triage
+# (default vault ids 1994/1997/1998), these inflate the noise floor and
+# crowd out durable explicit `mnemon-mirror` saves at recall time.
+#
+# A "well-shaped" observation must:
+#   * be at least MIN_OBSERVATION_CHARS long (decisions/preferences need
+#     a why, not a keyword),
+#   * end with sentence-terminating punctuation (.!) — questions and
+#     mid-cut fragments fail this,
+#   * have a content body that meaningfully extends past the title (a
+#     content equal to or shorter than the title is a fragment by
+#     definition).
+MIN_OBSERVATION_CHARS = 20
+SENTENCE_TERMINATORS = (".", "!")
+
+
+def is_well_shaped(obs: dict) -> bool:
+    """Return True if ``obs`` passes the shape gate for hook saves.
+
+    Applied before the dedup roundtrip so malformed captures don't
+    consume a remote ``memory_search`` slot. Composes with the
+    server-side confidence cap on ``source_client='claude-code-hook'``
+    in :func:`mnemon.store.Store.save` — defense in depth.
+    """
+    title = (obs.get("title") or "").strip()
+    content = (obs.get("content") or "").strip()
+    if len(content) < MIN_OBSERVATION_CHARS:
+        return False
+    if content.endswith("?"):
+        return False
+    if not content.endswith(SENTENCE_TERMINATORS):
+        return False
+    if title and content == title:
+        return False
+    return True
+
 
 def parse_observations(response: str) -> list[dict]:
     """Parse XML-formatted observations from LLM response."""
@@ -188,6 +228,15 @@ def main() -> None:
         saved = 0
         for obs in observations:
             content_type = obs["type"] if obs["type"] in VALID_TYPES else "observation"
+
+            # Shape gate — drop fragments before they consume a remote
+            # search slot or land in the vault as high-confidence noise.
+            if not is_well_shaped(obs):
+                print(
+                    f'mnemon: skipping malformed observation: "{obs["title"]}"',
+                    file=sys.stderr,
+                )
+                continue
 
             # Remote vector dedup check
             if is_duplicate_remote(obs["title"], obs["content"]):

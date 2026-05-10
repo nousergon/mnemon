@@ -891,6 +891,60 @@ class TestSessionExtractorIsDuplicateRemote:
         assert mock_call.call_args[0][0] == "memory_search"
 
 
+# ── session_extractor.py: is_well_shaped (shape gate) ─────────────────────────
+
+
+class TestSessionExtractorIsWellShaped:
+    """Shape gate dropping fragmented hook captures before they reach
+    the vault. Surfaced 2026-05-10 from default-vault triage:
+    one-word matches ("argmax-routed"), questions saved as
+    preferences ("repeat the pattern?"), and 200-char regex truncations
+    cut mid-word were all landing as preference@0.80 / decision@0.85."""
+
+    def test_short_content_dropped(self):
+        from mnemon.hooks.session_extractor import is_well_shaped
+
+        assert is_well_shaped({"title": "x", "content": "argmax-routed"}) is False
+
+    def test_question_dropped(self):
+        from mnemon.hooks.session_extractor import is_well_shaped
+
+        assert is_well_shaped({"title": "x", "content": "repeat the pattern?"}) is False
+
+    def test_mid_sentence_truncation_dropped(self):
+        from mnemon.hooks.session_extractor import is_well_shaped
+
+        truncated = "time — for downstream attribution analytics " + "x" * 150
+        assert is_well_shaped({"title": "x", "content": truncated}) is False
+
+    def test_well_shaped_passes(self):
+        from mnemon.hooks.session_extractor import is_well_shaped
+
+        obs = {
+            "title": "Use Redis",
+            "content": "Chose Redis for caching to reduce DB load.",
+        }
+        assert is_well_shaped(obs) is True
+
+    def test_exclamation_terminator_passes(self):
+        from mnemon.hooks.session_extractor import is_well_shaped
+
+        obs = {
+            "title": "x",
+            "content": "Switch to async DB driver immediately!",
+        }
+        assert is_well_shaped(obs) is True
+
+    def test_content_equals_title_dropped(self):
+        from mnemon.hooks.session_extractor import is_well_shaped
+
+        obs = {
+            "title": "Some terse fragment ending with period.",
+            "content": "Some terse fragment ending with period.",
+        }
+        assert is_well_shaped(obs) is False
+
+
 # ── session_extractor.py: main ────────────────────────────────────────────────
 
 
@@ -945,6 +999,34 @@ class TestSessionExtractorMain:
             main()
         mock_call.assert_not_called()
 
+    def test_malformed_observations_skipped_before_dedup(self, capsys):
+        """Shape gate runs before the dedup roundtrip — malformed
+        captures don't consume a remote search slot or land in the vault.
+        Closes the 2026-05-10 fragment-confidence regression."""
+        from mnemon.hooks import session_extractor
+        from mnemon.hooks.session_extractor import main
+
+        observations = [
+            {"type": "preference", "title": "argmax-routed", "content": "argmax-routed"},
+            {"type": "preference", "title": "q?", "content": "repeat the pattern?"},
+            {"type": "decision", "title": "good one", "content": "Chose Redis for caching to reduce DB load."},
+        ]
+        with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
+             patch("mnemon.hooks.framework.read_transcript", return_value="A" * 200), \
+             patch.object(session_extractor, "extract_with_llm", return_value=observations), \
+             patch.object(session_extractor, "is_duplicate_remote", return_value=False) as mock_dedup, \
+             patch("mnemon.hooks._remote_client.call_tool_sync", return_value=("Saved doc-1", 0.3)) as mock_call:
+            main()
+
+        # Only the well-shaped observation should reach dedup + save.
+        assert mock_dedup.call_count == 1
+        assert mock_call.call_count == 1
+        saved_args = mock_call.call_args[0]
+        assert saved_args[1]["title"] == "good one"
+
+        captured = capsys.readouterr()
+        assert "skipping malformed observation" in captured.err
+
     def test_config_error_stops_immediately(self, capsys):
         from mnemon.hooks import session_extractor
         from mnemon.hooks._remote_client import RemoteClientConfigError
@@ -952,7 +1034,7 @@ class TestSessionExtractorMain:
 
         with patch("mnemon.hooks.framework.read_stdin", return_value={"transcript_path": "/tmp/t.jsonl"}), \
              patch("mnemon.hooks.framework.read_transcript", return_value="A" * 200), \
-             patch.object(session_extractor, "extract_with_llm", return_value=[{"type": "decision", "title": "X", "content": "Y"}]), \
+             patch.object(session_extractor, "extract_with_llm", return_value=[{"type": "decision", "title": "X", "content": "Pick Postgres for JSON support."}]), \
              patch.object(session_extractor, "is_duplicate_remote", return_value=False), \
              patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=RemoteClientConfigError("no token")):
             main()
@@ -964,8 +1046,8 @@ class TestSessionExtractorMain:
         from mnemon.hooks.session_extractor import main
 
         observations = [
-            {"type": "decision", "title": "First", "content": "Content 1"},
-            {"type": "observation", "title": "Second", "content": "Content 2"},
+            {"type": "decision", "title": "First", "content": "Pick Postgres for JSON support."},
+            {"type": "observation", "title": "Second", "content": "Memcached evictions spike at 2pm."},
         ]
         call_count = {"n": 0}
 
