@@ -249,6 +249,7 @@ class TestMemorySave:
             content_type="note",
             collection="default",
             source_client=None,
+            source_key=None,
         )
 
     @patch("mnemon.server.Store")
@@ -279,6 +280,7 @@ class TestMemorySave:
             content_type="decision",
             collection="work",
             source_client="claude",
+            source_key=None,
         )
 
 

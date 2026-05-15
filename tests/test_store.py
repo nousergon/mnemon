@@ -274,6 +274,106 @@ class TestStatus:
         assert stats["pinned"] == 1
 
 
+class TestUpsertBySourceKey:
+    """Regression coverage for the P0 fix: auto-mirror re-inserting a
+    new memory on every local-file edit instead of upserting by the
+    stable slug (frontmatter `name`)."""
+
+    def _live(self, store, source_key, source_client="mnemon-mirror"):
+        return store.db.execute(
+            """SELECT id, hash FROM documents
+               WHERE source_client IS ? AND source_key = ?
+                 AND invalidated_at IS NULL
+               ORDER BY id""",
+            (source_client, source_key),
+        ).fetchall()
+
+    def test_changed_reedit_supersedes_prior(self, store):
+        # Simulate one memory file's session lifecycle: draft -> refine
+        # -> finalize. Three edits, divergent content, same slug.
+        id1 = store.save(
+            title="my-slug", content="draft v1",
+            content_type="project", source_client="mnemon-mirror",
+            source_key="my-slug",
+        )
+        id2 = store.save(
+            title="my-slug", content="refined v2",
+            content_type="project", source_client="mnemon-mirror",
+            source_key="my-slug",
+        )
+        id3 = store.save(
+            title="my-slug", content="final v3 merged",
+            content_type="project", source_client="mnemon-mirror",
+            source_key="my-slug",
+        )
+        assert id1 != id2 != id3
+        # Exactly one live document for the slug — the latest.
+        live = self._live(store, "my-slug")
+        assert len(live) == 1
+        assert live[0]["id"] == id3
+        doc = store.get(id3)
+        assert doc.content == "final v3 merged"
+        # Priors form an auditable supersession chain id1 -> id2 -> id3
+        # (each edit invalidates only the then-live row).
+        for prior, successor in ((id1, id2), (id2, id3)):
+            row = store.db.execute(
+                "SELECT invalidated_at, invalidated_by FROM documents WHERE id = ?",
+                (prior,),
+            ).fetchone()
+            assert row["invalidated_at"] is not None
+            assert row["invalidated_by"] == successor
+
+    def test_unchanged_resave_is_idempotent(self, store):
+        id1 = store.save(
+            title="slug-x", content="stable body",
+            source_client="mnemon-mirror", source_key="slug-x",
+        )
+        id2 = store.save(
+            title="slug-x", content="stable body",
+            source_client="mnemon-mirror", source_key="slug-x",
+        )
+        assert id1 == id2
+        assert len(self._live(store, "slug-x")) == 1
+
+    def test_distinct_slugs_do_not_collide(self, store):
+        a = store.save(
+            title="slug-a", content="body a",
+            source_client="mnemon-mirror", source_key="slug-a",
+        )
+        b = store.save(
+            title="slug-b", content="body b",
+            source_client="mnemon-mirror", source_key="slug-b",
+        )
+        assert a != b
+        assert len(self._live(store, "slug-a")) == 1
+        assert len(self._live(store, "slug-b")) == 1
+
+    def test_revert_to_earlier_content_stays_single_live(self, store):
+        # A -> B -> A again. The final A must be a fresh visible doc,
+        # not a resurrected invalidated row (the old hash-dedup branch
+        # would have bumped a dead row's access_count and surfaced
+        # nothing).
+        store.save(title="s", content="A", source_client="mnemon-mirror", source_key="s")
+        store.save(title="s", content="B", source_client="mnemon-mirror", source_key="s")
+        id3 = store.save(title="s", content="A", source_client="mnemon-mirror", source_key="s")
+        live = self._live(store, "s")
+        assert len(live) == 1
+        assert live[0]["id"] == id3
+        assert store.get(id3).content == "A"
+
+    def test_no_source_key_preserves_insert_only_behaviour(self, store):
+        # Without a source_key the historical behaviour is unchanged:
+        # different content -> different ids, no supersession.
+        id1 = store.save(title="t1", content="alpha")
+        id2 = store.save(title="t2", content="beta")
+        assert id1 != id2
+        for i in (id1, id2):
+            row = store.db.execute(
+                "SELECT invalidated_at FROM documents WHERE id = ?", (i,)
+            ).fetchone()
+            assert row["invalidated_at"] is None
+
+
 class TestSweep:
     def test_sweep_dry_run_does_not_delete(self, store):
         store.save(title="Old note", content="old stuff", content_type="note")

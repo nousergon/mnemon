@@ -149,11 +149,18 @@ def memory_save(
     content_type: str = "note",
     collection: str = "default",
     source_client: str | None = None,
+    source_key: str | None = None,
 ) -> str:
     """Save a new memory.
 
     Use this to explicitly store important information — decisions,
     preferences, observations, project context, or session handoffs.
+
+    ``source_key`` is an optional stable caller-owned identity. When
+    set, re-saving the same key updates in place (invalidate-prior +
+    insert) instead of accumulating near-duplicates — used by the
+    auto-mirror path, keyed to the local memory file's slug, so a
+    memory edited several times in one session stays a single document.
     """
     store = _get_store()
     doc_id = store.save(
@@ -162,6 +169,7 @@ def memory_save(
         content_type=content_type,
         collection=collection,
         source_client=source_client,
+        source_key=source_key,
     )
 
     # Embed asynchronously (non-blocking, failures are non-fatal — the
