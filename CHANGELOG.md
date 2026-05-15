@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.6.0rc16] - 2026-05-15
+
+### Fixed
+
+- **Auto-mirror re-inserted a new memory on every local-file edit
+  instead of upserting by stable slug (P0).** A Claude Code
+  auto-memory file's normal lifecycle is draft → refine →
+  finalize-on-merge — often several edits within one session. The
+  `mnemon-mirror` save path wrote a brand-new mnemon document on each
+  edit rather than updating the one keyed by the file's slug, so a
+  single intentional memory edited 3× became 3 near-identical docs
+  (concrete: `reference-morning-signal-iam-decoupled` mirrored 3× on
+  2026-05-15 — ids 2253/2256/2259). The at-save vector-overlap dedup
+  did not catch it: successive edits diverge enough to clear the
+  threshold while still being the same memory by identity.
+
+  Fix — `source_key` (stable caller-owned identity):
+
+  - **`store.save()` upsert-by-key** (`store.py`): a new optional
+    `source_key` argument. At most one *live* (non-invalidated)
+    document exists per `(collection, source_client, source_key)`. An
+    unchanged re-save is idempotent; a changed re-save invalidates the
+    prior live row(s) and inserts a fresh one, recording an auditable
+    supersession chain via `invalidated_by`. The generic content-hash
+    dedup branch is now scoped to `invalidated_at IS NULL` so a
+    revert (A → B → A) surfaces a fresh visible memory instead of
+    resurrecting a dead row's `access_count`. Additive
+    `documents.source_key` column + lookup index migrate in place on
+    existing vaults; rows that predate it stay `NULL` (insert-only,
+    exactly the old behaviour).
+  - **`memory_save` tool** (`server.py` / shared by `server_remote`):
+    threads the optional `source_key` through.
+  - **Auto-mirror** (`mirror.py`): keys `source_key` to the memory
+    file's frontmatter `name` (slug), so a memory edited several
+    times in one session stays a single document.
+
+  Also hardens the auto-generated `documents.path` with a uuid salt —
+  the upsert path can re-insert identical content within the same
+  millisecond (an in-session A → B → A revert), which collided with
+  the `UNIQUE(collection, path)` invariant under the old
+  `time-ms + hash-prefix` scheme.
+
+  Operator follow-up (not in this change): one-shot `memory_forget`
+  sweep of pre-fix same-slug pile-ups in the live default vault
+  (`source_client='mnemon-mirror'` grouped by title, keep
+  `max(created_at)`).
+
 ## [0.6.0rc15] - 2026-05-10
 
 ### Fixed

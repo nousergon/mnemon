@@ -294,11 +294,18 @@ def mirror_path(
 
         client = get_client()
 
+    # Stable upsert identity = the memory file's slug (frontmatter
+    # `name`). A memory file's normal lifecycle is draft → refine →
+    # finalize-on-merge, often several edits within one session; without
+    # this key each edit mirrored a brand-new document. The server
+    # upserts on (collection, source_client, source_key) so the slug
+    # stays a single live doc across edits.
     arguments: dict[str, Any] = {
         "title": title,
         "content": content,
         "content_type": content_type,
         "source_client": "mnemon-mirror",
+        "source_key": title,
     }
 
     result_text, elapsed = client.call_tool(

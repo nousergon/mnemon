@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -181,6 +182,34 @@ class Store:
             );
         """)
         self.db.commit()
+        self._migrate_source_key()
+
+    def _migrate_source_key(self) -> None:
+        """Additive migration: ``documents.source_key`` is a stable
+        caller-supplied identity for upsert-by-slug (the auto-mirror
+        path keys it to the local file's frontmatter ``name``). Vaults
+        created before this column existed get it added in place;
+        ``ADD COLUMN`` with no default is metadata-only and safe on a
+        live WAL vault. Pre-existing rows keep ``source_key = NULL`` and
+        are treated as un-keyed (insert-only) — exactly the old
+        behaviour, so the migration is a no-op for everything that
+        predates it."""
+        cols = {
+            r["name"]
+            for r in self.db.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "source_key" not in cols:
+            self.db.execute("ALTER TABLE documents ADD COLUMN source_key TEXT")
+        # Lookup index for the upsert probe. Non-unique on purpose:
+        # uniqueness is enforced at save() time scoped to
+        # ``invalidated_at IS NULL`` (a partial UNIQUE index can't
+        # express "one *live* row per key" cleanly across the
+        # invalidate-prior + insert supersession we do here).
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_source_key "
+            "ON documents (collection, source_client, source_key)"
+        )
+        self.db.commit()
 
     def save(
         self,
@@ -190,8 +219,20 @@ class Store:
         collection: str = "default",
         source_client: str | None = None,
         confidence: float | None = None,
+        source_key: str | None = None,
     ) -> int:
-        """Save a memory. Returns the document ID."""
+        """Save a memory. Returns the document ID.
+
+        ``source_key`` — when supplied — is a stable caller-owned
+        identity (e.g. the auto-mirror path passes the local memory
+        file's frontmatter ``name``). At most one *live*
+        (non-invalidated) document exists per
+        ``(collection, source_client, source_key)``: an unchanged
+        re-save is idempotent; a changed re-save invalidates the prior
+        live row(s) and inserts a fresh one (supersession recorded via
+        ``invalidated_by``). Without ``source_key`` the historical
+        insert-only behaviour is preserved exactly.
+        """
         content_hash = _sha256(content)
         ct = ContentType(content_type)
         mt = MEMORY_TYPE_MAP.get(ct, MemoryType.SEMANTIC)
@@ -205,9 +246,55 @@ class Store:
             (content_hash, content),
         )
 
-        # Check for existing document with same hash
+        superseded_ids: list[int] = []
+
+        # Upsert-by-slug: when the caller owns a stable identity key,
+        # there is at most one *live* document per
+        # (collection, source_client, source_key). Resolve that before
+        # the generic hash dedup so a divergent edit supersedes its
+        # prior instead of piling up a near-duplicate (the auto-mirror
+        # multi-edit-per-session case).
+        if source_key is not None:
+            priors = self.db.execute(
+                """SELECT id, hash FROM documents
+                   WHERE collection = ?
+                     AND source_client IS ?
+                     AND source_key = ?
+                     AND invalidated_at IS NULL""",
+                (collection, source_client, source_key),
+            ).fetchall()
+            if len(priors) == 1 and priors[0]["hash"] == content_hash:
+                # Unchanged re-save of the same slug — idempotent.
+                self.db.execute(
+                    "UPDATE documents SET access_count = access_count + 1, "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    (priors[0]["id"],),
+                )
+                self.db.commit()
+                return priors[0]["id"]
+            if priors:
+                # Changed (or legacy pile-up) — invalidate every live
+                # row for this key; invalidated_by is stamped to the
+                # new doc below once we have its id.
+                superseded_ids = [p["id"] for p in priors]
+                qmarks = ",".join("?" * len(superseded_ids))
+                self.db.execute(
+                    f"UPDATE documents SET invalidated_at = datetime('now') "
+                    f"WHERE id IN ({qmarks})",
+                    superseded_ids,
+                )
+                self.db.executemany(
+                    "DELETE FROM documents_fts WHERE rowid = ?",
+                    [(i,) for i in superseded_ids],
+                )
+
+        # Check for an existing *live* document with the same content.
+        # Scoped to invalidated_at IS NULL so a re-save of content that
+        # was previously forgotten / superseded creates a fresh visible
+        # memory rather than resurrecting a dead row's access_count.
         row = self.db.execute(
-            "SELECT id FROM documents WHERE hash = ?", (content_hash,)
+            "SELECT id FROM documents WHERE hash = ? AND invalidated_at IS NULL",
+            (content_hash,),
         ).fetchone()
 
         if row:
@@ -218,17 +305,32 @@ class Store:
             self.db.commit()
             return row["id"]
 
-        # Auto-generate a stable path key — content-addressed, sortable by
-        # creation time. Callers have never needed to override this so the
-        # parameter was removed in 0.4.2.
-        path = f"{content_type}/{int(time.time() * 1000)}-{content_hash[:8]}"
+        # Auto-generate a stable path key — sortable by creation time.
+        # Callers have never needed to override this so the parameter was
+        # removed in 0.4.2. The uuid salt guarantees the
+        # UNIQUE(collection, path) invariant even when the upsert-by-slug
+        # path re-inserts identical content within the same millisecond
+        # (e.g. an A -> B -> A revert in one session).
+        path = (
+            f"{content_type}/{int(time.time() * 1000)}"
+            f"-{content_hash[:8]}-{uuid.uuid4().hex[:8]}"
+        )
 
         cur = self.db.execute(
-            """INSERT INTO documents (collection, path, title, hash, content_type, memory_type, confidence, source_client)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (collection, path, title, content_hash, ct.value, mt.value, conf, source_client),
+            """INSERT INTO documents (collection, path, title, hash, content_type, memory_type, confidence, source_client, source_key)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (collection, path, title, content_hash, ct.value, mt.value, conf, source_client, source_key),
         )
         doc_id = cur.lastrowid
+
+        # Record supersession: the prior live rows we just invalidated
+        # point at the doc that replaces them so the chain is auditable.
+        if superseded_ids:
+            qmarks = ",".join("?" * len(superseded_ids))
+            self.db.execute(
+                f"UPDATE documents SET invalidated_by = ? WHERE id IN ({qmarks})",
+                (doc_id, *superseded_ids),
+            )
 
         # Index in FTS5
         self.db.execute(

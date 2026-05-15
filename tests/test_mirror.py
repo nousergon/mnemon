@@ -132,6 +132,9 @@ class TestMirrorPathSaved:
         assert payload["title"] == "Test handoff"
         assert payload["content_type"] == "handoff"
         assert payload["source_client"] == "mnemon-mirror"
+        # Stable upsert identity = the slug (frontmatter `name`), so a
+        # multi-edit session updates one doc instead of piling up dups.
+        assert payload["source_key"] == "Test handoff"
         # Body must be present; description should also be merged in.
         assert "Body content goes here." in payload["content"]
         assert "_A test memory file_" in payload["content"]
