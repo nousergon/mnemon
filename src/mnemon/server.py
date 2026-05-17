@@ -14,6 +14,7 @@ import os
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from .safety import defang_doc
 from .search import search
 from .store import Store
 
@@ -88,7 +89,7 @@ def memory_search(
     store = _get_store()
     results = search(store, query, limit=limit, content_type=content_type)
     return json.dumps([
-        {
+        defang_doc({
             "doc_id": r.doc_id,
             "title": r.title,
             "content": r.content,
@@ -97,7 +98,7 @@ def memory_search(
             "composite_score": r.composite_score,
             "vector_similarity": r.vector_similarity,
             "created_at": r.created_at,
-        }
+        })
         for r in results
     ])
 
@@ -116,7 +117,7 @@ def memory_get(id: int) -> str:
     doc = store.get(id)
     if not doc:
         return json.dumps({"error": "not_found", "id": id})
-    return json.dumps(dataclasses.asdict(doc))
+    return json.dumps(defang_doc(dataclasses.asdict(doc)))
 
 
 @mcp.tool()
@@ -134,7 +135,7 @@ def memory_timeline(
     import dataclasses
     store = _get_store()
     return json.dumps([
-        dataclasses.asdict(d)
+        defang_doc(dataclasses.asdict(d))
         for d in store.timeline(limit, content_type)
     ])
 
@@ -236,7 +237,9 @@ def memory_sweep(dry_run: bool = True) -> str:
     import dataclasses
     store = _get_store()
     result = store.sweep(dry_run)
-    result["candidates"] = [dataclasses.asdict(c) for c in result["candidates"]]
+    result["candidates"] = [
+        defang_doc(dataclasses.asdict(c)) for c in result["candidates"]
+    ]
     return json.dumps(result)
 
 
@@ -250,7 +253,7 @@ def memory_related(id: int, limit: int = 10) -> str:
     import dataclasses
     store = _get_store()
     return json.dumps([
-        dataclasses.asdict(r) for r in store.get_related(id, limit)
+        defang_doc(dataclasses.asdict(r)) for r in store.get_related(id, limit)
     ])
 
 

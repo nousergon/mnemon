@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.6.0rc17] - 2026-05-17
+
+### Security
+
+- **Recalled memory content could impersonate the host control surface
+  (stored prompt-injection / context-poisoning).** mnemon stored and
+  replayed memory text verbatim at every boundary where it re-enters a
+  model's context — MCP `memory_search` / `memory_get` /
+  `memory_timeline` / `memory_related` results (the Claude Desktop
+  path, served by `server_remote.py` which reuses `server.mcp`) and the
+  Claude Code `<mnemon-context>` injection. Session transcripts
+  routinely contain `<system-reminder>` blocks and the deferred-tool
+  `<functions><function>{...schema...}</function></functions>` format;
+  these reached the vault via the `session_extractor` regex fallback
+  (raw `.{20,200}` transcript spans), auto-mirrored handoff files, or
+  explicit `memory_save` of conversation text. Replayed unneutralized,
+  a recalled memory could be mis-parsed by a downstream model as a live
+  system reminder, a tool registration, or could close mnemon's own
+  `<mnemon-context>` wrapper early. No malicious iteration — mnemon was
+  faithfully capturing increasingly realistic harness output and
+  replaying it without defanging.
+
+  Fix — `mnemon.safety.defang_control_markup` (new): an allowlist of
+  control-plane tag *tokens* (`system-reminder`, `functions`,
+  `function`, `mnemon-context`, the namespaced tool-call tags + bare
+  forms) has its angle brackets swapped for guillemets `‹ ›` at every
+  retrieval-tool emit boundary in `server.py`, plus defense-in-depth in
+  the `context_surfacing` render path. Storage stays lossless (raw text
+  in SQLite); only the model-facing copy is defanged, so every memory
+  already in the vault is remediated with no migration. Scoped to the
+  allowlist so ordinary XML/code in memories (`List<T>`,
+  `<observation>`) is untouched. Idempotent. +11 safety tests + 4
+  server emit-boundary tests; suite 754 → 765.
+
 ## [0.6.0rc16] - 2026-05-15
 
 ### Fixed
