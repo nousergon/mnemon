@@ -51,13 +51,16 @@ def _format_results(results: list[dict]) -> str:
     """Render a memory_search JSON response as a markdown list for prompt
     injection. Mirrors the pre-0.5.0 server-side prose format so the
     shape Claude sees in ``<mnemon-context>`` blocks is unchanged."""
+    from ..safety import defang_control_markup
+
     lines: list[str] = []
     for i, r in enumerate(results, 1):
         content = r.get("content", "")
-        snippet = content[:_SNIPPET_CHARS]
+        snippet = defang_control_markup(content[:_SNIPPET_CHARS])
         ellipsis = "..." if len(content) > _SNIPPET_CHARS else ""
         lines.append(
-            f"{i}. [{r.get('content_type', 'note')}] **{r.get('title', '')}** "
+            f"{i}. [{r.get('content_type', 'note')}] "
+            f"**{defang_control_markup(r.get('title', ''))}** "
             f"(score: {r.get('composite_score', 0):.3f}, "
             f"confidence: {r.get('confidence', 0):.2f})\n"
             f"   {snippet}{ellipsis}\n"
