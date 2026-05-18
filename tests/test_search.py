@@ -5,6 +5,7 @@ import tempfile
 
 import pytest
 
+from mnemon.config import PROVENANCE_DEMOTION_FACTOR
 from mnemon.search import (
     ScoredResult,
     _bigrams,
@@ -53,6 +54,70 @@ class TestCompositeScoring:
         scored = composite_score(result)
         assert scored.composite_score > 0
         assert scored.recency_score > 0
+
+
+class TestProvenanceDemotion:
+    """Layer 4 — auto-captured transcript memories must not outrank an
+    equal-relevance deliberate user assertion in unprompted recall."""
+
+    def _result(self, source_client):
+        return SearchResult(
+            doc_id=1,
+            title="Test",
+            content="Hello",
+            content_type="note",
+            memory_type="semantic",
+            confidence=0.5,
+            created_at="2026-04-09T00:00:00",
+            score=1.0,
+            source_client=source_client,
+        )
+
+    def test_hook_source_is_demoted_by_exactly_the_factor(self):
+        user = composite_score(self._result(None))
+        hook = composite_score(self._result("claude-code-hook"))
+        assert hook.composite_score == pytest.approx(
+            user.composite_score * PROVENANCE_DEMOTION_FACTOR
+        )
+        assert hook.composite_score < user.composite_score
+
+    def test_non_hook_sources_not_demoted(self):
+        # compute_recency reads datetime.now(), so two calls differ by a
+        # sub-millisecond epsilon — compare with approx, not exact ==.
+        baseline = composite_score(self._result(None)).composite_score
+        for sc in (None, "mnemon-mirror", "claude-desktop", "cli"):
+            assert composite_score(self._result(sc)).composite_score == pytest.approx(
+                baseline, rel=1e-6
+            )
+
+    def test_source_client_carried_into_scored_result(self):
+        assert composite_score(self._result("claude-code-hook")).source_client == (
+            "claude-code-hook"
+        )
+
+    def test_hook_capture_ranks_below_equal_user_memory(self):
+        # Identical relevance/recency/confidence — provenance is the only
+        # differentiator; the user memory must sort first.
+        user = composite_score(self._result(None))
+        hook = composite_score(self._result("claude-code-hook"))
+        assert sorted(
+            [hook, user], key=lambda r: r.composite_score, reverse=True
+        )[0] is user
+
+    def test_provenance_survives_rrf_fusion(self):
+        hook = SearchResult(
+            doc_id=7, title="H", content="h", content_type="note",
+            memory_type="semantic", confidence=0.5, created_at="2026-04-09",
+            score=1.0, source_client="claude-code-hook",
+        )
+        fused = rrf_fuse([hook])
+        assert fused[0].source_client == "claude-code-hook"
+        # And the demotion then actually fires on the fused result.
+        assert composite_score(fused[0]).composite_score == pytest.approx(
+            composite_score(
+                SearchResult(**{**fused[0].__dict__, "source_client": None})
+            ).composite_score * PROVENANCE_DEMOTION_FACTOR
+        )
 
 
 class TestMMR:

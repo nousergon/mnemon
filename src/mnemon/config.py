@@ -74,6 +74,16 @@ HOOK_SOURCE_CONFIDENCE_CEILING = 0.5
 RRF_K = 60
 MMR_THRESHOLD = 0.6                    # bigram Jaccard ≥ this → candidate is "too similar" to a selected result
 MMR_DEMOTION_FACTOR = 0.5              # composite-score multiplier applied to MMR-demoted results
+# Layer 4 (stored-injection defense): a flat composite-score multiplier
+# applied to HOOK_SOURCE_CLIENTS results at rank time. Stacks on top of
+# the HOOK_SOURCE_CONFIDENCE_CEILING save-time cap — the cap only moves
+# the 0.25-weighted confidence term (≤0.025 composite delta), too weak
+# on its own to stop an auto-captured transcript fragment dominating
+# unprompted recall (the 2026-05-18 Desktop incident). 0.85 ≈ a hook
+# capture needs ~18% more relevance+recency to tie an equal-relevance
+# user-authored memory. Explicit memory_get(id) bypasses composite
+# scoring entirely, so direct lookups are unaffected.
+PROVENANCE_DEMOTION_FACTOR = 0.85
 COMPOSITE_WEIGHTS = (0.5, 0.25, 0.25)  # (relevance, recency, confidence)
 RECENCY_HALF_LIFE_DAYS = 30
 PIN_BOOST = 0.3

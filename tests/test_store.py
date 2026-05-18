@@ -238,6 +238,23 @@ class TestSearchBM25:
         results = store.search_bm25("searchable")
         assert len(results) == 0
 
+    def test_search_carries_source_client_provenance(self, store):
+        # Layer 4: source_client must survive save → search_bm25 so
+        # composite scoring can apply the provenance demotion.
+        store.save(
+            title="Hooked",
+            content="provenance threaded content",
+            source_client="claude-code-hook",
+        )
+        store.save(
+            title="Authored",
+            content="provenance threaded user assertion",
+        )
+        by_title = {r.title: r for r in store.search_bm25("provenance threaded")}
+        assert by_title["Hooked"].source_client == "claude-code-hook"
+        # An explicit/user save has no hook provenance.
+        assert by_title["Authored"].source_client != "claude-code-hook"
+
 
 class TestRelations:
     def test_add_and_get_related(self, store):
