@@ -2,6 +2,28 @@
 
 Universal long-term memory layer for AI agents via MCP.
 
+## Session State & Wind-down
+
+**At the start of any mnemon session, read `private/SYSTEM_STATE.md`
+first** — the living buildout snapshot (version, deploy, architecture,
+security posture, in-flight/deferred, known gotchas). It supersedes the
+one-time `private/mnemon-system-audit-260412.md`. Honor its "Last
+verified" date: if older than ~1 week, re-verify the Current State /
+Deploy blocks before trusting specifics. `ROADMAP.md` (same dir) holds
+open work + the pre-deploy ritual.
+
+**When closing/wrapping a session,** run the wind-down before ending:
+
+1. **`private/ROADMAP.md`** — refresh every task state touched (mark
+   shipped/merged, annotate awaiting-merge, add new items surfaced).
+2. **`private/SYSTEM_STATE.md`** — overwrite the Current State snapshot
+   in place for any changed facts; append a dated Recent Changes line;
+   bump "Last verified". Confirmed milestones only, no speculation.
+3. **Memories** — save durable cross-session facts/decisions/feedback.
+
+`private/` is gitignored — these doc edits are local-only (no commit);
+the git history of code + `CHANGELOG.md` is the durable audit trail.
+
 ## Stack
 
 - **Runtime:** Python >= 3.10
