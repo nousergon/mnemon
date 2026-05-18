@@ -37,6 +37,13 @@ import re
 # mnemon's own wrapper are neutralized.
 _CONTROL_TAGS = (
     "system-reminder",
+    # Bare ``<system>`` — Claude Desktop surfaces an MCP ``memory_search``
+    # result wrapped such that a captured tool-registration block reads as
+    # a live ``<system>`` block (observed: Desktop flagged a recalled
+    # memory as a prompt injection on this token). Listed *after*
+    # ``system-reminder`` so the longer, more specific token wins the
+    # regex alternation for ``<system-reminder>`` inputs.
+    "system",
     "functions",
     "function",
     "mnemon-context",
