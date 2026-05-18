@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .safety import contains_control_markup
 
 # Regex matching auto-memory directories whose writes should propagate
 # to mnemon. The ``--auto`` CLI flag short-circuits when ``file_path``
@@ -279,6 +280,19 @@ def mirror_path(
     if not content:
         raise MirrorError(
             f"Memory file body is empty after frontmatter strip: {path}"
+        )
+
+    # Layer 0: refuse to mirror a body/title carrying host control-plane
+    # markup. A memory file containing a pasted transcript with a live
+    # <system-reminder> / <functions> block is captured scaffolding;
+    # mirroring it would replay (defanged-at-best) into another client.
+    # MirrorError is the surfaced-not-blocked path (auto_mirror logs to
+    # stderr and exits 0). The error text deliberately does not echo the
+    # offending content.
+    if contains_control_markup(title) or contains_control_markup(content):
+        raise MirrorError(
+            f"Memory file contains host control-plane markup "
+            f"(captured harness scaffolding, not a memory): {path}"
         )
 
     chash = _content_hash(title, content)
