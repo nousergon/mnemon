@@ -68,6 +68,22 @@ _LANGLE = "‹"  # ‹  SINGLE LEFT-POINTING ANGLE QUOTATION MARK
 _RANGLE = "›"  # ›  SINGLE RIGHT-POINTING ANGLE QUOTATION MARK
 
 
+def contains_control_markup(text: str) -> bool:
+    """True if ``text`` carries host control-plane markup.
+
+    Detection-only counterpart to :func:`defang_control_markup`, sharing
+    the same allowlist regex. Used at the *capture* boundary (Layer 0):
+    a transcript span containing ``<system-reminder>`` / ``<functions>``
+    / a tool-call envelope is harness scaffolding, not a memory — the
+    correct action there is to *reject* it, not defang it (defang is for
+    recall, where legible prose must survive). Non-string or
+    bracket-free input is ``False`` (cheap hot-path guard).
+    """
+    if not text or not isinstance(text, str) or "<" not in text:
+        return False
+    return _CONTROL_TAG_RE.search(text) is not None
+
+
 def defang_control_markup(text: str) -> str:
     """Neutralize host control-plane tags in untrusted recalled text.
 

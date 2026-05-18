@@ -17,6 +17,7 @@ import re
 import sys
 
 from ..config import HOOK_DEDUP_SIMILARITY_THRESHOLD, HOOK_DEDUP_TIMEOUT_SEC
+from ..safety import contains_control_markup
 
 # ── LLM Extraction ──────────────────────────────────────────────────────────
 
@@ -79,12 +80,21 @@ def is_well_shaped(obs: dict) -> bool:
     """Return True if ``obs`` passes the shape gate for hook saves.
 
     Applied before the dedup roundtrip so malformed captures don't
-    consume a remote ``memory_search`` slot. Composes with the
+    consume a remote ``memory_search`` slot. Also the authoritative
+    Layer 0 gate: rejects spans carrying host control-plane markup
+    (captured harness scaffolding, not a memory). Composes with the
     server-side confidence cap on ``source_client='claude-code-hook'``
     in :func:`mnemon.store.Store.save` — defense in depth.
     """
     title = (obs.get("title") or "").strip()
     content = (obs.get("content") or "").strip()
+    # Layer 0: a span carrying host control-plane markup is captured
+    # harness scaffolding, not a memory. Reject it before it reaches the
+    # vault and gets replayed (defanged-at-best) into another client's
+    # context. Authoritative chokepoint — covers the LLM and regex
+    # paths and any future caller. See safety.contains_control_markup.
+    if contains_control_markup(title) or contains_control_markup(content):
+        return False
     if len(content) < MIN_OBSERVATION_CHARS:
         return False
     if content.endswith("?"):
@@ -228,6 +238,20 @@ def main() -> None:
         saved = 0
         for obs in observations:
             content_type = obs["type"] if obs["type"] in VALID_TYPES else "observation"
+
+            # Layer 0 — reject captured harness scaffolding. Distinct
+            # from the shape skip below: log the reason but never echo
+            # the offending title/content back (it is the poison).
+            if contains_control_markup(obs.get("title") or "") or (
+                contains_control_markup(obs.get("content") or "")
+            ):
+                print(
+                    "mnemon: dropping observation — contains host "
+                    "control-plane markup (captured scaffolding, not a "
+                    "memory)",
+                    file=sys.stderr,
+                )
+                continue
 
             # Shape gate — drop fragments before they consume a remote
             # search slot or land in the vault as high-confidence noise.
