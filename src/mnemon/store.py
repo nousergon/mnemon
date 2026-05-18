@@ -63,6 +63,11 @@ class SearchResult:
     created_at: str
     score: float
     source: str = "bm25"
+    # Provenance — the save's source_client. Carried through search +
+    # RRF fusion so composite scoring can apply the Layer 4 provenance
+    # demotion (auto-captured transcripts must not outrank deliberate
+    # user assertions at equal relevance). None for legacy/unknown.
+    source_client: str | None = None
 
 
 @dataclass
@@ -435,6 +440,7 @@ class Store:
                       d.memory_type,
                       d.confidence,
                       d.created_at,
+                      d.source_client,
                       rank * -1 AS bm25_score
                    FROM documents_fts fts
                    JOIN documents d ON d.id = fts.rowid
@@ -457,6 +463,7 @@ class Store:
                     created_at=r["created_at"],
                     score=r["bm25_score"],
                     source="bm25",
+                    source_client=r["source_client"],
                 )
                 for r in rows
             ]
@@ -485,7 +492,7 @@ class Store:
             content_hash = vr["id"].split("_")[0]
             row = self.db.execute(
                 """SELECT d.id AS doc_id, d.title, c.doc AS content, d.content_type,
-                          d.memory_type, d.confidence, d.created_at
+                          d.memory_type, d.confidence, d.created_at, d.source_client
                    FROM documents d
                    JOIN content c ON d.hash = c.hash
                    WHERE d.hash = ? AND d.invalidated_at IS NULL
@@ -505,6 +512,7 @@ class Store:
                     created_at=row["created_at"],
                     score=vr["similarity"],
                     source="vector",
+                    source_client=row["source_client"],
                 ))
 
             if len(results) >= limit:

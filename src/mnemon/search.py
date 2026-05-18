@@ -15,8 +15,10 @@ from datetime import datetime, timezone
 
 from .config import (
     COMPOSITE_WEIGHTS,
+    HOOK_SOURCE_CLIENTS,
     MMR_DEMOTION_FACTOR,
     MMR_THRESHOLD,
+    PROVENANCE_DEMOTION_FACTOR,
     QUERY_EXPANSION_MAX_TOKENS,
     RECENCY_HALF_LIFE_DAYS,
     RRF_K,
@@ -39,6 +41,9 @@ class ScoredResult:
     source: str
     composite_score: float = 0.0
     recency_score: float = 0.0
+    # Provenance of the underlying save, preserved for observability and
+    # so downstream consumers can see the Layer 4 demotion was applied.
+    source_client: str | None = None
     # Raw cosine similarity from the vector store, preserved through RRF
     # fusion so clients can do true-similarity comparisons (e.g., dedup)
     # without trying to reverse-engineer it from composite_score. None
@@ -57,10 +62,20 @@ def compute_recency(created_at: str) -> float:
 
 
 def composite_score(result: SearchResult) -> ScoredResult:
-    """Apply composite scoring: relevance + recency + confidence."""
+    """Apply composite scoring: relevance + recency + confidence.
+
+    Layer 4: results whose ``source_client`` is in
+    :data:`HOOK_SOURCE_CLIENTS` (best-effort auto-captured transcripts,
+    not deliberate user assertions) have their composite multiplied by
+    :data:`PROVENANCE_DEMOTION_FACTOR` so they cannot outrank an
+    equal-relevance user-authored memory in unprompted recall. This is
+    rank-only — explicit ``memory_get(id)`` does not pass through here.
+    """
     w_rel, w_rec, w_conf = COMPOSITE_WEIGHTS
     recency = compute_recency(result.created_at)
     composite = w_rel * result.score + w_rec * recency + w_conf * result.confidence
+    if result.source_client in HOOK_SOURCE_CLIENTS:
+        composite *= PROVENANCE_DEMOTION_FACTOR
 
     return ScoredResult(
         doc_id=result.doc_id,
@@ -74,6 +89,7 @@ def composite_score(result: SearchResult) -> ScoredResult:
         source=result.source,
         composite_score=composite,
         recency_score=recency,
+        source_client=result.source_client,
     )
 
 
@@ -152,6 +168,7 @@ def rrf_fuse(*result_sets: list[SearchResult]) -> list[SearchResult]:
                         created_at=r.created_at,
                         score=0,
                         source="fused",
+                        source_client=r.source_client,
                     ),
                 }
 
