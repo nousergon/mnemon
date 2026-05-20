@@ -35,4 +35,16 @@ jobs:
         # in a runtime/dev dep fails the workflow. If a transitive dep
         # has no fix available, file an upstream issue + add
         # `--ignore-vuln <ID>` here with a comment explaining why.
-        run: pip-audit --strict .
+        #
+        # Ignored advisories:
+        #
+        # PYSEC-2025-183 (pyjwt, 0.1.1–2.12.1, no fix release): flags
+        # that pyjwt does not enforce a minimum HMAC key length.
+        # Disputed by upstream ("the key length is chosen by the
+        # application that uses the library") — there is no patched
+        # version to upgrade to. mnemon's only pyjwt use is in
+        # `src/mnemon/oauth_as.py`, which signs/verifies with RS256
+        # against a 2048-bit RSA keypair (algorithm hard-locked, no
+        # HS-allowance). The advisory describes no condition that
+        # applies to this usage.
+        run: pip-audit --strict --ignore-vuln PYSEC-2025-183 .
