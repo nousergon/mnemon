@@ -59,6 +59,45 @@ def _run_cmd(cmd: str) -> tuple[bool, str]:
     return False, result.stderr.strip()
 
 
+def _checkpoint_wal(sqlite_path: Path) -> str | None:
+    """Force a WAL checkpoint so the main sqlite file contains all
+    committed writes before ``aws s3 cp`` reads it.
+
+    Short-lived CLI processes (e.g. ``mnemon save``) auto-checkpoint
+    on connection close, so the WAL file disappears and the main file
+    contains all data. Long-lived processes (e.g. ``mnemon
+    serve-remote`` on Fly) hold an open SQLite connection — new
+    commits accumulate in the WAL and SQLite only auto-checkpoints
+    once the WAL grows past 1000 pages (default). Without an explicit
+    checkpoint here, ``mnemon sync push`` running against a
+    long-running server uploads a stale main file missing the latest
+    writes, and the downstream ``sync pull`` silently restores
+    the stale state.
+
+    Surfaced 2026-05-21 during the 0.6.0 Layer-3 test: Step 4 added a
+    doc via remote (committed to Fly serve-remote's WAL but never
+    flushed to main); downgrade's Fly→S3 dump (added in 0.6.0 too)
+    then uploaded the stale main and lost the doc on local restore.
+
+    TRUNCATE mode: most thorough, blocks briefly if other readers
+    hold locks. Acceptable for the (push, sync) flow — we don't
+    expect concurrent traffic during a deliberate sync push. Failures
+    are returned as a string so the caller can log without raising
+    (sync push remains best-effort per error).
+    """
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(sqlite_path), timeout=10.0)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return f"sqlite checkpoint failed: {exc}"
+    return None
+
+
 def push() -> dict[str, list[str]]:
     """Push local vault to S3.
 
@@ -75,6 +114,14 @@ def push() -> dict[str, list[str]]:
     for label, local_path in files.items():
         if not local_path.exists():
             continue
+
+        # Force WAL → main flush before reading the sqlite file as bytes.
+        # See _checkpoint_wal docstring for the rationale.
+        if label == "sqlite":
+            ckpt_err = _checkpoint_wal(local_path)
+            if ckpt_err is not None:
+                errors.append(ckpt_err)
+                continue
 
         ext = "sqlite" if label == "sqlite" else "vec.npz"
         s3_target = _s3_path(f"{_vault_name()}.{ext}")
