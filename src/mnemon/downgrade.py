@@ -133,18 +133,43 @@ def _reconfigure_clients_local(detected: list[str]) -> list[str]:
 
 
 def _fly_dump_vault(app_name: str) -> None:
-    """SSH into the Fly machine and run ``mnemon sync push``.
+    """SSH into the Fly machine, force a WAL checkpoint, then run
+    ``mnemon sync push``.
 
     Mirror of ``upgrade._fly_seed_vault`` in the opposite direction —
     dumps the *current* Fly vault to S3 so the subsequent local
     ``mnemon sync pull`` gets up-to-date state, not whatever stale
     snapshot was last pushed at upgrade time.
 
+    The inline WAL checkpoint via Python (instead of relying on the
+    installed mnemon's `sync.push` to checkpoint) handles the
+    version-skew bootstrap: the Fly container may be running an older
+    mnemon that predates the in-push checkpoint (0.6.0+, via
+    `sync._checkpoint_wal`). Inline-checkpointing via stdlib `sqlite3`
+    guarantees correctness regardless of the installed mnemon
+    version. Once Fly is running 0.6.0+, this is belt-and-suspenders
+    (the second checkpoint inside `mnemon sync push` is a no-op).
+
     Without this step, any memory added via remote after the upgrade
     is lost on downgrade — only data that was on S3 at upgrade time
     survives the round-trip. Surfaced 2026-05-21 during the 0.6.0
     Layer-3 test as "expected 4 docs after downgrade, got '3'".
     """
+    # Inline Python checkpoint:
+    #   - Uses stdlib `sqlite3` — no mnemon-version dependency.
+    #   - Single quotes inside Python string don't conflict with the
+    #     outer shell-double-quoted `python -c "..."` argument.
+    #   - `PRAGMA wal_checkpoint(TRUNCATE)` flushes WAL → main and
+    #     truncates the WAL file. Idempotent.
+    checkpoint_py = (
+        "python -c \""
+        "import sqlite3; "
+        "c=sqlite3.connect('/data/default.sqlite', timeout=10); "
+        "c.execute('PRAGMA wal_checkpoint(TRUNCATE);'); "
+        "c.commit(); c.close()"
+        "\""
+    )
+    remote_cmd = f"{checkpoint_py} && mnemon sync push"
     subprocess.run(
         [
             "flyctl",
@@ -153,7 +178,7 @@ def _fly_dump_vault(app_name: str) -> None:
             "--app",
             app_name,
             "-C",
-            "mnemon sync push",
+            remote_cmd,
         ],
         check=True,
     )
