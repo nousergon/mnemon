@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.6.0] - 2026-05-21
+
+### Release
+
+- **Promotion from `0.6.0rc18` to `0.6.0` stable.** No code changes
+  from `rc18` — this release closes the rc cycle that ran from
+  `0.6.0rc1` (2026-04-21, the simplification arc → two-product split)
+  through `0.6.0rc18` (2026-05-18, the layered stored-injection
+  defense). `0.6.0` is `rc18` at stable maturity; the source under
+  this tag is byte-identical to the `rc18` source under the prior
+  tag, modulo this CHANGELOG entry and the version-string bump.
+
+  The rc cycle delivered:
+  - The simplification arc — mnemon local (stdio + single-file vault)
+    and mnemon web (Fly + S3 backup) as one codebase, symmetric
+    `upgrade web` / `downgrade local`, single source of truth
+    invariant. (`rc1` → `rc7`.)
+  - Runtime hardening from rc11-deploy observations: fresh-session
+    deadlock fix (`json_response=True`), `_session_creation_lock`
+    narrowing, periodic `expire_old()` + decay sweeps in the lifespan
+    task, OAuth refresh-token rotation grace, warm-keeper +
+    persistent sessions. (`rc8` → `rc14`.)
+  - Auto-mirror discipline: shape gate (`is_well_shaped`) + confidence
+    cap to keep transcript fragments from outranking deliberate
+    user-authored memories; upsert-by-slug (`source_key`) to stop the
+    multi-edit duplication pattern. (`rc15`, `rc16`.)
+  - The five-layer stored-injection defense end-to-end: token defang
+    allowlist (Layer 2), capture-time scaffolding rejection (Layer 0
+    — root cause), provenance trust-tiering (Layer 4), spotlighting
+    data envelope at recall (Layer 1, Claude Code path). (`rc17`,
+    `rc18`.)
+
+  `0.7.0` will open the salience-tier work — separating standing
+  constraints (capped, unconditionally injected) from situational
+  recall.
+
 ## [0.6.0rc18] - 2026-05-18
 
 ### Security
