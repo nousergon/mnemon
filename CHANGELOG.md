@@ -44,6 +44,26 @@
   the override flag, the fail-loud on SSH error, the
   custom-domain skip, and the SSH command shape.
 
+- **`mnemon sync push` now WAL-checkpoints before reading the sqlite
+  file.** SQLite WAL mode means new commits accumulate in
+  `default.sqlite-wal` until an auto-checkpoint fires (default: WAL
+  > 1000 pages). For short-lived CLI processes (`mnemon save`) this
+  doesn't matter — connection close auto-checkpoints. For long-lived
+  servers (`mnemon serve-remote` on Fly) the WAL accumulates
+  indefinitely; `aws s3 cp default.sqlite` then uploads a stale main
+  file missing all the recent writes. Composed with the downgrade
+  fix above, this manifested as: Step 4's `memory_save` against
+  Fly committed to WAL → downgrade's Fly→S3 dump uploaded only the
+  main file (still stale) → local pull restored 3 docs instead of 4.
+  Fix: `sync._checkpoint_wal` opens a transient connection and
+  runs `PRAGMA wal_checkpoint(TRUNCATE)` before the `aws s3 cp`.
+  Reproduced: 3-row insert via long-lived `Store()` left main at
+  4KB (no `documents` table at all in a main-only copy); after
+  checkpoint, main grew to 69KB and copy showed all 3 rows. 3
+  regression tests cover the helper's behavior, the error-string
+  contract for malformed files, and the call order in `push()`
+  (checkpoint then aws_cp).
+
   The rc cycle delivered:
   - The simplification arc — mnemon local (stdio + single-file vault)
     and mnemon web (Fly + S3 backup) as one codebase, symmetric
