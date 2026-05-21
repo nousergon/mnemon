@@ -176,7 +176,16 @@ _layer3_cleanup() {
     #   command. Cleanup failures surface via the WARN log to operator stdout
     #   so the next layer3 invocation's "dangling mnemon-test-* apps" preflight
     #   will catch any leftover state.
+    #
+    # Auth-state restore is **not** best-effort: a failure here leaves the
+    # operator's prod mnemon broken (~/.mnemon/{remote_url,local_token}
+    # pointing at the now-destroyed test app). Surface the restore explicitly,
+    # but still don't override `rc` — the underlying script failure remains
+    # the primary signal.
     local rc=$?
+
+    # 1. Destroy any lingering test Fly app first — frees the namespace + stops
+    #    cost accumulation before doing anything else.
     if [ -n "${TEST_APP_NAME:-}" ] && flyctl apps list 2>/dev/null | grep -q "$TEST_APP_NAME"; then
         echo_warn "cleanup: destroying lingering test app $TEST_APP_NAME"
         flyctl apps destroy "$TEST_APP_NAME" -y >/dev/null 2>&1 || echo_warn "cleanup: flyctl destroy failed for $TEST_APP_NAME"
@@ -190,6 +199,26 @@ _layer3_cleanup() {
     if [ -n "${MNEMON_CLIENT_CONFIG_ROOT:-}" ] && [[ "$MNEMON_CLIENT_CONFIG_ROOT" == "$HOME/.mnemon-test-configs-"* ]]; then
         rm -rf "$MNEMON_CLIENT_CONFIG_ROOT" || true
     fi
+
+    # 2. Restore the operator's pre-Layer-3 mnemon auth state. `mnemon upgrade
+    #    web` overwrites ~/.mnemon/{remote_url,local_token} in place — neither
+    #    is covered by MNEMON_VAULT_DIR or MNEMON_CLIENT_CONFIG_ROOT — so we
+    #    must put them back. Skipping this leaves prod mnemon unreachable.
+    if [ -n "${LAYER3_AUTH_BACKUP_DIR:-}" ] && [ -d "$LAYER3_AUTH_BACKUP_DIR" ]; then
+        local restored=0
+        for f in remote_url local_token; do
+            if [ -f "$LAYER3_AUTH_BACKUP_DIR/$f" ]; then
+                cp -p "$LAYER3_AUTH_BACKUP_DIR/$f" "$HOME/.mnemon/$f" \
+                    && restored=$((restored + 1)) \
+                    || echo_err "cleanup: FAILED to restore ~/.mnemon/$f — operator must recover by hand"
+            fi
+        done
+        if [ "$restored" -gt 0 ]; then
+            echo_ok "cleanup: restored $restored pre-Layer-3 auth file(s) under ~/.mnemon/"
+        fi
+        rm -rf "$LAYER3_AUTH_BACKUP_DIR" || true
+    fi
+
     return $rc
 }
 
@@ -250,17 +279,57 @@ cmd_layer3() {
     export MNEMON_PROD_APP_NAMES="mnemon-memory"
 
     mkdir -p "$MNEMON_VAULT_DIR" "$MNEMON_CLIENT_CONFIG_ROOT"
+
+    # ---- Snapshot the operator's pre-Layer-3 mnemon auth state ----
+    #
+    # `mnemon upgrade web` overwrites ~/.mnemon/{remote_url,local_token} in
+    # place with the test app's URL and freshly-generated token. The runbook's
+    # isolation strategy (MNEMON_VAULT_DIR + MNEMON_CLIENT_CONFIG_ROOT)
+    # covers vault + client configs but NOT these two files. If the test app
+    # is then destroyed (trap path or success path), the operator's prod
+    # mnemon is left unreachable until they manually recover.
+    #
+    # Snapshot now, restore in the cleanup trap.
+    export LAYER3_AUTH_BACKUP_DIR
+    LAYER3_AUTH_BACKUP_DIR="$(mktemp -d -t mnemon-layer3-auth-XXXXXX)"
+    for f in remote_url local_token; do
+        if [ -f "$HOME/.mnemon/$f" ]; then
+            cp -p "$HOME/.mnemon/$f" "$LAYER3_AUTH_BACKUP_DIR/$f"
+        fi
+    done
+    echo_ok "snapshotted pre-Layer-3 auth state to $LAYER3_AUTH_BACKUP_DIR"
+
+    # Install the cleanup trap now that we have something to restore.
     trap _layer3_cleanup EXIT
     echo_ok "isolated test env (RUN_ID=$TEST_RUN_ID, app=$TEST_APP_NAME)"
 
     local M="$MNEMON_VENV_BIN/mnemon"
 
+    # ---- Force local-mode for the Step 2 seed ----
+    #
+    # `mnemon save` honors ~/.mnemon/remote_url (and the MNEMON_REMOTE_URL
+    # env var) and will write to whatever URL is configured. The prod URL
+    # in the file means seed saves would land in PROD, not the local test
+    # vault — which is exactly the bug that produced "0 docs on remote"
+    # after the S3 → Fly seed earlier today.
+    #
+    # Move the file aside and unset the env var so saves use local mode.
+    # Upgrade web (Step 3) will write the test app's URL into a fresh
+    # remote_url file; the trap restores the snapshot at the very end.
+    unset MNEMON_REMOTE_URL
+    if [ -f "$HOME/.mnemon/remote_url" ]; then
+        rm -f "$HOME/.mnemon/remote_url"
+        echo_ok "moved ~/.mnemon/remote_url aside so Step 2 saves use local mode"
+    fi
+
     echo_step "Step 2 — seed local test vault"
     "$M" save "Test memory for E2E upgrade cycle" "run-$TEST_RUN_ID" --type observation
     "$M" save "Second test memory, should survive upgrade" "run-$TEST_RUN_ID" --type observation
     "$M" save "Preference to keep after upgrade/downgrade" "run-$TEST_RUN_ID" --type preference
-    "$M" status
-    echo_ok "3 docs seeded in test vault"
+    local seeded_local_count
+    seeded_local_count="$("$M" status 2>&1 | awk '/^Total memories:/{print $NF; exit}')"
+    [[ "$seeded_local_count" == "3" ]] || die "expected 3 docs in local test vault, got '$seeded_local_count' (saves likely routed somewhere unexpected)"
+    echo_ok "3 docs seeded in local test vault"
 
     echo_step "Step 3 — upgrade web to $TEST_APP_NAME (pinned to mnemon-memory==$LAYER3_VERSION)"
     "$M" upgrade web --app-name "$TEST_APP_NAME" --mnemon-version "$LAYER3_VERSION"
