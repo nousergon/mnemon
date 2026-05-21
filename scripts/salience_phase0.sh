@@ -53,44 +53,78 @@ cmd_snapshot() {
 
     flyctl auth whoami >/dev/null 2>&1 || die "flyctl not logged in"
 
+    # Vec store lives alongside the sqlite (FastEmbed embeddings).
+    # build_standing_set.py needs BOTH for embedding-based signals
+    # (constraint_score, time_penalty) — without the .vec.npz, those
+    # signals are zero and the scorer falls back to FTS-breadth-only,
+    # which surfaces noise. Surfaced 2026-05-21 when bare-sqlite
+    # snapshot produced garbage picks ("halt the run", "propagate").
+    local VEC_PATH="${SNAPSHOT_PATH%.sqlite}.vec.npz"
+
     # 1) Backup-API snapshot on the Fly machine to /tmp/snap.sqlite
-    # 2) sftp get to local
-    # 3) clean up the remote temp file
+    # 2) Copy vec.npz to /tmp/snap.vec.npz (numpy savez is atomic via
+    #    temp+rename, so plain cp is safe even with serve-remote
+    #    actively writing)
+    # 3) sftp both files down
+    # 4) clean up remote temp files
     #
-    # Why backup-API not raw cp: live serve-remote has frames in WAL
-    # that raw cp of default.sqlite would miss (verified 2026-05-21).
-    # Connection.backup() handles WAL atomically.
-    echo_step "  Step 1/3 — backup on Fly via online-backup API"
+    # Why backup-API not raw cp for sqlite: live serve-remote has
+    # frames in WAL that raw cp of default.sqlite would miss
+    # (verified 2026-05-21). Connection.backup() handles WAL atomically.
+    echo_step "  Step 1/4 — sqlite backup on Fly via online-backup API"
     flyctl ssh console -a "$FLY_APP" -C \
         "python -c 'import sqlite3; src=sqlite3.connect(\"/data/default.sqlite\"); dst=sqlite3.connect(\"/tmp/snap.sqlite\"); src.backup(dst); src.close(); dst.close(); print(\"snapshot done\")'" \
-        || die "remote backup failed"
-    echo_ok "remote snapshot written to /tmp/snap.sqlite on $FLY_APP"
+        || die "remote sqlite backup failed"
+    echo_ok "remote /tmp/snap.sqlite written"
 
-    echo_step "  Step 2/3 — sftp download"
-    rm -f "$SNAPSHOT_PATH"
-    # flyctl ssh sftp get takes <remote> <local>
+    echo_step "  Step 2/4 — vecstore copy on Fly (numpy savez is atomic)"
+    flyctl ssh console -a "$FLY_APP" -C \
+        "cp /data/default.vec.npz /tmp/snap.vec.npz && echo 'vec copy done'" \
+        || echo_warn "remote vecstore copy failed — embedding signals will be zero"
+    echo_ok "remote /tmp/snap.vec.npz written"
+
+    echo_step "  Step 3/4 — sftp download (sqlite + vec.npz)"
+    rm -f "$SNAPSHOT_PATH" "$VEC_PATH"
     flyctl ssh sftp get -a "$FLY_APP" /tmp/snap.sqlite "$SNAPSHOT_PATH" \
-        || die "sftp download failed"
+        || die "sftp sqlite download failed"
     [ -f "$SNAPSHOT_PATH" ] || die "sftp succeeded but $SNAPSHOT_PATH missing"
-    local size
-    size="$(stat -f '%z' "$SNAPSHOT_PATH" 2>/dev/null || stat -c '%s' "$SNAPSHOT_PATH")"
-    echo_ok "downloaded ${size}B to $SNAPSHOT_PATH"
+    flyctl ssh sftp get -a "$FLY_APP" /tmp/snap.vec.npz "$VEC_PATH" \
+        || echo_warn "sftp vec.npz download failed — embedding signals will be zero"
+    local sqlite_size vec_size
+    sqlite_size="$(stat -f '%z' "$SNAPSHOT_PATH" 2>/dev/null || stat -c '%s' "$SNAPSHOT_PATH")"
+    if [ -f "$VEC_PATH" ]; then
+        vec_size="$(stat -f '%z' "$VEC_PATH" 2>/dev/null || stat -c '%s' "$VEC_PATH")"
+        echo_ok "downloaded sqlite=${sqlite_size}B vec.npz=${vec_size}B"
+    else
+        echo_warn "downloaded sqlite=${sqlite_size}B, vec.npz MISSING (embedding signals will be zero)"
+    fi
 
-    echo_step "  Step 3/3 — clean up remote temp file"
-    flyctl ssh console -a "$FLY_APP" -C "rm -f /tmp/snap.sqlite" \
+    echo_step "  Step 4/4 — clean up remote temp files"
+    flyctl ssh console -a "$FLY_APP" -C "rm -f /tmp/snap.sqlite /tmp/snap.vec.npz" \
         || echo_warn "remote cleanup failed (harmless — /tmp churns on machine restart)"
-    echo_ok "remote /tmp/snap.sqlite removed"
+    echo_ok "remote /tmp files removed"
 
-    # Quick sanity: count live memories in the snapshot
-    local live_count
+    # Quick sanity: count live memories + verify vec.npz is loadable
+    local live_count vec_count
     live_count="$("$MNEMON_VENV_BIN/python" -c "
 import sqlite3
 c = sqlite3.connect('$SNAPSHOT_PATH')
 print(c.execute('SELECT COUNT(*) FROM documents WHERE invalidated_at IS NULL').fetchone()[0])
 ")"
+    if [ -f "$VEC_PATH" ]; then
+        vec_count="$("$MNEMON_VENV_BIN/python" -c "
+import numpy as np
+d = np.load('$VEC_PATH', allow_pickle=True)
+print(len(d['ids']))
+" 2>/dev/null || echo '?')"
+    else
+        vec_count="(absent)"
+    fi
     echo_step "Snapshot ready"
-    echo "  Path: $SNAPSHOT_PATH"
+    echo "  Sqlite:  $SNAPSHOT_PATH"
+    echo "  Vec:     $VEC_PATH"
     echo "  Live memories: $live_count"
+    echo "  Vectors:       $vec_count"
     echo ""
     echo "Next: scripts/salience_phase0.sh score"
 }
