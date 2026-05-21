@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -132,44 +133,92 @@ def _reconfigure_clients_local(detected: list[str]) -> list[str]:
     return reconfigured
 
 
+_FLY_DUMP_SCRIPT = """
+import sqlite3, os, subprocess, sys
+
+SRC = '/data/default.sqlite'
+SNAP = '/tmp/_mnemon_snapshot.sqlite'
+
+# Clean prior snapshot, if any.
+try:
+    os.remove(SNAP)
+except FileNotFoundError:
+    pass
+
+# Online-backup API produces an atomic snapshot regardless of WAL
+# state — see _fly_dump_vault docstring for the rationale.
+src = sqlite3.connect(SRC, timeout=10)
+dst = sqlite3.connect(SNAP)
+src.backup(dst)
+src.close()
+dst.close()
+
+bucket = os.environ['MNEMON_S3_BUCKET']
+prefix = os.environ.get('MNEMON_S3_PREFIX', 'mnemon/vaults')
+name = os.environ.get('MNEMON_VAULT_NAME', 'default')
+
+# Upload sqlite snapshot.
+subprocess.run(
+    ['aws', 's3', 'cp', SNAP, f's3://{bucket}/{prefix}/{name}.sqlite',
+     '--only-show-errors'],
+    check=True,
+)
+
+# Upload vector store too if present (best-effort — embeddings
+# regenerate on demand, but skipping the cp would leave the local
+# vault with stale vectors post-downgrade).
+vec_path = f'/data/{name}.vec.npz'
+if os.path.exists(vec_path):
+    subprocess.run(
+        ['aws', 's3', 'cp', vec_path, f's3://{bucket}/{prefix}/{name}.vec.npz',
+         '--only-show-errors'],
+        check=False,
+    )
+
+# Cleanup snapshot.
+try:
+    os.remove(SNAP)
+except FileNotFoundError:
+    pass
+
+print('fly dump: snapshot uploaded')
+"""
+
+
 def _fly_dump_vault(app_name: str) -> None:
-    """SSH into the Fly machine, force a WAL checkpoint, then run
-    ``mnemon sync push``.
+    """SSH into the Fly machine and dump the live vault to S3 via
+    SQLite's online-backup API.
 
     Mirror of ``upgrade._fly_seed_vault`` in the opposite direction —
-    dumps the *current* Fly vault to S3 so the subsequent local
-    ``mnemon sync pull`` gets up-to-date state, not whatever stale
-    snapshot was last pushed at upgrade time.
+    captures the *current* Fly vault state and uploads it to S3 so
+    the subsequent local ``sync pull`` gets up-to-date data, not
+    whatever stale snapshot was last pushed at upgrade time.
 
-    The inline WAL checkpoint via Python (instead of relying on the
-    installed mnemon's `sync.push` to checkpoint) handles the
-    version-skew bootstrap: the Fly container may be running an older
-    mnemon that predates the in-push checkpoint (0.6.0+, via
-    `sync._checkpoint_wal`). Inline-checkpointing via stdlib `sqlite3`
-    guarantees correctness regardless of the installed mnemon
-    version. Once Fly is running 0.6.0+, this is belt-and-suspenders
-    (the second checkpoint inside `mnemon sync push` is a no-op).
+    **Why backup API instead of WAL checkpoint:** SQLite WAL frames
+    only flush to the main file via auto-checkpoint (1000 pages
+    default) or an explicit ``PRAGMA wal_checkpoint``. With a
+    long-running ``mnemon serve-remote`` holding the connection
+    open, a fresh sub-process issuing ``PRAGMA wal_checkpoint(TRUNCATE)``
+    returns ``(busy=0, total=0, checkpointed=0)`` — succeeds but
+    flushes zero frames. The recent writes stay in WAL, the main
+    file stays stale, ``aws s3 cp`` uploads the stale main, and the
+    downstream pull silently loses the writes.
+
+    ``sqlite3.Connection.backup()`` uses SQLite's online-backup API
+    which produces a consistent atomic snapshot regardless of WAL
+    state — even with concurrent writers. We back up to a temp file
+    and ``aws s3 cp`` that. Vec store is uploaded separately
+    (best-effort; embeddings are regeneratable).
 
     Without this step, any memory added via remote after the upgrade
-    is lost on downgrade — only data that was on S3 at upgrade time
-    survives the round-trip. Surfaced 2026-05-21 during the 0.6.0
-    Layer-3 test as "expected 4 docs after downgrade, got '3'".
+    is lost on downgrade. Surfaced 2026-05-21 during the 0.6.0
+    Layer-3 test as a chain of "expected 4 docs after downgrade,
+    got '3'" — PR #139 added the SSH'd sync push, PR #140 added an
+    in-push checkpoint that doesn't work cross-process, PR #141
+    added an inline checkpoint that *also* doesn't work cross-process.
+    This PR uses the backup API which actually works.
     """
-    # Inline Python checkpoint:
-    #   - Uses stdlib `sqlite3` — no mnemon-version dependency.
-    #   - Single quotes inside Python string don't conflict with the
-    #     outer shell-double-quoted `python -c "..."` argument.
-    #   - `PRAGMA wal_checkpoint(TRUNCATE)` flushes WAL → main and
-    #     truncates the WAL file. Idempotent.
-    checkpoint_py = (
-        "python -c \""
-        "import sqlite3; "
-        "c=sqlite3.connect('/data/default.sqlite', timeout=10); "
-        "c.execute('PRAGMA wal_checkpoint(TRUNCATE);'); "
-        "c.commit(); c.close()"
-        "\""
-    )
-    remote_cmd = f"{checkpoint_py} && mnemon sync push"
+    remote_cmd = f"python -c {shlex.quote(_FLY_DUMP_SCRIPT)}"
     subprocess.run(
         [
             "flyctl",
