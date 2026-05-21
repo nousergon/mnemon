@@ -23,6 +23,7 @@ All memory reads flow to the Fly vault via :mod:`mnemon.hooks._remote_client`.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import sys
 
@@ -65,6 +66,76 @@ _SPOTLIGHT_INSTRUCTION = (
 )
 
 
+# ── Phase 0 of the salience-tier plan ─────────────────────────────
+# (private/mnemon-salience-tier-plan-260521.md)
+#
+# Standing context — feature-flagged, opt-in via MNEMON_STANDING_TIER_FILE.
+# When the env var points at a JSON file shaped {"ids": [<id>, <id>, ...]},
+# build_context fetches each ID via the remote MCP client and prepends a
+# labeled "Standing context" sub-section inside the existing
+# <mnemon-context> envelope, ahead of the query-driven block.
+#
+# Per-prompt cost: ~500ms × N (sequential memory_get HTTP calls). For N=10
+# that's ~5s added latency. Phase 0 accepts this cost — the diagnostic is
+# about hypothesis validation, not perf. Phase 1 will optimize via local
+# cache or batch fetch.
+#
+# Defaults to unset = original behavior unchanged.
+
+def _load_standing_ids() -> list[int]:
+    """Read standing-tier IDs from MNEMON_STANDING_TIER_FILE, if set."""
+    path = os.environ.get("MNEMON_STANDING_TIER_FILE")
+    if not path:
+        return []
+    try:
+        with open(os.path.expanduser(path)) as f:
+            data = json.load(f)
+        return [int(x) for x in data.get("ids", [])]
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        # Best-effort. Malformed standing file shouldn't break recall —
+        # log to stderr so the operator sees it without breaking Claude Code.
+        print(
+            f"mnemon: failed to load standing-tier IDs from {path}",
+            file=sys.stderr,
+        )
+        return []
+
+
+def _fetch_standing_block(ids: list[int]) -> str:
+    """Fetch standing-tier memories via memory_get and render as a block.
+
+    Sequential HTTP calls — fine for Phase 0 (N≤20). Empty string on any
+    failure / all-skipped (keeps the calling code branch-free).
+    """
+    if not ids:
+        return ""
+    try:
+        from ._remote_client import call_tool_sync
+    except ImportError:
+        return ""
+
+    from ..safety import defang_control_markup
+
+    lines: list[str] = []
+    for doc_id in ids:
+        try:
+            raw, _elapsed = call_tool_sync("memory_get", {"id": doc_id}, timeout=5.0)
+            data = json.loads(raw)
+        except Exception:
+            # Best-effort — skip failed IDs, don't pollute context with errors.
+            continue
+        title = defang_control_markup(str(data.get("title", "")))
+        content = str(data.get("content", ""))
+        content_type = str(data.get("content_type", "note"))
+        snippet = defang_control_markup(content[:_SNIPPET_CHARS])
+        ellipsis = "..." if len(content) > _SNIPPET_CHARS else ""
+        lines.append(
+            f"- [{content_type}] **{title}** (id={doc_id})\n"
+            f"  {snippet}{ellipsis}"
+        )
+    return "\n\n".join(lines)
+
+
 def _format_results(results: list[dict]) -> str:
     """Render a memory_search JSON response as a markdown list for prompt
     injection. Mirrors the pre-0.5.0 server-side prose format so the
@@ -99,34 +170,63 @@ def build_context(raw_text: str, *, prefix: str = "") -> str:
     ``prefix`` is prepended inside the block before the memories header —
     used to surface latency warnings on slow-but-successful calls.
 
-    Returns an empty string when there's nothing worth injecting — empty
-    input, an empty result list, or unparseable JSON.
+    **Phase 0 standing-tier (opt-in):** if ``MNEMON_STANDING_TIER_FILE``
+    is set, fetch the listed memory IDs via ``memory_get`` and prepend
+    a labeled "Standing context" sub-section inside the envelope, ahead
+    of the query-driven block. Conditions reasoning regardless of
+    query similarity — the hypothesis being validated in Phase 0 of
+    the salience-tier plan.
+
+    Returns an empty string when there's nothing worth injecting — no
+    standing IDs AND no situational results (or unparseable JSON).
     """
-    if not raw_text:
+    # Standing context — Phase 0 opt-in. Computed first so the function
+    # can inject standing-only when no situational results exist.
+    standing_ids = _load_standing_ids()
+    standing_block = _fetch_standing_block(standing_ids) if standing_ids else ""
+
+    # Parse the situational search results.
+    situational_rendered = ""
+    if raw_text:
+        trimmed = raw_text.strip()
+        if trimmed:
+            try:
+                results = json.loads(trimmed)
+                if isinstance(results, list) and results:
+                    situational_rendered = _format_results(results)
+                    if len(situational_rendered) > CHAR_BUDGET:
+                        situational_rendered = (
+                            situational_rendered[:CHAR_BUDGET].rstrip()
+                            + "\n...[truncated]"
+                        )
+            except json.JSONDecodeError:
+                # Server contract violation — don't inject garbage. Standing
+                # block still ships if present.
+                pass
+
+    if not standing_block and not situational_rendered:
         return ""
-    trimmed = raw_text.strip()
-    if not trimmed:
-        return ""
-    try:
-        results = json.loads(trimmed)
-    except json.JSONDecodeError:
-        # Server contract violation — don't inject garbage into the prompt.
-        return ""
-    if not isinstance(results, list) or not results:
-        return ""
-    rendered = _format_results(results)
-    if len(rendered) > CHAR_BUDGET:
-        rendered = rendered[:CHAR_BUDGET].rstrip() + "\n...[truncated]"
+
     # Per-call nonce: unguessable, so recalled content cannot forge a
     # matching close fence to break out of the untrusted-data region.
     nonce = secrets.token_hex(8)
-    lines = []
+    lines: list[str] = []
     if prefix:
         lines.append(prefix)
     lines.append(_SPOTLIGHT_INSTRUCTION)
     lines.append(f"[mnemon:data:{nonce}]")
-    lines.append("Relevant memories from previous sessions:")
-    lines.append(rendered)
+    if standing_block:
+        lines.append(
+            "## Standing context (always-on; conditions reasoning regardless of query)"
+        )
+        lines.append(standing_block)
+        lines.append("")
+    if situational_rendered:
+        if standing_block:
+            lines.append("## Situational recall (relevance ranked)")
+        else:
+            lines.append("Relevant memories from previous sessions:")
+        lines.append(situational_rendered)
     lines.append(f"[/mnemon:data:{nonce}]")
     inner = "\n".join(lines)
     return f"<mnemon-context>\n{inner}\n</mnemon-context>"
