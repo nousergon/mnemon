@@ -341,20 +341,25 @@ cmd_layer3() {
     "$M" upgrade web --app-name "$TEST_APP_NAME" --mnemon-version "$LAYER3_VERSION"
     ls "$MNEMON_VAULT_DIR/archive/" | grep -q "pre-web-" || die "expected pre-web-*.sqlite archive missing"
     ! [ -f "$MNEMON_VAULT_DIR/default.sqlite" ] || die "local vault should be archived; default.sqlite still present"
+
+    # `mnemon status` CLI is local-only (instantiates Store() directly, ignores
+    # MNEMON_REMOTE_URL). Use the remote helper that goes through the same
+    # call_tool_sync path mnemon doctor uses. Tracked as ROADMAP follow-up:
+    # extend mnemon CLI to honor remote mode so this workaround can go away.
+    local REMOTE_HELPER="$REPO_ROOT/scripts/_layer3_remote_helper.py"
     local seeded_count
-    seeded_count="$(MNEMON_REMOTE_URL="https://$TEST_APP_NAME.fly.dev/mcp" "$M" status 2>&1 | awk '/^Total memories:/{print $NF; exit}')"
+    seeded_count="$("$MNEMON_VENV_BIN/python" "$REMOTE_HELPER" status)"
     [[ "$seeded_count" == "3" ]] || die "expected 3 docs seeded to remote, got '$seeded_count'"
     echo_ok "upgrade complete; local vault archived; 3 docs seeded to remote via S3 → Fly"
 
     echo_step "Step 4 — exercise remote (add via HTTP)"
-    MNEMON_REMOTE_URL="https://$TEST_APP_NAME.fly.dev/mcp" \
-      "$M" save "Memory added after upgrade, should survive downgrade" "run-$TEST_RUN_ID" --type observation
+    # mnemon save CLI is also local-only — use the remote helper.
+    "$MNEMON_VENV_BIN/python" "$REMOTE_HELPER" save \
+        "Memory added after upgrade, should survive downgrade" \
+        "seed-4 observation run-$TEST_RUN_ID" \
+        "observation"
     local remote_count
-    # `mnemon status` emits "Total memories: N" — anchor on that exact line.
-    # The previous regex looked for "Documents:" which doesn't appear in the
-    # output; the awk match silently came back empty and the count check
-    # failed loudly with "got ''".
-    remote_count="$(MNEMON_REMOTE_URL="https://$TEST_APP_NAME.fly.dev/mcp" "$M" status 2>&1 | awk '/^Total memories:/{print $NF; exit}')"
+    remote_count="$("$MNEMON_VENV_BIN/python" "$REMOTE_HELPER" status)"
     [[ "$remote_count" == "4" ]] || die "expected 4 docs on remote, got '$remote_count'"
     echo_ok "4 docs on remote"
 
