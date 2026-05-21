@@ -248,6 +248,43 @@ test_sourcing_does_not_dispatch() {
     return 0
 }
 
+# ---- tests: Step-2 seed content uniqueness ----
+
+test_step2_seed_contents_are_unique() {
+    # mnemon's store.save() does content-hash dedup (rc15+). The original
+    # runbook passed the same content to all three Step-2 saves, which
+    # silently deduped down to 2 docs in the local test vault and caused
+    # a confusing "got '2', expected '3'" Step-2 assertion failure
+    # 2026-05-21. The fix makes content unique per save. Guard against
+    # the regression returning.
+    local script_path
+    script_path="$REPO_ROOT/scripts/promote_stable.sh"
+
+    # Extract the three Step-2 save lines.
+    local seed_lines
+    seed_lines="$(awk '/echo_step "Step 2 — seed local test vault"/,/seeded_local_count/' "$script_path" \
+        | grep -E '"\$M" save ')"
+
+    # Must be exactly 3 saves.
+    local n_saves
+    n_saves="$(echo "$seed_lines" | grep -c '"\$M" save ')"
+    [[ "$n_saves" == "3" ]] || { echo "    expected 3 'mnemon save' lines in Step 2, got $n_saves" >&2; return 1; }
+
+    # Extract the content (second quoted arg) from each save line.
+    # Pattern: `"$M" save "TITLE" "CONTENT" --type X`
+    local contents
+    contents="$(echo "$seed_lines" | sed -E 's/.*"\$M" save +"[^"]+" +"([^"]+)".*/\1/')"
+
+    # Count unique contents.
+    local n_unique
+    n_unique="$(echo "$contents" | sort -u | wc -l | tr -d ' ')"
+    [[ "$n_unique" == "3" ]] || {
+        echo "    expected 3 unique seed contents, got $n_unique unique across:" >&2
+        echo "$contents" | sed 's/^/      /' >&2
+        return 1
+    }
+}
+
 # ============================================================
 # runner
 # ============================================================
@@ -264,6 +301,7 @@ run_test test_awk_extracts_total_memories_count
 run_test test_awk_handles_zero_count
 run_test test_awk_returns_empty_when_field_missing
 run_test test_sourcing_does_not_dispatch
+run_test test_step2_seed_contents_are_unique
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

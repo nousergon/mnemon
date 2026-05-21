@@ -323,12 +323,18 @@ cmd_layer3() {
     fi
 
     echo_step "Step 2 — seed local test vault"
-    "$M" save "Test memory for E2E upgrade cycle" "run-$TEST_RUN_ID" --type observation
-    "$M" save "Second test memory, should survive upgrade" "run-$TEST_RUN_ID" --type observation
-    "$M" save "Preference to keep after upgrade/downgrade" "run-$TEST_RUN_ID" --type preference
+    # mnemon's store.save() does content-hash dedup (rc15+) — saves with
+    # byte-identical *content* collapse into one doc, even with different
+    # titles. The original runbook (pre-rc15) passed the same `run-$ID`
+    # content across all three saves, which now silently dedups down to
+    # 2 docs (the third escapes because `--type preference` puts it in a
+    # different content_type bucket). Make the content unique per save.
+    "$M" save "Test memory for E2E upgrade cycle"             "seed-1 observation run-$TEST_RUN_ID" --type observation
+    "$M" save "Second test memory, should survive upgrade"    "seed-2 observation run-$TEST_RUN_ID" --type observation
+    "$M" save "Preference to keep after upgrade/downgrade"    "seed-3 preference run-$TEST_RUN_ID" --type preference
     local seeded_local_count
     seeded_local_count="$("$M" status 2>&1 | awk '/^Total memories:/{print $NF; exit}')"
-    [[ "$seeded_local_count" == "3" ]] || die "expected 3 docs in local test vault, got '$seeded_local_count' (saves likely routed somewhere unexpected)"
+    [[ "$seeded_local_count" == "3" ]] || die "expected 3 docs in local test vault, got '$seeded_local_count' (saves may have deduped — check store content-hash logic, or routed somewhere unexpected)"
     echo_ok "3 docs seeded in local test vault"
 
     echo_step "Step 3 — upgrade web to $TEST_APP_NAME (pinned to mnemon-memory==$LAYER3_VERSION)"
