@@ -34,15 +34,18 @@ class TestPush:
             result = push()
             assert result["errors"] == ["MNEMON_S3_BUCKET not set"]
 
-    @patch("mnemon.sync._checkpoint_wal", return_value=None)
+    @patch("mnemon.sync._snapshot_sqlite", return_value=None)
     @patch("mnemon.sync._run_cmd")
-    def test_push_uploads_existing_files(self, mock_run, _mock_ckpt):
+    def test_push_uploads_existing_files(self, mock_run, _mock_snap):
         mock_run.return_value = (True, "")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create fake vault files
             sqlite_path = Path(tmpdir) / "default.sqlite"
             sqlite_path.write_bytes(b"fake sqlite data")
+            # _snapshot_sqlite is mocked, so we need the snapshot file
+            # to exist for the aws cp to "succeed" against it.
+            (sqlite_path.with_suffix(".sqlite.snapshot")).write_bytes(b"snap")
 
             with patch.dict(os.environ, {"MNEMON_S3_BUCKET": "test-bucket"}), \
                  patch("mnemon.sync._vault_files", return_value={
@@ -55,14 +58,15 @@ class TestPush:
             assert "sqlite" in result["pushed"][0]
             assert result["errors"] == []
 
-    @patch("mnemon.sync._checkpoint_wal", return_value=None)
+    @patch("mnemon.sync._snapshot_sqlite", return_value=None)
     @patch("mnemon.sync._run_cmd")
-    def test_push_reports_errors(self, mock_run, _mock_ckpt):
+    def test_push_reports_errors(self, mock_run, _mock_snap):
         mock_run.return_value = (False, "access denied")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             sqlite_path = Path(tmpdir) / "default.sqlite"
             sqlite_path.write_bytes(b"data")
+            (sqlite_path.with_suffix(".sqlite.snapshot")).write_bytes(b"snap")
 
             with patch.dict(os.environ, {"MNEMON_S3_BUCKET": "test-bucket"}), \
                  patch("mnemon.sync._vault_files", return_value={
@@ -124,100 +128,125 @@ class TestPull:
             assert len(result["pulled"]) >= 1
 
 
-class TestPushCheckpointsWAL:
-    """Regression for the 2026-05-21 Layer-3 downgrade bug: sync.push
-    was uploading the main sqlite file without first flushing the WAL.
-    For long-lived server processes (mnemon serve-remote on Fly) that
-    hold an open SQLite connection, recent commits accumulate in WAL
-    without auto-checkpoint (which only fires at 1000 pages by default).
-    `aws s3 cp default.sqlite` then uploaded a stale main file missing
-    all the recent writes — silently lost on the downstream sync pull.
+class TestPushUsesBackupAPI:
+    """Canonical regression for the 2026-05-21 sync-correctness arc.
 
-    Short-lived CLI processes (`mnemon save`) auto-checkpointed WAL
-    on connection close, so this bug only manifested for the
-    serve-remote → upgrade-web-dump path (and would have manifested
-    similarly for any long-lived-process → sync-push flow).
+    Replaces the prior `TestPushCheckpointsWAL` — the checkpoint-based
+    approach was a wrong mental model: `PRAGMA wal_checkpoint(TRUNCATE)`
+    returns `(busy=0, total=0, checkpointed=0)` (success, zero frames
+    flushed) when another process holds the connection open in WAL mode.
+    The actual correct primitive is SQLite's online-backup API
+    (`Connection.backup()`), which captures all committed writes
+    regardless of WAL state — even with concurrent writers.
+
+    These tests cover the new `_snapshot_sqlite` helper and the
+    backup-then-upload behavior of `push()`.
     """
 
-    def test_checkpoint_wal_flushes_data_from_wal_to_main(self, tmp_path):
-        # Reproduce a long-lived-connection scenario, then call the
-        # checkpoint helper and verify main file now contains the data.
+    def test_snapshot_captures_writes_from_long_lived_holder(self, tmp_path):
+        # The cross-process scenario PRAGMA wal_checkpoint can't handle.
+        # Open a persistent connection in WAL mode, insert without
+        # closing, then snapshot from a separate code path. Backup must
+        # capture all 3 rows even though the main file is empty.
         import sqlite3
         import shutil
-        from mnemon.sync import _checkpoint_wal
+        from mnemon.sync import _snapshot_sqlite
 
         db = tmp_path / "test.sqlite"
-        # Open a persistent connection, set WAL, insert without closing.
         conn = sqlite3.connect(str(db))
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);")
         for i in range(3):
             conn.execute("INSERT INTO t (v) VALUES (?)", (f"row-{i}",))
         conn.commit()
-        # Don't close — simulates serve-remote holding the connection.
+        # Don't close — simulates a long-lived serve-remote process.
 
-        # Confirm the bug: copy of main file alone has no rows (or no table)
+        # Confirm the underlying scenario: a main-only copy is empty.
         main_only = tmp_path / "main_only.sqlite"
         shutil.copy(db, main_only)
         try:
-            cnt_pre = sqlite3.connect(str(main_only)).execute(
+            cnt_main_only = sqlite3.connect(str(main_only)).execute(
                 "SELECT COUNT(*) FROM t"
             ).fetchone()[0]
         except sqlite3.OperationalError:
-            cnt_pre = -1  # no table at all — even worse symptom
-        assert cnt_pre != 3, (
-            f"WAL bug didn't reproduce — main file already has all 3 rows "
-            f"(got {cnt_pre}). Test setup is wrong; SQLite WAL semantics changed."
+            cnt_main_only = -1
+        assert cnt_main_only != 3, (
+            f"setup wrong — main file already has 3 rows, can't test "
+            f"the long-lived-holder scenario (got {cnt_main_only})"
         )
 
-        # Apply the fix.
-        err = _checkpoint_wal(db)
-        assert err is None, f"checkpoint failed: {err}"
+        # Snapshot via backup API.
+        snap = tmp_path / "snap.sqlite"
+        err = _snapshot_sqlite(db, snap)
+        assert err is None, f"snapshot failed: {err}"
 
-        # Verify: main file alone now has 3 rows.
-        main_only2 = tmp_path / "main_after.sqlite"
-        shutil.copy(db, main_only2)
-        cnt_post = sqlite3.connect(str(main_only2)).execute(
+        # Snapshot must have all 3 rows.
+        cnt_snap = sqlite3.connect(str(snap)).execute(
             "SELECT COUNT(*) FROM t"
         ).fetchone()[0]
-        assert cnt_post == 3, f"expected 3 rows in main file post-checkpoint, got {cnt_post}"
+        assert cnt_snap == 3, f"snapshot missing rows: got {cnt_snap}, expected 3"
 
         conn.close()
 
-    def test_checkpoint_wal_returns_error_string_on_locked_file(self, tmp_path):
-        # Failure mode: returns a string instead of raising, so push()
-        # can record it as an error and skip the cp without aborting
-        # the whole push call.
-        from mnemon.sync import _checkpoint_wal
+    def test_snapshot_does_not_modify_source(self, tmp_path):
+        # Backup is read-side / non-destructive. Source DB byte-equal
+        # before and after snapshot (modulo SQLite's own auto-checkpoint
+        # behavior, which we don't control). At minimum: source still
+        # opens and contains the same data.
+        import sqlite3
+        from mnemon.sync import _snapshot_sqlite
 
-        # Non-existent path → sqlite will create + fail on missing table,
-        # but checkpoint of an empty DB is actually fine — so we test
-        # the contract by passing a path that's not a SQLite file.
+        db = tmp_path / "source.sqlite"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE t (id INT)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.commit()
+        conn.close()
+
+        size_before = db.stat().st_size
+        err = _snapshot_sqlite(db, tmp_path / "snap.sqlite")
+        assert err is None
+        # Source still readable + intact
+        cnt = sqlite3.connect(str(db)).execute("SELECT COUNT(*) FROM t").fetchone()[0]
+        assert cnt == 1
+        # Source size unchanged (within a small tolerance for any incidental writes — none expected)
+        assert db.stat().st_size == size_before
+
+    def test_snapshot_returns_error_string_on_invalid_source(self, tmp_path):
+        # Non-SQLite file → backup() raises sqlite3.DatabaseError. The
+        # helper catches and returns the error string so push() can
+        # record it and skip this entry without aborting the whole call.
+        from mnemon.sync import _snapshot_sqlite
+
         bad = tmp_path / "not_a_db.bin"
-        bad.write_bytes(b"\x00\x01\x02not sqlite header at all")
-        err = _checkpoint_wal(bad)
-        assert err is not None, "expected error string for non-SQLite file"
-        assert "checkpoint" in err.lower() or "sqlite" in err.lower()
+        bad.write_bytes(b"\x00\x01\x02not sqlite at all")
+        err = _snapshot_sqlite(bad, tmp_path / "snap.sqlite")
+        assert err is not None, "expected error string for non-SQLite source"
+        assert "sqlite" in err.lower() or "backup" in err.lower()
 
-    def test_push_calls_checkpoint_before_aws_cp(self, tmp_path):
-        # Integration: push() should call _checkpoint_wal for the
-        # sqlite file before invoking aws s3 cp. Verifies the call
-        # order via a side-effect-recording mock.
-        from unittest.mock import MagicMock
-        import shutil
-
+    def test_push_invokes_snapshot_before_aws_cp_for_sqlite(self, tmp_path):
+        # Integration: push() snapshots the sqlite file via the backup
+        # API, then aws-cp's the snapshot (NOT the live sqlite file).
         sqlite_path = tmp_path / "default.sqlite"
-        sqlite_path.write_bytes(b"fake sqlite data")
+        sqlite_path.write_bytes(b"fake")
 
         call_order: list[str] = []
+        aws_cp_paths: list[str] = []
 
-        def _record_checkpoint(_path):
-            call_order.append("checkpoint")
+        def _record_snapshot(src, snap):
+            call_order.append("snapshot")
+            # Real backup would write content here. Simulate so the
+            # subsequent aws cp has a file to "upload".
+            snap.write_bytes(b"snap content")
             return None
 
         def _record_cp(cmd):
             if "s3 cp" in cmd:
                 call_order.append("aws_cp")
+                # Extract the local path arg from the cp command for
+                # the source-file assertion below.
+                tokens = cmd.split('"')
+                aws_cp_paths.append(tokens[1])  # first quoted arg
             return (True, "")
 
         with patch.dict(os.environ, {"MNEMON_S3_BUCKET": "test-bucket"}), \
@@ -225,12 +254,70 @@ class TestPushCheckpointsWAL:
                  "sqlite": sqlite_path,
                  "vec": tmp_path / "default.vec.npz",  # doesn't exist
              }), \
-             patch("mnemon.sync._checkpoint_wal", side_effect=_record_checkpoint), \
+             patch("mnemon.sync._snapshot_sqlite", side_effect=_record_snapshot), \
              patch("mnemon.sync._run_cmd", side_effect=_record_cp):
             result = push()
 
-        # Checkpoint must come before the s3 cp call for the sqlite file.
-        assert call_order == ["checkpoint", "aws_cp"], (
-            f"expected checkpoint → aws_cp, got {call_order}"
+        assert call_order == ["snapshot", "aws_cp"], (
+            f"expected snapshot → aws_cp, got {call_order}"
+        )
+        # Crucial: aws cp uploaded the SNAPSHOT, not the live sqlite file.
+        # The snapshot has the `.snapshot` extension our push code uses.
+        assert ".sqlite.snapshot" in aws_cp_paths[0], (
+            f"aws cp should upload the snapshot file, got: {aws_cp_paths[0]}"
         )
         assert not result["errors"], f"unexpected errors: {result['errors']}"
+
+    def test_push_cleans_up_snapshot_after_upload(self, tmp_path):
+        # The snapshot file is a transient — it must not survive a push
+        # call (would accumulate in the operator's .mnemon/ directory).
+        sqlite_path = tmp_path / "default.sqlite"
+        sqlite_path.write_bytes(b"fake")
+        snap_path = sqlite_path.with_suffix(".sqlite.snapshot")
+
+        def _record_snapshot(src, snap):
+            snap.write_bytes(b"snap")
+            return None
+
+        with patch.dict(os.environ, {"MNEMON_S3_BUCKET": "test-bucket"}), \
+             patch("mnemon.sync._vault_files", return_value={
+                 "sqlite": sqlite_path,
+                 "vec": tmp_path / "default.vec.npz",
+             }), \
+             patch("mnemon.sync._snapshot_sqlite", side_effect=_record_snapshot), \
+             patch("mnemon.sync._run_cmd", return_value=(True, "")):
+            push()
+
+        assert not snap_path.exists(), (
+            "snapshot file should be removed after push completes"
+        )
+
+    def test_push_vec_npz_is_not_snapshot(self, tmp_path):
+        # vec.npz is a binary numpy file, no SQLite semantics. push()
+        # should aws cp it directly without going through the snapshot
+        # path (which is sqlite-specific).
+        vec_path = tmp_path / "default.vec.npz"
+        vec_path.write_bytes(b"npz bytes")
+
+        cp_paths: list[str] = []
+
+        def _record_cp(cmd):
+            if "s3 cp" in cmd:
+                tokens = cmd.split('"')
+                cp_paths.append(tokens[1])
+            return (True, "")
+
+        with patch.dict(os.environ, {"MNEMON_S3_BUCKET": "test-bucket"}), \
+             patch("mnemon.sync._vault_files", return_value={
+                 "sqlite": tmp_path / "missing.sqlite",  # doesn't exist
+                 "vec": vec_path,
+             }), \
+             patch("mnemon.sync._snapshot_sqlite") as mock_snap, \
+             patch("mnemon.sync._run_cmd", side_effect=_record_cp):
+            push()
+
+        # snapshot should not be called for vec
+        mock_snap.assert_not_called()
+        # aws cp should upload the vec file directly
+        assert len(cp_paths) == 1
+        assert cp_paths[0] == str(vec_path)

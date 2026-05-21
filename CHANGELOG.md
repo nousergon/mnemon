@@ -7,9 +7,10 @@
 - **Promotion from `0.6.0rc18` to `0.6.0` stable.** Closes the rc cycle
   that ran from `0.6.0rc1` (2026-04-21, the simplification arc →
   two-product split) through `0.6.0rc18` (2026-05-18, the layered
-  stored-injection defense). `0.6.0` is `rc18` plus the single bug
-  fix below — surfaced 2026-05-21 while exercising the pre-promote
-  Layer-3 web test for the first time.
+  stored-injection defense). `0.6.0` is `rc18` plus several
+  upgrade/downgrade-correctness fixes surfaced 2026-05-21 while
+  exercising the pre-promote Layer-3 web test for the first time
+  (see the Fixes section below).
 
 ### Fixes
 
@@ -44,25 +45,31 @@
   the override flag, the fail-loud on SSH error, the
   custom-domain skip, and the SSH command shape.
 
-- **`mnemon sync push` now WAL-checkpoints before reading the sqlite
-  file.** SQLite WAL mode means new commits accumulate in
-  `default.sqlite-wal` until an auto-checkpoint fires (default: WAL
-  > 1000 pages). For short-lived CLI processes (`mnemon save`) this
-  doesn't matter — connection close auto-checkpoints. For long-lived
-  servers (`mnemon serve-remote` on Fly) the WAL accumulates
-  indefinitely; `aws s3 cp default.sqlite` then uploads a stale main
-  file missing all the recent writes. Composed with the downgrade
-  fix above, this manifested as: Step 4's `memory_save` against
-  Fly committed to WAL → downgrade's Fly→S3 dump uploaded only the
-  main file (still stale) → local pull restored 3 docs instead of 4.
-  Fix: `sync._checkpoint_wal` opens a transient connection and
-  runs `PRAGMA wal_checkpoint(TRUNCATE)` before the `aws s3 cp`.
-  Reproduced: 3-row insert via long-lived `Store()` left main at
-  4KB (no `documents` table at all in a main-only copy); after
-  checkpoint, main grew to 69KB and copy showed all 3 rows. 3
-  regression tests cover the helper's behavior, the error-string
-  contract for malformed files, and the call order in `push()`
-  (checkpoint then aws_cp).
+- **`mnemon sync push` now uses SQLite's online-backup API as the
+  canonical cross-host transfer primitive** (replaces an earlier
+  WAL-checkpoint approach that was wrong cross-process). Raw
+  `aws s3 cp default.sqlite` uploads only the main sqlite file's
+  bytes — for short-lived CLI processes that's fine because SQLite
+  auto-checkpoints WAL on connection close, but for long-running
+  `mnemon serve-remote` the WAL accumulates indefinitely (default
+  auto-checkpoint at 1000 pages). The natural-seeming fix —
+  `PRAGMA wal_checkpoint(TRUNCATE)` from a transient connection — is
+  silently broken when another process holds the connection open:
+  it returns `(busy=0, total=0, checkpointed=0)`, reports success,
+  flushes zero frames. Verified against a long-lived holder + 3
+  commits: PRAGMA reported success, main file stayed at 8KB (just
+  schema), no frames moved; `Connection.backup()` from the same
+  position captured all 3 rows. `push()` now snapshots via the
+  online-backup API to a transient `.sqlite.snapshot` file beside
+  the source, `aws s3 cp`'s the snapshot, then removes it. The
+  online-backup API uses SQLite's WAL-aware backup protocol and
+  produces a consistent atomic snapshot even with concurrent
+  writers. Vec store (`default.vec.npz`) is a binary numpy file with
+  no SQLite semantics — uploaded directly. 6 regression tests
+  cover the snapshot helper, the cross-process write capture, the
+  source-is-read-only contract, the error-string contract for
+  invalid sources, the snapshot-before-cp call order, the transient
+  cleanup, and the vec.npz direct-upload path.
 
   The rc cycle delivered:
   - The simplification arc — mnemon local (stdio + single-file vault)
