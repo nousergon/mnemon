@@ -566,6 +566,7 @@ class TestDowngradeCli:
             yes=True,
             skip_doctor=True,
             app_name_override=None,
+            skip_fly_push=False,
         )
         assert "downgrade output" in capsys.readouterr().out
 

@@ -90,7 +90,7 @@ class TestSyncPull:
         with patch(
             "mnemon.sync.pull",
             return_value={"pulled": [], "errors": ["access denied"]},
-        ):
+        ), patch("mnemon.downgrade._fly_dump_vault"):
             with pytest.raises(DowngradeError, match="S3 pull failed"):
                 downgrade_local(skip_doctor=True)
         # Remote config was NOT cleared — downgrade aborted.
@@ -128,6 +128,7 @@ class TestReconfigureLocal:
                 "mnemon.downgrade._reconfigure_clients_local",
                 return_value=["claude-code", "cursor"],
             ) as mock_reconfig, \
+            patch("mnemon.downgrade._fly_dump_vault"), \
             patch("mnemon.doctor.run_doctor", return_value=0):
             result = downgrade_local(skip_doctor=True)
 
@@ -227,8 +228,10 @@ class TestDestroyFlyApp:
             patch(
                 "mnemon.downgrade.subprocess.run"
             ) as mock_run:
+            # skip_fly_push=True because the Fly→S3 pre-pull push isn't
+            # what this test exercises; it tests destroy-decline behavior.
             result = downgrade_local(
-                destroy_fly_app=True, skip_doctor=True
+                destroy_fly_app=True, skip_doctor=True, skip_fly_push=True
             )
         # No flyctl destroy call
         mock_run.assert_not_called()
@@ -297,3 +300,89 @@ class TestDestroyFlyApp:
             "-y",
         ]
         assert "destroyed (my-custom-app)" in result
+
+
+class TestFlyDumpVaultBeforePull:
+    """Regression for the 2026-05-21 Layer-3 bug: downgrade only did
+    S3→local pull, never Fly→S3 push first. Any memory added on the
+    Fly side after upgrade time was silently lost on downgrade because
+    the local pull got the stale upgrade-time S3 snapshot. Surfaced
+    as "expected 4 docs after downgrade, got '3'" — the 4th doc was
+    added via remote after upgrade, only existed in Fly's SQLite, and
+    didn't make it back to local.
+
+    For prod operators this would have been a quiet, severe data-loss
+    bug: any work done via remote between upgrade and downgrade would
+    vanish. Fix: SSH into Fly and run `mnemon sync push` before the
+    local `mnemon sync pull`.
+    """
+
+    def _seed_remote_config(self, tmp_path, url="https://mnemon-test-999.fly.dev/mcp"):
+        mnemon_dir = tmp_path / ".mnemon"
+        mnemon_dir.mkdir()
+        (mnemon_dir / "remote_url").write_text(url)
+
+    def test_fly_dump_runs_before_s3_pull_by_default(self, tmp_path):
+        self._seed_remote_config(tmp_path)
+        call_order: list[str] = []
+
+        def _record_dump(app_name):
+            call_order.append("fly_dump")
+
+        def _record_pull():
+            call_order.append("s3_pull")
+            return {"pulled": ["sqlite"], "errors": []}
+
+        with patch("mnemon.downgrade._fly_dump_vault", side_effect=_record_dump), \
+            patch("mnemon.sync.pull", side_effect=_record_pull), \
+            patch("mnemon.setup.detect_installed_clients", return_value=[]), \
+            patch("mnemon.downgrade._reconfigure_clients_local", return_value=[]):
+            downgrade_local(skip_doctor=True)
+
+        assert call_order == ["fly_dump", "s3_pull"], (
+            f"expected fly_dump → s3_pull, got {call_order}"
+        )
+
+    def test_skip_fly_push_omits_dump(self, tmp_path):
+        self._seed_remote_config(tmp_path)
+        with patch("mnemon.downgrade._fly_dump_vault") as mock_dump, \
+            patch("mnemon.sync.pull", return_value={"pulled": ["sqlite"], "errors": []}), \
+            patch("mnemon.setup.detect_installed_clients", return_value=[]), \
+            patch("mnemon.downgrade._reconfigure_clients_local", return_value=[]):
+            downgrade_local(skip_doctor=True, skip_fly_push=True)
+        mock_dump.assert_not_called()
+
+    def test_fly_dump_failure_aborts_downgrade(self, tmp_path):
+        self._seed_remote_config(tmp_path)
+        from subprocess import CalledProcessError
+        with patch(
+            "mnemon.downgrade._fly_dump_vault",
+            side_effect=CalledProcessError(1, ["flyctl"]),
+        ), patch("mnemon.sync.pull") as mock_pull:
+            with pytest.raises(DowngradeError, match="Fly→S3 dump failed"):
+                downgrade_local(skip_doctor=True)
+        # Pull never ran — abort happened first, so no stale-snapshot
+        # restore of the local vault.
+        mock_pull.assert_not_called()
+
+    def test_fly_dump_skipped_when_app_name_not_extractable(self, tmp_path):
+        # Custom (non-fly.dev) domain → _extract_app_name returns None →
+        # we can't SSH so we skip the dump. Pull still runs.
+        self._seed_remote_config(tmp_path, url="https://mnemon.example.com/mcp")
+        with patch("mnemon.downgrade._fly_dump_vault") as mock_dump, \
+            patch("mnemon.sync.pull", return_value={"pulled": ["sqlite"], "errors": []}), \
+            patch("mnemon.setup.detect_installed_clients", return_value=[]), \
+            patch("mnemon.downgrade._reconfigure_clients_local", return_value=[]):
+            downgrade_local(skip_doctor=True)
+        mock_dump.assert_not_called()
+
+    def test_fly_dump_runs_ssh_console_with_sync_push(self, tmp_path):
+        # Direct test that _fly_dump_vault issues the expected flyctl
+        # command. Mirror of upgrade._fly_seed_vault but with `push`.
+        from mnemon import downgrade as dgmod
+        with patch("mnemon.downgrade.subprocess.run") as mock_run:
+            dgmod._fly_dump_vault("mnemon-test-abc")
+        mock_run.assert_called_once_with(
+            ["flyctl", "ssh", "console", "--app", "mnemon-test-abc", "-C", "mnemon sync push"],
+            check=True,
+        )

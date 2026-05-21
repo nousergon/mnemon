@@ -25,6 +25,25 @@
   prefix. Surfaced + fixed during the 0.6.0 Layer-3 attempt; 4
   regression tests cover the forwarding contract.
 
+- **`mnemon downgrade local` now dumps the current Fly vault to S3
+  before pulling.** Previously, downgrade did `S3 → local` only and
+  silently skipped the `Fly → S3` step, so any memory added via
+  remote between upgrade time and downgrade time was lost — the
+  local vault was seeded from a stale S3 snapshot. For ad-hoc
+  testing this manifested as "docs added post-upgrade missing
+  after downgrade." For prod operators it would have been a quiet,
+  severe data-loss bug: weeks of remote-added memories vanishing
+  on the first `mnemon downgrade local` call. Now SSHes into the
+  Fly machine and runs `mnemon sync push` before the local
+  `mnemon sync pull` — mirror of `upgrade._fly_seed_vault` in the
+  opposite direction. New `--skip-fly-push` flag as an operator
+  escape hatch (e.g., when the Fly machine is unreachable);
+  default behavior is to fail-loud if the dump SSH errors out,
+  rather than silently fall through to the stale-pull data loss.
+  5 regression tests cover the call order (`fly_dump → s3_pull`),
+  the override flag, the fail-loud on SSH error, the
+  custom-domain skip, and the SSH command shape.
+
   The rc cycle delivered:
   - The simplification arc — mnemon local (stdio + single-file vault)
     and mnemon web (Fly + S3 backup) as one codebase, symmetric
