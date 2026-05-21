@@ -21,6 +21,10 @@
 # Usage:
 #   scripts/promote_stable.sh preflight   # read-only, runs before everything else
 #   scripts/promote_stable.sh layer3      # E2E web test (creates+destroys test Fly app, ~15 min)
+#                                         # pins mnemon upgrade web --mnemon-version to TARGET_VERSION
+#                                         # if it's on PyPI, otherwise the latest published version
+#                                         # as proxy (LAYER3_VERSION_OVERRIDE=<ver> to override).
+#                                         # SOTA for true pre-publish validation: TestPyPI (ROADMAP).
 #   scripts/promote_stable.sh publish     # POST-MERGE: build → twine upload → tag → GH release → Fly redeploy
 #   scripts/promote_stable.sh verify      # post-publish sanity check
 #
@@ -65,6 +69,50 @@ MNEMON_VENV_BIN="$REPO_ROOT/.venv/bin"
 [ -x "$MNEMON_VENV_BIN/mnemon" ] || die "mnemon CLI not found at $MNEMON_VENV_BIN/mnemon — activate / install editable venv first"
 [ -x "$MNEMON_VENV_BIN/twine" ] || die "twine not found at $MNEMON_VENV_BIN/twine — pip install -e .[dev]"
 [ -x "$MNEMON_VENV_BIN/python" ] || die "venv python not found at $MNEMON_VENV_BIN/python"
+
+# ---- helpers ----
+
+# Resolve the latest version of mnemon-memory currently published to PyPI,
+# pre-releases included. Uses the PyPI JSON API + packaging.version (via
+# the venv python) so the answer is deterministic — `pip index versions`
+# proved unreliable in the wild (stale cache + info.version field returning
+# the latest STABLE only, hiding 0.6.0rcN entirely).
+latest_pypi_version() {
+    "$MNEMON_VENV_BIN/python" - <<'PY' 2>/dev/null
+import urllib.request, json, sys
+from packaging.version import Version, InvalidVersion
+try:
+    with urllib.request.urlopen("https://pypi.org/pypi/mnemon-memory/json", timeout=10) as r:
+        d = json.load(r)
+except Exception as e:
+    sys.exit(1)
+vs = []
+for s in d.get("releases", {}).keys():
+    try:
+        vs.append(Version(s))
+    except InvalidVersion:
+        pass
+if not vs:
+    sys.exit(1)
+vs.sort()
+print(vs[-1])
+PY
+}
+
+# Is a specific version published to PyPI?
+is_pypi_published() {
+    local v="$1"
+    "$MNEMON_VENV_BIN/python" - "$v" <<'PY' 2>/dev/null
+import urllib.request, json, sys
+target = sys.argv[1]
+try:
+    with urllib.request.urlopen("https://pypi.org/pypi/mnemon-memory/json", timeout=10) as r:
+        d = json.load(r)
+except Exception:
+    sys.exit(2)
+sys.exit(0 if target in d.get("releases", {}) else 1)
+PY
+}
 
 # ============================================================
 # preflight — read-only validation that the candidate is ready
@@ -154,6 +202,40 @@ cmd_layer3() {
         die "dangling mnemon-test-* Fly apps exist — destroy them before running"
     fi
 
+    # ---- Resolve the mnemon-memory version Layer-3 will deploy to the test app ----
+    #
+    # `mnemon upgrade web` calls `flyctl deploy`, which builds a Docker image that
+    # runs `pip install mnemon-memory[server]==<ver>` against real PyPI. The
+    # candidate version (TARGET_VERSION) may not yet be published — that's the
+    # whole point of pre-publish validation. So Layer-3 must pin to a version
+    # that *is* on PyPI:
+    #
+    #   - If TARGET_VERSION is already on PyPI (e.g., re-running layer3 after
+    #     a publish), use it directly.
+    #   - Otherwise pin to the latest published version as a proxy. This is
+    #     valid for the byte-identical rc → stable promotion (0.6.0rc18 ↔
+    #     0.6.0 source-identical). For future rc bumps where the candidate has
+    #     code changes from the prior rc, the latest-published-as-proxy is
+    #     incomplete validation — see ROADMAP "TestPyPI integration for true
+    #     pre-publish validation" for the institutional fix.
+    #
+    # Override: set LAYER3_VERSION_OVERRIDE=<ver> to bypass auto-resolution.
+    local LAYER3_VERSION
+    if [ -n "${LAYER3_VERSION_OVERRIDE:-}" ]; then
+        LAYER3_VERSION="$LAYER3_VERSION_OVERRIDE"
+        echo_ok "Layer-3 pinning mnemon-memory==$LAYER3_VERSION (operator override)"
+    elif is_pypi_published "$TARGET_VERSION"; then
+        LAYER3_VERSION="$TARGET_VERSION"
+        echo_ok "Layer-3 pinning mnemon-memory==$LAYER3_VERSION (candidate already on PyPI)"
+    else
+        LAYER3_VERSION="$(latest_pypi_version)"
+        [ -n "$LAYER3_VERSION" ] || die "could not resolve mnemon-memory latest from PyPI JSON API"
+        echo_warn "candidate $TARGET_VERSION isn't on PyPI yet"
+        echo_warn "Layer-3 will deploy mnemon-memory==$LAYER3_VERSION (latest published) as a proxy"
+        echo_warn "for true pre-publish validation of $TARGET_VERSION's code: file TestPyPI integration as ROADMAP follow-up"
+    fi
+    confirm "proceed with Layer-3 deploying mnemon-memory==$LAYER3_VERSION?"
+
     # Isolate test environment per the runbook.
     local TEST_RUN_ID
     TEST_RUN_ID="$(date +%Y%m%d-%H%M%S)"
@@ -180,8 +262,8 @@ cmd_layer3() {
     "$M" status
     echo_ok "3 docs seeded in test vault"
 
-    echo_step "Step 3 — upgrade web to $TEST_APP_NAME"
-    "$M" upgrade web --app-name "$TEST_APP_NAME"
+    echo_step "Step 3 — upgrade web to $TEST_APP_NAME (pinned to mnemon-memory==$LAYER3_VERSION)"
+    "$M" upgrade web --app-name "$TEST_APP_NAME" --mnemon-version "$LAYER3_VERSION"
     ls "$MNEMON_VAULT_DIR/archive/" | grep -q "pre-web-" || die "expected pre-web-*.sqlite archive missing"
     ! [ -f "$MNEMON_VAULT_DIR/default.sqlite" ] || die "local vault should be archived; default.sqlite still present"
     echo_ok "upgrade complete; local vault archived"
