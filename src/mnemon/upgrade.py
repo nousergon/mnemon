@@ -386,6 +386,13 @@ def _fly_set_secrets(
     AWS creds are read from the user's environment (populated by aws
     configure or AWS_* env vars) and passed through as Fly secrets so
     the container's `aws s3 cp` works. Never logs the values.
+
+    Also forwards ``MNEMON_S3_PREFIX`` and ``MNEMON_VAULT_NAME`` so the
+    Fly container's ``mnemon sync pull`` reads from the same S3 location
+    the local ``mnemon sync push`` wrote to. Without this, the Fly side
+    falls back to ``sync.S3_PREFIX_DEFAULT`` / ``VAULT_NAME_DEFAULT`` and
+    seeds from the operator's prod prefix instead of any test-scoped
+    override (caught 2026-05-21 during the 0.6.0 Layer-3 test).
     """
     env = os.environ.copy()
     aws_access = env.get("AWS_ACCESS_KEY_ID") or _resolve_aws_key(
@@ -405,12 +412,21 @@ def _fly_set_secrets(
 
     aws_region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "us-east-1"
 
+    # Read the same defaults sync.py uses so an unset env var on the
+    # operator side resolves to the same path on both sides — preserves
+    # prod-redeploy behavior (no override => default both sides).
+    from .sync import S3_PREFIX_DEFAULT, VAULT_NAME_DEFAULT
+    s3_prefix = env.get("MNEMON_S3_PREFIX", S3_PREFIX_DEFAULT)
+    vault_name = env.get("MNEMON_VAULT_NAME", VAULT_NAME_DEFAULT)
+
     secrets_kv = [
         f"MNEMON_LOCAL_TOKEN={local_token}",
         f"AWS_ACCESS_KEY_ID={aws_access}",
         f"AWS_SECRET_ACCESS_KEY={aws_secret}",
         f"AWS_DEFAULT_REGION={aws_region}",
         f"MNEMON_S3_BUCKET={s3_bucket}",
+        f"MNEMON_S3_PREFIX={s3_prefix}",
+        f"MNEMON_VAULT_NAME={vault_name}",
     ]
     # --stage: don't restart machines immediately (they don't exist yet).
     subprocess.run(
