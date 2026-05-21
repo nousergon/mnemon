@@ -7,9 +7,10 @@
 - **Promotion from `0.6.0rc18` to `0.6.0` stable.** Closes the rc cycle
   that ran from `0.6.0rc1` (2026-04-21, the simplification arc →
   two-product split) through `0.6.0rc18` (2026-05-18, the layered
-  stored-injection defense). `0.6.0` is `rc18` plus the single bug
-  fix below — surfaced 2026-05-21 while exercising the pre-promote
-  Layer-3 web test for the first time.
+  stored-injection defense). `0.6.0` is `rc18` plus several
+  upgrade/downgrade-correctness fixes surfaced 2026-05-21 while
+  exercising the pre-promote Layer-3 web test for the first time
+  (see the Fixes section below).
 
 ### Fixes
 
@@ -44,36 +45,45 @@
   the override flag, the fail-loud on SSH error, the
   custom-domain skip, and the SSH command shape.
 
-- **`mnemon sync push` now WAL-checkpoints before reading the sqlite
-  file** *(within-process scenario)*. SQLite WAL mode means new
-  commits accumulate in `default.sqlite-wal` until an auto-checkpoint
-  fires (default: WAL > 1000 pages). For short-lived CLI processes
-  (`mnemon save`) this doesn't matter — connection close
-  auto-checkpoints. For long-lived servers (`mnemon serve-remote`
-  on Fly) the WAL accumulates indefinitely; `aws s3 cp
-  default.sqlite` then uploads a stale main file missing all the
-  recent writes. `sync._checkpoint_wal` opens a transient connection
-  and runs `PRAGMA wal_checkpoint(TRUNCATE)` before the `aws s3 cp`.
-  This is sufficient for the in-process case (e.g. operator runs
-  `mnemon sync push` from the same process tree). For cross-process
-  (operator SSHes into Fly to push the live server's vault),
-  see the next bullet.
+- **`mnemon sync push` now uses SQLite's online-backup API as the
+  canonical cross-host transfer primitive** (replaces an earlier
+  WAL-checkpoint approach that was wrong cross-process). Raw
+  `aws s3 cp default.sqlite` uploads only the main sqlite file's
+  bytes — for short-lived CLI processes that's fine because SQLite
+  auto-checkpoints WAL on connection close, but for long-running
+  `mnemon serve-remote` the WAL accumulates indefinitely (default
+  auto-checkpoint at 1000 pages). The natural-seeming fix —
+  `PRAGMA wal_checkpoint(TRUNCATE)` from a transient connection — is
+  silently broken when another process holds the connection open:
+  it returns `(busy=0, total=0, checkpointed=0)`, reports success,
+  flushes zero frames. Verified against a long-lived holder + 3
+  commits: PRAGMA reported success, main file stayed at 8KB (just
+  schema), no frames moved; `Connection.backup()` from the same
+  position captured all 3 rows. `push()` now snapshots via the
+  online-backup API to a transient `.sqlite.snapshot` file beside
+  the source, `aws s3 cp`'s the snapshot, then removes it. The
+  online-backup API uses SQLite's WAL-aware backup protocol and
+  produces a consistent atomic snapshot even with concurrent
+  writers. Vec store (`default.vec.npz`) is a binary numpy file with
+  no SQLite semantics — uploaded directly. 6 regression tests
+  cover the snapshot helper, the cross-process write capture, the
+  source-is-read-only contract, the error-string contract for
+  invalid sources, the snapshot-before-cp call order, the transient
+  cleanup, and the vec.npz direct-upload path.
 
-- **`mnemon downgrade local` uses SQLite's online-backup API**
-  to capture the live Fly vault, instead of relying on
-  `PRAGMA wal_checkpoint` + `mnemon sync push`. With a long-running
-  serve-remote process holding the SQLite WAL connection open, a
-  cross-process checkpoint from an SSH'd shell returns
-  `(busy=0, total=0, checkpointed=0)` — succeeds but flushes zero
-  frames. The recent writes stay in WAL, the main file stays stale,
-  the upload silently loses the writes. `sqlite3.Connection.backup()`
-  uses SQLite's online-backup protocol which produces a consistent
-  atomic snapshot regardless of WAL state, even with concurrent
-  writers. `_fly_dump_vault` now SSHes a stdlib Python script that
-  backs up `/data/default.sqlite` to a temp file and `aws s3 cp`s
-  it (plus `default.vec.npz` best-effort). Verified locally:
-  long-lived holder + 3 commits → checkpoint reported 0 frames
-  flushed, but backup snapshot had all 3 rows.
+- **`mnemon downgrade local` (`_fly_dump_vault`) uses SQLite's
+  online-backup API directly** for the version-skew bootstrap.
+  When Layer-3 runs Pre-publish validation, the Fly container is
+  pinned to the latest-published mnemon (e.g. `0.6.0rc18`) which
+  predates the `sync.push` backup-API fix above — so SSHing
+  `flyctl ssh -C "mnemon sync push"` would invoke the older
+  broken push. To handle this version-skew, `_fly_dump_vault`
+  SSHes a stdlib Python script that does its own `Connection.backup()`
+  + `aws s3 cp` of `/data/default.sqlite` (plus `default.vec.npz`
+  best-effort), independent of installed mnemon version. Once the
+  Fly side is reliably on `0.6.0+`, this can simplify to
+  `flyctl ssh -C "mnemon sync push"` and rely on the canonical
+  primitive — tracked as a follow-up.
 
   The rc cycle delivered:
   - The simplification arc — mnemon local (stdio + single-file vault)

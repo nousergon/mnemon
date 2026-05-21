@@ -59,47 +59,65 @@ def _run_cmd(cmd: str) -> tuple[bool, str]:
     return False, result.stderr.strip()
 
 
-def _checkpoint_wal(sqlite_path: Path) -> str | None:
-    """Force a WAL checkpoint so the main sqlite file contains all
-    committed writes before ``aws s3 cp`` reads it.
+def _snapshot_sqlite(src_path: Path, snap_path: Path) -> str | None:
+    """Produce an atomic consistent snapshot of a SQLite database via
+    the online-backup API.
 
-    Short-lived CLI processes (e.g. ``mnemon save``) auto-checkpoint
-    on connection close, so the WAL file disappears and the main file
-    contains all data. Long-lived processes (e.g. ``mnemon
-    serve-remote`` on Fly) hold an open SQLite connection — new
-    commits accumulate in the WAL and SQLite only auto-checkpoints
-    once the WAL grows past 1000 pages (default). Without an explicit
-    checkpoint here, ``mnemon sync push`` running against a
-    long-running server uploads a stale main file missing the latest
-    writes, and the downstream ``sync pull`` silently restores
-    the stale state.
+    SOTA primitive for "copy a SQLite database file safely while
+    something else might be writing it." ``Connection.backup()`` uses
+    SQLite's WAL-aware backup protocol — captures all committed writes
+    even when another process holds the connection open with frames
+    only in the WAL.
 
-    Surfaced 2026-05-21 during the 0.6.0 Layer-3 test: Step 4 added a
-    doc via remote (committed to Fly serve-remote's WAL but never
-    flushed to main); downgrade's Fly→S3 dump (added in 0.6.0 too)
-    then uploaded the stale main and lost the doc on local restore.
+    Why not ``PRAGMA wal_checkpoint`` + raw ``aws s3 cp``: the
+    checkpoint is a *cooperative* request that returns
+    ``(busy=0, total=0, checkpointed=0)`` when another process holds
+    the WAL (verified 2026-05-21 against a long-running serve-remote
+    scenario — checkpoint reported success but flushed zero frames).
+    The backup API is the canonical primitive for this; the checkpoint
+    band-aid (formerly ``_checkpoint_wal``) was a wrong mental model.
 
-    TRUNCATE mode: most thorough, blocks briefly if other readers
-    hold locks. Acceptable for the (push, sync) flow — we don't
-    expect concurrent traffic during a deliberate sync push. Failures
-    are returned as a string so the caller can log without raising
-    (sync push remains best-effort per error).
+    Why not litestream/LiteFS: mnemon's use case is one-shot cross-host
+    transfer at upgrade/downgrade time, not continuous replication.
+    The backup API matches the actual operational model.
+
+    Returns ``None`` on success, an error string on failure (matches
+    the existing best-effort error contract in ``push()``).
     """
     import sqlite3
     try:
-        conn = sqlite3.connect(str(sqlite_path), timeout=10.0)
+        # Clean any stale snapshot from a prior run.
         try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            conn.commit()
+            snap_path.unlink()
+        except FileNotFoundError:
+            pass
+        src = sqlite3.connect(str(src_path), timeout=10.0)
+        try:
+            dst = sqlite3.connect(str(snap_path))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
         finally:
-            conn.close()
+            src.close()
     except sqlite3.Error as exc:
-        return f"sqlite checkpoint failed: {exc}"
+        return f"sqlite backup failed: {exc}"
+    except OSError as exc:
+        return f"snapshot file IO failed: {exc}"
     return None
 
 
 def push() -> dict[str, list[str]]:
     """Push local vault to S3.
+
+    Uses SQLite's online-backup API to produce an atomic consistent
+    snapshot of the live database before uploading — handles the
+    long-lived-server case (mnemon serve-remote on Fly) where
+    raw ``aws s3 cp`` of the sqlite file would upload a stale main
+    file missing all WAL-resident writes.
+
+    Vec store (default.vec.npz) is a binary numpy file with no
+    concurrent-writer semantics — uploaded directly without snapshot.
 
     Returns {"pushed": [...], "errors": [...]}.
     """
@@ -115,17 +133,30 @@ def push() -> dict[str, list[str]]:
         if not local_path.exists():
             continue
 
-        # Force WAL → main flush before reading the sqlite file as bytes.
-        # See _checkpoint_wal docstring for the rationale.
+        # SQLite vault: snapshot via backup API → upload the snapshot.
+        # vec.npz: raw file → upload directly.
         if label == "sqlite":
-            ckpt_err = _checkpoint_wal(local_path)
-            if ckpt_err is not None:
-                errors.append(ckpt_err)
+            snap_path = local_path.with_suffix(".sqlite.snapshot")
+            snap_err = _snapshot_sqlite(local_path, snap_path)
+            if snap_err is not None:
+                errors.append(snap_err)
                 continue
+            upload_path = snap_path
+            ext = "sqlite"
+        else:
+            upload_path = local_path
+            ext = "vec.npz"
 
-        ext = "sqlite" if label == "sqlite" else "vec.npz"
         s3_target = _s3_path(f"{_vault_name()}.{ext}")
-        ok, output = _run_cmd(f'aws s3 cp "{local_path}" "{s3_target}" --only-show-errors')
+        ok, output = _run_cmd(f'aws s3 cp "{upload_path}" "{s3_target}" --only-show-errors')
+
+        # Clean up sqlite snapshot regardless of upload success — it's a
+        # transient artifact tied to this push call.
+        if label == "sqlite":
+            try:
+                snap_path.unlink()
+            except FileNotFoundError:
+                pass
 
         if ok:
             size_kb = local_path.stat().st_size / 1024
