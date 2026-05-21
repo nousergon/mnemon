@@ -250,6 +250,43 @@ test_sourcing_does_not_dispatch() {
 
 # ---- tests: Step-2 seed content uniqueness ----
 
+test_remote_helper_exists_and_is_invokable() {
+    # The Python helper that bypasses mnemon's local-only CLI for Layer-3
+    # remote verification (see _layer3_remote_helper.py docstring).
+    # Asserts the file exists, has the expected entry-points, and prints
+    # usage when called without args (basic smoke).
+    local helper="$REPO_ROOT/scripts/_layer3_remote_helper.py"
+    [ -f "$helper" ] || { echo "    helper not found at $helper" >&2; return 1; }
+
+    # The script needs python + the venv's mnemon installable.
+    local out
+    out="$("$REPO_ROOT/.venv/bin/python" "$helper" 2>&1)" && return 1   # bare invocation should fail with usage
+    echo "$out" | grep -q "usage:" || { echo "    helper didn't print usage on bare invocation: $out" >&2; return 1; }
+}
+
+test_layer3_uses_remote_helper_not_mnemon_status() {
+    # Regression for the 2026-05-21 verification bug: cmd_layer3 used
+    # `mnemon status` (local-only) to assert remote state, which always
+    # read an empty freshly-created local SQLite. The fix switched to
+    # the remote helper. Guard against a future edit reverting to
+    # `mnemon status` for remote verification.
+    local script="$REPO_ROOT/scripts/promote_stable.sh"
+
+    # Extract Step 3 + Step 4 bodies and check they use the helper.
+    local body
+    body="$(awk '/echo_step "Step 3/,/echo_step "Step 5/' "$script")"
+    echo "$body" | grep -q "_layer3_remote_helper.py" \
+        || { echo "    Step 3/4 doesn't reference _layer3_remote_helper.py" >&2; return 1; }
+
+    # And NEITHER step uses `mnemon status` against the test app remote
+    # (the broken pattern). Step 5 still uses mnemon status post-downgrade
+    # which is correct because local mode is appropriate then; so we
+    # constrain the negative check to Steps 3 + 4 only.
+    echo "$body" | grep -E '"\$M" status|"\$MNEMON_VENV_BIN/mnemon" status' \
+        && { echo "    Step 3/4 still uses local-only mnemon status for remote verification" >&2; return 1; }
+    return 0
+}
+
 test_step2_seed_contents_are_unique() {
     # mnemon's store.save() does content-hash dedup (rc15+). The original
     # runbook passed the same content to all three Step-2 saves, which
@@ -302,6 +339,8 @@ run_test test_awk_handles_zero_count
 run_test test_awk_returns_empty_when_field_missing
 run_test test_sourcing_does_not_dispatch
 run_test test_step2_seed_contents_are_unique
+run_test test_remote_helper_exists_and_is_invokable
+run_test test_layer3_uses_remote_helper_not_mnemon_status
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
