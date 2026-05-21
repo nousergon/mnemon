@@ -503,8 +503,17 @@ cmd_verify() {
 }
 
 # ============================================================
-# dispatch
+# dispatch (only when executed directly, not when sourced for tests)
 # ============================================================
+# tests/test_promote_stable.sh sources this file to call individual helpers
+# (`latest_pypi_version`, `_layer3_cleanup`, etc.) without running the
+# subcommand dispatcher. The standard `${BASH_SOURCE[0]} != $0` idiom
+# discriminates between `bash promote_stable.sh ...` (execute) and
+# `source promote_stable.sh` (load functions only).
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+    return 0 2>/dev/null || true
+fi
+
 case "${1:-}" in
     preflight) cmd_preflight ;;
     layer3)    cmd_layer3 ;;
