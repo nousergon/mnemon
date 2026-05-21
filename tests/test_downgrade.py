@@ -376,13 +376,40 @@ class TestFlyDumpVaultBeforePull:
             downgrade_local(skip_doctor=True)
         mock_dump.assert_not_called()
 
-    def test_fly_dump_runs_ssh_console_with_sync_push(self, tmp_path):
+    def test_fly_dump_runs_ssh_console_with_checkpoint_then_sync_push(self, tmp_path):
         # Direct test that _fly_dump_vault issues the expected flyctl
-        # command. Mirror of upgrade._fly_seed_vault but with `push`.
+        # command. Must include an inline WAL checkpoint BEFORE the
+        # sync push, so the push works correctly even when the Fly
+        # container is running a pre-0.6.0 mnemon that lacks the
+        # in-push checkpoint. Regression for the 2026-05-21 Layer-3
+        # version-skew bug.
         from mnemon import downgrade as dgmod
         with patch("mnemon.downgrade.subprocess.run") as mock_run:
             dgmod._fly_dump_vault("mnemon-test-abc")
-        mock_run.assert_called_once_with(
-            ["flyctl", "ssh", "console", "--app", "mnemon-test-abc", "-C", "mnemon sync push"],
-            check=True,
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args.args[0]
+        # Outer shape: flyctl ssh console --app NAME -C <remote_cmd>
+        assert call_args[0] == "flyctl"
+        assert call_args[1:5] == ["ssh", "console", "--app", "mnemon-test-abc"]
+        assert call_args[5] == "-C"
+        remote_cmd = call_args[6]
+        # Must contain BOTH the inline checkpoint and the sync push,
+        # with checkpoint first and chained via `&&` so a checkpoint
+        # failure prevents the push.
+        assert "PRAGMA wal_checkpoint" in remote_cmd, (
+            f"missing inline checkpoint in: {remote_cmd}"
         )
+        assert "sqlite3" in remote_cmd, (
+            f"missing stdlib sqlite3 invocation in: {remote_cmd}"
+        )
+        assert "mnemon sync push" in remote_cmd, (
+            f"missing mnemon sync push in: {remote_cmd}"
+        )
+        # Order: checkpoint must precede sync push.
+        ck_idx = remote_cmd.index("PRAGMA wal_checkpoint")
+        push_idx = remote_cmd.index("mnemon sync push")
+        assert ck_idx < push_idx, (
+            f"checkpoint must precede sync push in: {remote_cmd}"
+        )
+        # Chained with && so push only runs on checkpoint success.
+        assert "&&" in remote_cmd, f"missing && short-circuit in: {remote_cmd}"
