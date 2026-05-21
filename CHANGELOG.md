@@ -4,13 +4,26 @@
 
 ### Release
 
-- **Promotion from `0.6.0rc18` to `0.6.0` stable.** No code changes
-  from `rc18` — this release closes the rc cycle that ran from
-  `0.6.0rc1` (2026-04-21, the simplification arc → two-product split)
-  through `0.6.0rc18` (2026-05-18, the layered stored-injection
-  defense). `0.6.0` is `rc18` at stable maturity; the source under
-  this tag is byte-identical to the `rc18` source under the prior
-  tag, modulo this CHANGELOG entry and the version-string bump.
+- **Promotion from `0.6.0rc18` to `0.6.0` stable.** Closes the rc cycle
+  that ran from `0.6.0rc1` (2026-04-21, the simplification arc →
+  two-product split) through `0.6.0rc18` (2026-05-18, the layered
+  stored-injection defense). `0.6.0` is `rc18` plus the single bug
+  fix below — surfaced 2026-05-21 while exercising the pre-promote
+  Layer-3 web test for the first time.
+
+### Fixes
+
+- **`mnemon upgrade web` now forwards `MNEMON_S3_PREFIX` and
+  `MNEMON_VAULT_NAME` to the Fly container** as secrets, so a
+  non-default operator override propagates to the container's
+  `mnemon sync pull` seed step. Previously the Fly side fell back
+  to `sync.S3_PREFIX_DEFAULT` (`mnemon/vaults`) regardless of what
+  the operator set locally — which broke the runbook's
+  "test against an isolated S3 prefix" ritual. Not user-affecting
+  for normal prod redeploys (both sides default identically); only
+  affects ad-hoc test deploys where the operator overrides the
+  prefix. Surfaced + fixed during the 0.6.0 Layer-3 attempt; 4
+  regression tests cover the forwarding contract.
 
   The rc cycle delivered:
   - The simplification arc — mnemon local (stdio + single-file vault)

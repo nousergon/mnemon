@@ -337,6 +337,64 @@ class TestRequireAwsSecrets:
                 )
 
 
+class TestFlySecretsForwardS3PrefixAndVaultName:
+    """Regression for the 2026-05-21 Layer-3 bug: `_fly_set_secrets`
+    forwarded `MNEMON_S3_BUCKET` but not `MNEMON_S3_PREFIX` / `MNEMON_VAULT_NAME`,
+    so the Fly container's `mnemon sync pull` fell back to defaults
+    and seeded from the wrong S3 prefix (operator's prod prefix instead
+    of the test-scoped override the operator set locally).
+    """
+
+    def _capture_secrets_args(self, monkeypatch, env_overrides=None):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA-test")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret-test")
+        for k, v in (env_overrides or {}).items():
+            monkeypatch.setenv(k, v)
+
+        with patch("mnemon.upgrade.subprocess.run") as mock_run:
+            mock_run.return_value = _ok_completed()
+            upgrade._fly_set_secrets(
+                "mnemon-test", "some-token", "mnemon-memory"
+            )
+        # The subprocess.run call carries the secrets-set CLI args.
+        call_args = mock_run.call_args.args[0]
+        # Pull just the KEY=VALUE pairs from the CLI args.
+        return [a for a in call_args if "=" in a]
+
+    def test_forwards_s3_prefix_override_to_fly_secrets(self, monkeypatch):
+        kvs = self._capture_secrets_args(
+            monkeypatch,
+            {"MNEMON_S3_PREFIX": "test-upgrade/abc123"},
+        )
+        assert "MNEMON_S3_PREFIX=test-upgrade/abc123" in kvs
+
+    def test_forwards_vault_name_override_to_fly_secrets(self, monkeypatch):
+        kvs = self._capture_secrets_args(
+            monkeypatch,
+            {"MNEMON_VAULT_NAME": "custom-vault"},
+        )
+        assert "MNEMON_VAULT_NAME=custom-vault" in kvs
+
+    def test_defaults_match_sync_module_constants_when_env_unset(self, monkeypatch):
+        # Unset both env vars + verify Fly gets the same defaults sync.py uses.
+        # Preserves prod-redeploy behavior (no override → default both sides).
+        monkeypatch.delenv("MNEMON_S3_PREFIX", raising=False)
+        monkeypatch.delenv("MNEMON_VAULT_NAME", raising=False)
+        from mnemon.sync import S3_PREFIX_DEFAULT, VAULT_NAME_DEFAULT
+        kvs = self._capture_secrets_args(monkeypatch)
+        assert f"MNEMON_S3_PREFIX={S3_PREFIX_DEFAULT}" in kvs
+        assert f"MNEMON_VAULT_NAME={VAULT_NAME_DEFAULT}" in kvs
+
+    def test_still_forwards_token_and_bucket(self, monkeypatch):
+        # Belt + suspenders: this fix didn't regress the existing
+        # forwarded secrets.
+        kvs = self._capture_secrets_args(monkeypatch)
+        assert "MNEMON_LOCAL_TOKEN=some-token" in kvs
+        assert "MNEMON_S3_BUCKET=mnemon-memory" in kvs
+        assert any(kv.startswith("AWS_ACCESS_KEY_ID=") for kv in kvs)
+        assert any(kv.startswith("AWS_SECRET_ACCESS_KEY=") for kv in kvs)
+
+
 # ── _fly_app_exists detection ────────────────────────────────────────────────
 
 
