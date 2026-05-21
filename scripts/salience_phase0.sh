@@ -97,23 +97,31 @@ print(c.execute('SELECT COUNT(*) FROM documents WHERE invalidated_at IS NULL').f
 
 
 cmd_score() {
-    local top=30
+    # --show:  how many candidates to DISPLAY (default 30)
+    # --top:   how many to AUTO-SELECT into standing.json (default = python
+    #          script's default, currently 10; hard ceiling 20)
+    # --print-only: don't write standing.json / standing-rendered.md, just print
+    local show=30
+    local extra=()
     while [ $# -gt 0 ]; do
         case "$1" in
-            --top) top="$2"; shift 2 ;;
-            *) die "unknown arg: $1" ;;
+            --show) show="$2"; shift 2 ;;
+            --top) extra+=("--top" "$2"); shift 2 ;;
+            --print-only) extra+=("--print-only"); shift ;;
+            *) die "unknown arg: $1 (supported: --show N, --top N, --print-only)" ;;
         esac
     done
 
     [ -f "$SNAPSHOT_PATH" ] || die "no snapshot at $SNAPSHOT_PATH — run \`$0 snapshot\` first"
 
-    echo_step "Score candidates against $SNAPSHOT_PATH (top $top)"
+    echo_step "Score candidates against $SNAPSHOT_PATH (show $show, auto-select per python default)"
     "$MNEMON_VENV_BIN/python" "$REPO_ROOT/scripts/build_standing_set.py" \
-        --db "$SNAPSHOT_PATH" --top "$top"
+        --db "$SNAPSHOT_PATH" --show "$show" "${extra[@]}"
 
     echo_step "Next"
-    echo "  Inspect the candidates above; pick N≤20 IDs by hand."
-    echo "  Then: scripts/salience_phase0.sh select 123,456,789,..."
+    echo "  Score auto-wrote standing.json + standing-rendered.md (top N marked with ★)."
+    echo "  To override the auto-selection: scripts/salience_phase0.sh select 123,456,789,..."
+    echo "  To activate: export MNEMON_STANDING_TIER_FILE=$STANDING_FILE"
 }
 
 
