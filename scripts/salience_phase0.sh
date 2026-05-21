@@ -115,8 +115,12 @@ cmd_score() {
     [ -f "$SNAPSHOT_PATH" ] || die "no snapshot at $SNAPSHOT_PATH — run \`$0 snapshot\` first"
 
     echo_step "Score candidates against $SNAPSHOT_PATH (show $show, auto-select per python default)"
+    # `"${extra[@]+"${extra[@]}"}"` — bash idiom for "expand the array
+    # if non-empty, expand to nothing if empty". Plain `"${extra[@]}"`
+    # would trip `set -u` (unbound variable) on bash 3.2 (macOS default)
+    # when extra is empty.
     "$MNEMON_VENV_BIN/python" "$REPO_ROOT/scripts/build_standing_set.py" \
-        --db "$SNAPSHOT_PATH" --show "$show" "${extra[@]}"
+        --db "$SNAPSHOT_PATH" --show "$show" "${extra[@]+"${extra[@]}"}"
 
     echo_step "Next"
     echo "  Score auto-wrote standing.json + standing-rendered.md (top N marked with ★)."
