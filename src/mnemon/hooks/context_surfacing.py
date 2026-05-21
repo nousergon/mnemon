@@ -101,11 +101,42 @@ def _load_standing_ids() -> list[int]:
         return []
 
 
-def _fetch_standing_block(ids: list[int]) -> str:
-    """Fetch standing-tier memories via memory_get and render as a block.
+def _read_rendered_cache() -> str:
+    """Read the pre-rendered standing-tier block from disk if it exists.
 
-    Sequential HTTP calls — fine for Phase 0 (N≤20). Empty string on any
-    failure / all-skipped (keeps the calling code branch-free).
+    scripts/build_standing_set.py writes ~/.mnemon/standing-rendered.md
+    alongside standing.json — pre-fetched, pre-rendered content keyed
+    to the selected IDs. Reading the cache costs microseconds; the
+    fallback (sequential memory_get HTTP) costs ~500ms × N.
+
+    The cache is the SOTA path. Fallback exists for transitional cases
+    where the operator has only standing.json (no rendered cache yet).
+    """
+    if "MNEMON_STANDING_TIER_FILE" not in os.environ:
+        return ""
+    standing_json = os.path.expanduser(os.environ["MNEMON_STANDING_TIER_FILE"])
+    # The rendered cache is the sibling .md file. Convention:
+    #   ~/.mnemon/standing.json  →  ~/.mnemon/standing-rendered.md
+    try:
+        json_path = os.path.abspath(standing_json)
+        base = os.path.dirname(json_path)
+        # Default cache filename — kept stable across versions.
+        cache_path = os.path.join(base, "standing-rendered.md")
+        if os.path.exists(cache_path):
+            with open(cache_path) as f:
+                return f.read().strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _fetch_standing_block(ids: list[int]) -> str:
+    """Fallback: fetch standing-tier memories via memory_get HTTP.
+
+    Used when the rendered cache (~/.mnemon/standing-rendered.md)
+    isn't available — e.g., operator hand-wrote standing.json without
+    running scripts/build_standing_set.py. Sequential calls; ~500ms × N
+    latency. Prefer the cache path.
     """
     if not ids:
         return ""
@@ -182,8 +213,14 @@ def build_context(raw_text: str, *, prefix: str = "") -> str:
     """
     # Standing context — Phase 0 opt-in. Computed first so the function
     # can inject standing-only when no situational results exist.
-    standing_ids = _load_standing_ids()
-    standing_block = _fetch_standing_block(standing_ids) if standing_ids else ""
+    #
+    # Cache-first: ~/.mnemon/standing-rendered.md (microseconds). If
+    # the cache doesn't exist, fall back to per-prompt HTTP fetch
+    # (~500ms × N). build_standing_set.py writes both on every run.
+    standing_block = _read_rendered_cache()
+    if not standing_block:
+        standing_ids = _load_standing_ids()
+        standing_block = _fetch_standing_block(standing_ids) if standing_ids else ""
 
     # Parse the situational search results.
     situational_rendered = ""
