@@ -132,6 +132,33 @@ def _reconfigure_clients_local(detected: list[str]) -> list[str]:
     return reconfigured
 
 
+def _fly_dump_vault(app_name: str) -> None:
+    """SSH into the Fly machine and run ``mnemon sync push``.
+
+    Mirror of ``upgrade._fly_seed_vault`` in the opposite direction —
+    dumps the *current* Fly vault to S3 so the subsequent local
+    ``mnemon sync pull`` gets up-to-date state, not whatever stale
+    snapshot was last pushed at upgrade time.
+
+    Without this step, any memory added via remote after the upgrade
+    is lost on downgrade — only data that was on S3 at upgrade time
+    survives the round-trip. Surfaced 2026-05-21 during the 0.6.0
+    Layer-3 test as "expected 4 docs after downgrade, got '3'".
+    """
+    subprocess.run(
+        [
+            "flyctl",
+            "ssh",
+            "console",
+            "--app",
+            app_name,
+            "-C",
+            "mnemon sync push",
+        ],
+        check=True,
+    )
+
+
 def _fly_destroy_app(app_name: str) -> None:
     """Run ``flyctl apps destroy`` unattended (``-y``)."""
     subprocess.run(
@@ -160,6 +187,7 @@ def downgrade_local(
     yes: bool = False,
     skip_doctor: bool = False,
     app_name_override: str | None = None,
+    skip_fly_push: bool = False,
 ) -> str:
     """Downgrade a web install back to local-only.
 
@@ -169,9 +197,15 @@ def downgrade_local(
     """
     remote_url = _resolve_remote_url()
 
-    # Step 2: sync pull S3 → local
-    from .sync import pull as s3_pull
-
+    # Step 1: ensure S3 has the *current* Fly vault before pulling.
+    # `mnemon upgrade web` pushes local→S3→Fly at upgrade time, then
+    # the Fly vault evolves independently. Without a Fly→S3 dump here,
+    # the subsequent pull would seed the local vault from a stale
+    # snapshot (the one from upgrade time) and silently lose any
+    # memory the user added via remote post-upgrade. Skipping with
+    # --skip-fly-push is an operator escape hatch for the case where
+    # SSH isn't reachable (machine off, etc.) and the operator
+    # explicitly accepts the stale-pull data loss.
     bucket = os.environ.get("MNEMON_S3_BUCKET", "").strip()
     if not bucket:
         raise DowngradeError(
@@ -180,6 +214,24 @@ def downgrade_local(
             "downgraded local vault would be empty. Export "
             "MNEMON_S3_BUCKET and retry."
         )
+
+    app_name = app_name_override or _extract_app_name(remote_url)
+    if app_name and not skip_fly_push:
+        try:
+            _fly_dump_vault(app_name)
+        except subprocess.CalledProcessError as exc:
+            raise DowngradeError(
+                f"Fly→S3 dump failed ({exc}). Without this push the "
+                f"downgrade would seed local from a stale S3 snapshot "
+                f"and lose any post-upgrade remote-added memories. "
+                f"Investigate via `flyctl ssh console --app {app_name}` "
+                f"and retry. If you accept the data loss, rerun with "
+                f"--skip-fly-push."
+            ) from exc
+
+    # Step 2: sync pull S3 → local
+    from .sync import pull as s3_pull
+
     pull_result = s3_pull()
     if pull_result["errors"]:
         raise DowngradeError(
@@ -195,9 +247,9 @@ def downgrade_local(
     detected = detect_installed_clients()
     reconfigured = _reconfigure_clients_local(detected)
 
-    # Step 4 (optional): destroy the Fly app.
+    # Step 4 (optional): destroy the Fly app. `app_name` was resolved
+    # up at the Fly→S3 dump step (Step 1) so we don't re-extract here.
     destroyed: str | None = None
-    app_name = app_name_override or _extract_app_name(remote_url)
     if destroy_fly_app:
         if not app_name:
             raise DowngradeError(

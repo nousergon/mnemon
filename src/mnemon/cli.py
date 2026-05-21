@@ -291,6 +291,7 @@ def main() -> None:
                     yes=parsed["yes"],
                     skip_doctor=parsed["skip_doctor"],
                     app_name_override=parsed["app_name"],
+                    skip_fly_push=parsed["skip_fly_push"],
                 )
             )
         except DowngradeError as exc:
@@ -359,6 +360,7 @@ def _parse_downgrade_args(args: list[str]) -> dict:
         "yes": False,
         "skip_doctor": False,
         "app_name": None,
+        "skip_fly_push": False,
     }
     i = 0
     while i < len(args):
@@ -371,6 +373,9 @@ def _parse_downgrade_args(args: list[str]) -> dict:
             i += 1
         elif flag == "--skip-doctor":
             result["skip_doctor"] = True
+            i += 1
+        elif flag == "--skip-fly-push":
+            result["skip_fly_push"] = True
             i += 1
         elif flag == "--app-name" and i + 1 < len(args):
             result["app_name"] = args[i + 1]
