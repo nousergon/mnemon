@@ -71,6 +71,20 @@
   invalid sources, the snapshot-before-cp call order, the transient
   cleanup, and the vec.npz direct-upload path.
 
+- **`mnemon downgrade local` (`_fly_dump_vault`) uses SQLite's
+  online-backup API directly** for the version-skew bootstrap.
+  When Layer-3 runs Pre-publish validation, the Fly container is
+  pinned to the latest-published mnemon (e.g. `0.6.0rc18`) which
+  predates the `sync.push` backup-API fix above — so SSHing
+  `flyctl ssh -C "mnemon sync push"` would invoke the older
+  broken push. To handle this version-skew, `_fly_dump_vault`
+  SSHes a stdlib Python script that does its own `Connection.backup()`
+  + `aws s3 cp` of `/data/default.sqlite` (plus `default.vec.npz`
+  best-effort), independent of installed mnemon version. Once the
+  Fly side is reliably on `0.6.0+`, this can simplify to
+  `flyctl ssh -C "mnemon sync push"` and rely on the canonical
+  primitive — tracked as a follow-up.
+
   The rc cycle delivered:
   - The simplification arc — mnemon local (stdio + single-file vault)
     and mnemon web (Fly + S3 backup) as one codebase, symmetric
