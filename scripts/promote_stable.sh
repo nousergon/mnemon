@@ -466,9 +466,26 @@ cmd_publish() {
 
     echo_step "Create GitHub Release"
     local release_notes
-    # Extract this version's CHANGELOG section: from the heading to the
-    # next heading exclusive (sed '$d' drops the next-heading line).
-    release_notes="$(awk "/^## \[$TARGET_VERSION\]/,/^## \[/" CHANGELOG.md | sed '$d')"
+    # Extract this version's CHANGELOG section: from the `## [VER]`
+    # heading to (but not including) the next `## [` heading.
+    #
+    # The naive awk range `/^## \[VER\]/,/^## \[/` doesn't work — both
+    # patterns match the same SINGLE line (the start heading itself
+    # matches the end pattern too), so awk emits just that one line
+    # and `sed '$d'` strips it → empty. Caught 2026-05-21 when the
+    # publish step died with "could not extract CHANGELOG section
+    # for 0.6.0" right after a successful twine upload + tag push.
+    #
+    # Use Python regex which is unambiguous about the range semantics.
+    release_notes="$("$MNEMON_VENV_BIN/python" - <<PY
+import re
+ver = re.escape("$TARGET_VERSION")
+content = open("CHANGELOG.md").read()
+m = re.search(rf"^## \[{ver}\].*?(?=^## \[)", content, re.DOTALL | re.MULTILINE)
+if m:
+    print(m.group(0).rstrip())
+PY
+)"
     [ -n "$release_notes" ] || die "could not extract CHANGELOG section for $TARGET_VERSION"
     gh release create "v$TARGET_VERSION" --title "v$TARGET_VERSION" --notes "$release_notes"
     echo_ok "GitHub Release v$TARGET_VERSION created"

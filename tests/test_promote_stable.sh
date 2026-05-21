@@ -287,6 +287,70 @@ test_layer3_uses_remote_helper_not_mnemon_status() {
     return 0
 }
 
+test_publish_extracts_changelog_section_correctly() {
+    # Regression for the 2026-05-21 publish-step bug: the naive awk
+    # range `/^## \[VER\]/,/^## \[/` extracted ZERO bytes because
+    # both patterns matched the same heading line on BWK awk
+    # (macOS default), and `sed '$d'` then dropped that single line.
+    # The fix uses Python regex with `(?=^## \[)` lookahead.
+    #
+    # This test simulates the publish-step extraction against a
+    # synthetic CHANGELOG and asserts the result contains the
+    # version's content (Release + Fixes sections) without bleeding
+    # into the next version's section.
+
+    local tmp_changelog
+    tmp_changelog="$(mktemp)"
+    cat > "$tmp_changelog" <<'CL'
+# Changelog
+
+## [9.9.9] - 2026-01-01
+
+### Release
+
+- v9.9.9 release notes — this should be extracted.
+
+### Fixes
+
+- v9.9.9 fix bullet — also extracted.
+
+## [9.9.8] - 2025-12-31
+
+### Release
+
+- v9.9.8 release notes — should NOT be in the v9.9.9 extract.
+CL
+
+    # Reproduce the publish-step extraction with the new logic.
+    local result
+    result="$("$REPO_ROOT/.venv/bin/python" - <<PY
+import re
+ver = re.escape("9.9.9")
+content = open("$tmp_changelog").read()
+m = re.search(rf"^## \[{ver}\].*?(?=^## \[)", content, re.DOTALL | re.MULTILINE)
+if m:
+    print(m.group(0).rstrip())
+PY
+)"
+
+    rm -f "$tmp_changelog"
+
+    # Positive: must contain v9.9.9 content.
+    echo "$result" | grep -q "v9.9.9 release notes" \
+        || { echo "    missing v9.9.9 release notes in extract" >&2; return 1; }
+    echo "$result" | grep -q "v9.9.9 fix bullet" \
+        || { echo "    missing v9.9.9 fix bullet in extract" >&2; return 1; }
+
+    # Negative: must NOT contain v9.9.8 content (no bleed across heading).
+    if echo "$result" | grep -q "v9.9.8"; then
+        echo "    v9.9.8 content leaked into v9.9.9 extract" >&2
+        return 1
+    fi
+
+    # Negative: must NOT be empty (the original bug).
+    [ -n "$result" ] || { echo "    extraction returned empty" >&2; return 1; }
+}
+
 test_step2_seed_contents_are_unique() {
     # mnemon's store.save() does content-hash dedup (rc15+). The original
     # runbook passed the same content to all three Step-2 saves, which
@@ -341,6 +405,7 @@ run_test test_sourcing_does_not_dispatch
 run_test test_step2_seed_contents_are_unique
 run_test test_remote_helper_exists_and_is_invokable
 run_test test_layer3_uses_remote_helper_not_mnemon_status
+run_test test_publish_extracts_changelog_section_correctly
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
