@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+# scripts/promote_stable.sh — drive a mnemon rc → stable promotion end-to-end.
+#
+# Automates the operator sequence documented in:
+#   - ROADMAP.md § Pre-deploy
+#   - private/DEPLOYMENT_CHECKLIST.md
+#   - private/e2e-test-runbook-260421.md (Layer-3 web test)
+#
+# Does NOT bypass the operator-only rules in SYSTEM_STATE.md — credentials
+# remain operator-owned at every step:
+#   - twine reads ~/.pypirc / TWINE_PASSWORD env (or prompts).
+#   - flyctl uses the operator's logged-in session.
+#   - gh uses the operator's logged-in gh auth.
+# The script just sequences the commands an operator would run by hand,
+# with loud preflight + per-step echo + confirmation prompts before each
+# destructive action.
+#
+# Target version is read from src/mnemon/__init__.py — the script is
+# version-agnostic and reusable for future stable cuts.
+#
+# Usage:
+#   scripts/promote_stable.sh preflight   # read-only, runs before everything else
+#   scripts/promote_stable.sh layer3      # E2E web test (creates+destroys test Fly app, ~15 min)
+#   scripts/promote_stable.sh publish     # POST-MERGE: build → twine upload → tag → GH release → Fly redeploy
+#   scripts/promote_stable.sh verify      # post-publish sanity check
+#
+# Sequence for a stable cut:
+#   1. operator merges 0.6.0rc{N} into main, including the 3-line bump + CHANGELOG entry
+#      (or merges a candidate, and accepts that publish will run against whatever
+#       __version__ main currently holds — the script reads it as truth)
+#   2. operator: scripts/promote_stable.sh preflight   ← validates main is ready
+#   3. operator: scripts/promote_stable.sh layer3      ← validates web upgrade/downgrade end-to-end
+#   4. operator: merge the promote PR (this is the only step the script can't drive)
+#   5. operator: scripts/promote_stable.sh publish     ← post-merge build + ship
+#   6. operator: scripts/promote_stable.sh verify      ← post-publish confirmation
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+# ---- style ----
+echo_step() { printf "\n\033[1;34m==> %s\033[0m\n" "$*"; }
+echo_ok()   { printf "\033[1;32m  ✓\033[0m %s\n" "$*"; }
+echo_warn() { printf "\033[1;33m  ⚠\033[0m %s\n" "$*" >&2; }
+echo_err()  { printf "\033[1;31m  ✗\033[0m %s\n" "$*" >&2; }
+die()       { echo_err "$*"; exit 1; }
+
+confirm() {
+    local prompt="$1"
+    printf "\033[1;33m  ? %s [y/N] \033[0m" "$prompt"
+    local reply=""
+    read -r reply
+    [[ "$reply" =~ ^[Yy]$ ]] || die "aborted by operator"
+}
+
+# Read the target version from the canonical source — the script is
+# version-agnostic; bump src/mnemon/__init__.py and the script targets
+# the new version automatically.
+TARGET_VERSION="$(awk -F'"' '/^__version__ = /{print $2; exit}' src/mnemon/__init__.py)"
+[ -n "$TARGET_VERSION" ] || die "could not read __version__ from src/mnemon/__init__.py"
+
+MNEMON_VENV_BIN="$REPO_ROOT/.venv/bin"
+[ -x "$MNEMON_VENV_BIN/mnemon" ] || die "mnemon CLI not found at $MNEMON_VENV_BIN/mnemon — activate / install editable venv first"
+[ -x "$MNEMON_VENV_BIN/twine" ] || die "twine not found at $MNEMON_VENV_BIN/twine — pip install -e .[dev]"
+[ -x "$MNEMON_VENV_BIN/python" ] || die "venv python not found at $MNEMON_VENV_BIN/python"
+
+# ============================================================
+# preflight — read-only validation that the candidate is ready
+# ============================================================
+cmd_preflight() {
+    echo_step "Preflight — validating $TARGET_VERSION candidate"
+
+    # Preflight + layer3 typically run on the promote BRANCH (pre-merge);
+    # only `publish` requires main. Accept any branch but surface where
+    # we are so the operator sees it explicitly.
+    local branch
+    branch="$(git branch --show-current)"
+    git diff --quiet HEAD || die "working tree has uncommitted changes"
+    if [[ "$branch" == "main" ]]; then
+        echo_ok "on main, clean tree"
+    else
+        echo_ok "on branch '$branch', clean tree (publish will require main)"
+    fi
+
+    local pyver
+    pyver="$(awk -F'"' '/^version = /{print $2; exit}' pyproject.toml)"
+    [[ "$pyver" == "$TARGET_VERSION" ]] || die "version mismatch: __init__='$TARGET_VERSION' pyproject='$pyver'"
+    echo_ok "version pinned consistently: $TARGET_VERSION"
+
+    grep -q "^## \[$TARGET_VERSION\]" CHANGELOG.md \
+      || die "CHANGELOG.md missing ## [$TARGET_VERSION] section"
+    echo_ok "CHANGELOG entry present"
+
+    if git rev-parse "v$TARGET_VERSION" >/dev/null 2>&1; then
+        die "tag v$TARGET_VERSION already exists locally — promotion already happened?"
+    fi
+    git fetch --tags --quiet
+    if git rev-parse "v$TARGET_VERSION" >/dev/null 2>&1; then
+        die "tag v$TARGET_VERSION exists on remote — promotion already happened?"
+    fi
+    echo_ok "no v$TARGET_VERSION tag yet"
+
+    echo_step "pytest"
+    PYTHONPATH=src "$MNEMON_VENV_BIN/pytest" -q
+    echo_ok "tests green"
+
+    echo_step "Auth surfaces"
+    flyctl auth whoami >/dev/null 2>&1 || die "flyctl not logged in (run: flyctl auth login)"
+    aws sts get-caller-identity >/dev/null 2>&1 || die "aws creds not configured"
+    gh auth status >/dev/null 2>&1 || die "gh not logged in (run: gh auth login)"
+    echo_ok "flyctl, aws, gh authenticated"
+
+    echo_step "PREFLIGHT PASSED — $TARGET_VERSION ready for layer3 + publish"
+}
+
+# ============================================================
+# layer3 — E2E web test against test-scoped Fly app
+# Mirrors private/e2e-test-runbook-260421.md
+# ============================================================
+_layer3_cleanup() {
+    # Best-effort cleanup on any exit path.
+    # Failure-mode swallowed: cleanup-side errors (dangling test app destroy,
+    #   stale S3 prefix, lingering local dirs). Primary deliverable (the
+    #   pass/fail signal of the upgrade/downgrade cycle) survives a cleanup
+    #   error because the script's exit code reflects the last non-cleanup
+    #   command. Cleanup failures surface via the WARN log to operator stdout
+    #   so the next layer3 invocation's "dangling mnemon-test-* apps" preflight
+    #   will catch any leftover state.
+    local rc=$?
+    if [ -n "${TEST_APP_NAME:-}" ] && flyctl apps list 2>/dev/null | grep -q "$TEST_APP_NAME"; then
+        echo_warn "cleanup: destroying lingering test app $TEST_APP_NAME"
+        flyctl apps destroy "$TEST_APP_NAME" -y >/dev/null 2>&1 || echo_warn "cleanup: flyctl destroy failed for $TEST_APP_NAME"
+    fi
+    if [ -n "${MNEMON_S3_PREFIX:-}" ]; then
+        aws s3 rm "s3://${MNEMON_S3_BUCKET:-mnemon-memory}/$MNEMON_S3_PREFIX/" --recursive >/dev/null 2>&1 || echo_warn "cleanup: s3 rm failed for prefix $MNEMON_S3_PREFIX"
+    fi
+    if [ -n "${MNEMON_VAULT_DIR:-}" ] && [[ "$MNEMON_VAULT_DIR" == "$HOME/.mnemon-test-"* ]]; then
+        rm -rf "$MNEMON_VAULT_DIR" || true
+    fi
+    if [ -n "${MNEMON_CLIENT_CONFIG_ROOT:-}" ] && [[ "$MNEMON_CLIENT_CONFIG_ROOT" == "$HOME/.mnemon-test-configs-"* ]]; then
+        rm -rf "$MNEMON_CLIENT_CONFIG_ROOT" || true
+    fi
+    return $rc
+}
+
+cmd_layer3() {
+    echo_step "Layer-3 web test — $TARGET_VERSION E2E against test-scoped Fly app"
+
+    flyctl auth whoami >/dev/null 2>&1 || die "flyctl not logged in"
+    aws sts get-caller-identity >/dev/null 2>&1 || die "aws creds not configured"
+    if flyctl apps list 2>/dev/null | grep -q mnemon-test-; then
+        die "dangling mnemon-test-* Fly apps exist — destroy them before running"
+    fi
+
+    # Isolate test environment per the runbook.
+    local TEST_RUN_ID
+    TEST_RUN_ID="$(date +%Y%m%d-%H%M%S)"
+    export MNEMON_VAULT_DIR="$HOME/.mnemon-test-$TEST_RUN_ID"
+    export MNEMON_S3_BUCKET="mnemon-memory"
+    export MNEMON_S3_PREFIX="test-upgrade/$TEST_RUN_ID"
+    export TEST_APP_NAME="mnemon-test-$TEST_RUN_ID"
+    export MNEMON_CLIENT_CONFIG_ROOT="$HOME/.mnemon-test-configs-$TEST_RUN_ID"
+    # MNEMON_PROD_APP_NAMES guards prod against an accidental `upgrade web
+    # --app-name mnemon-memory` during the test window. See SYSTEM_STATE.md
+    # "Known gotchas / sharp edges".
+    export MNEMON_PROD_APP_NAMES="mnemon-memory"
+
+    mkdir -p "$MNEMON_VAULT_DIR" "$MNEMON_CLIENT_CONFIG_ROOT"
+    trap _layer3_cleanup EXIT
+    echo_ok "isolated test env (RUN_ID=$TEST_RUN_ID, app=$TEST_APP_NAME)"
+
+    local M="$MNEMON_VENV_BIN/mnemon"
+
+    echo_step "Step 2 — seed local test vault"
+    "$M" save "Test memory for E2E upgrade cycle" "run-$TEST_RUN_ID" --type observation
+    "$M" save "Second test memory, should survive upgrade" "run-$TEST_RUN_ID" --type observation
+    "$M" save "Preference to keep after upgrade/downgrade" "run-$TEST_RUN_ID" --type preference
+    "$M" status
+    echo_ok "3 docs seeded in test vault"
+
+    echo_step "Step 3 — upgrade web to $TEST_APP_NAME"
+    "$M" upgrade web --app-name "$TEST_APP_NAME"
+    ls "$MNEMON_VAULT_DIR/archive/" | grep -q "pre-web-" || die "expected pre-web-*.sqlite archive missing"
+    ! [ -f "$MNEMON_VAULT_DIR/default.sqlite" ] || die "local vault should be archived; default.sqlite still present"
+    echo_ok "upgrade complete; local vault archived"
+
+    echo_step "Step 4 — exercise remote (add via HTTP)"
+    MNEMON_REMOTE_URL="https://$TEST_APP_NAME.fly.dev/mcp" \
+      "$M" save "Memory added after upgrade, should survive downgrade" "run-$TEST_RUN_ID" --type observation
+    local remote_count
+    remote_count="$(MNEMON_REMOTE_URL="https://$TEST_APP_NAME.fly.dev/mcp" "$M" status 2>&1 | awk '/[Dd]ocuments?:/{print $NF; exit}')"
+    [[ "$remote_count" == "4" ]] || die "expected 4 docs on remote, got '$remote_count'"
+    echo_ok "4 docs on remote"
+
+    echo_step "Step 5 — downgrade local + destroy fly app"
+    "$M" downgrade local --destroy-fly-app
+    local local_count
+    local_count="$("$M" status 2>&1 | awk '/[Dd]ocuments?:/{print $NF; exit}')"
+    [[ "$local_count" == "4" ]] || die "expected 4 docs after downgrade, got '$local_count'"
+    if flyctl apps list 2>/dev/null | grep -q "$TEST_APP_NAME"; then
+        die "test app not destroyed: $TEST_APP_NAME"
+    fi
+    echo_ok "downgrade complete; 4 docs intact locally; test app destroyed"
+
+    echo_step "Step 6 — prod-untouched verification"
+    [ -f "$HOME/.mnemon/default.sqlite" ] || echo_warn "prod vault not at ~/.mnemon/default.sqlite — verify by hand"
+    flyctl status --app mnemon-memory >/dev/null 2>&1 || echo_warn "prod fly app status check failed — verify by hand"
+    echo_ok "prod surfaces still responding"
+
+    # Explicit cleanup before trap, so the success log lands last.
+    trap - EXIT
+    _layer3_cleanup
+    echo_step "LAYER-3 PASSED for $TARGET_VERSION — promote PR can merge"
+}
+
+# ============================================================
+# publish — POST-MERGE: build, twine upload, tag, GH Release, Fly redeploy
+# ============================================================
+cmd_publish() {
+    echo_step "Publish $TARGET_VERSION — post-merge sequence"
+
+    local branch
+    branch="$(git branch --show-current)"
+    [[ "$branch" == "main" ]] || die "must be on main; on '$branch'"
+    git pull --ff-only --quiet
+    grep -q "__version__ = \"$TARGET_VERSION\"" src/mnemon/__init__.py \
+      || die "main is not at $TARGET_VERSION — has the promote PR merged?"
+    echo_ok "on main at $TARGET_VERSION"
+
+    if git rev-parse "v$TARGET_VERSION" >/dev/null 2>&1; then
+        die "tag v$TARGET_VERSION already exists locally — publish already ran?"
+    fi
+    git fetch --tags --quiet
+    if git rev-parse "v$TARGET_VERSION" >/dev/null 2>&1; then
+        die "tag v$TARGET_VERSION exists on remote — publish already ran?"
+    fi
+
+    # Unset the test-time prod-guard so `mnemon upgrade web --app-name
+    # mnemon-memory` is permitted for the real redeploy.
+    unset MNEMON_PROD_APP_NAMES 2>/dev/null || true
+
+    echo_step "Build — sdist + wheel"
+    rm -rf dist/
+    "$MNEMON_VENV_BIN/python" -m build
+    "$MNEMON_VENV_BIN/twine" check dist/*
+    echo_ok "build clean, twine check passed"
+
+    echo_step "Sdist hygiene"
+    local sdist
+    sdist="$(ls dist/mnemon_memory-*.tar.gz | head -1)"
+    [ -n "$sdist" ] || die "no sdist found in dist/"
+    # Forbidden: private/, .env, vault files, raw fly.toml.
+    # Sanctioned: fly.toml.example (template).
+    local leaks
+    leaks="$(tar tzf "$sdist" | grep -E "(^|/)(\.env|fly\.toml|default\.sqlite)$|(^|/)(private|\.mnemon)/" || true)"
+    if [ -n "$leaks" ]; then
+        echo_err "sdist contains forbidden paths:"
+        printf "%s\n" "$leaks" >&2
+        die "abort before twine upload"
+    fi
+    echo_ok "no forbidden files in sdist"
+
+    confirm "Upload dist/* to PyPI? This is irreversible — PyPI cannot overwrite a released version."
+    echo_step "twine upload"
+    "$MNEMON_VENV_BIN/twine" upload dist/*
+    echo_ok "uploaded to PyPI"
+
+    echo_step "Wait for PyPI to surface $TARGET_VERSION"
+    local tries=0
+    until "$MNEMON_VENV_BIN/pip" index versions mnemon-memory 2>/dev/null | head -5 | grep -q "$TARGET_VERSION"; do
+        tries=$((tries + 1))
+        [ "$tries" -gt 30 ] && die "PyPI didn't surface $TARGET_VERSION after 5 min"
+        sleep 10
+    done
+    echo_ok "PyPI surfaces $TARGET_VERSION"
+
+    echo_step "Post-publish smoke: fresh-venv install from PyPI"
+    local venvdir="/tmp/mnemon-postpub-$TARGET_VERSION"
+    rm -rf "$venvdir"
+    python3 -m venv "$venvdir"
+    "$venvdir/bin/pip" install --quiet --upgrade pip
+    "$venvdir/bin/pip" install --quiet "mnemon-memory==$TARGET_VERSION"
+    local installed
+    installed="$("$venvdir/bin/mnemon" --version | awk '{print $NF}')"
+    [[ "$installed" == "v$TARGET_VERSION" || "$installed" == "$TARGET_VERSION" ]] \
+      || die "fresh-venv shows '$installed', expected '$TARGET_VERSION'"
+    "$venvdir/bin/mnemon" doctor
+    rm -rf "$venvdir"
+    echo_ok "post-publish smoke passed"
+
+    echo_step "Tag v$TARGET_VERSION"
+    git tag "v$TARGET_VERSION"
+    git push origin "v$TARGET_VERSION"
+    echo_ok "v$TARGET_VERSION pushed"
+
+    echo_step "Create GitHub Release"
+    local release_notes
+    # Extract this version's CHANGELOG section: from the heading to the
+    # next heading exclusive (sed '$d' drops the next-heading line).
+    release_notes="$(awk "/^## \[$TARGET_VERSION\]/,/^## \[/" CHANGELOG.md | sed '$d')"
+    [ -n "$release_notes" ] || die "could not extract CHANGELOG section for $TARGET_VERSION"
+    gh release create "v$TARGET_VERSION" --title "v$TARGET_VERSION" --notes "$release_notes"
+    echo_ok "GitHub Release v$TARGET_VERSION created"
+
+    confirm "Redeploy mnemon-memory.fly.dev to $TARGET_VERSION? Touches production Fly."
+    echo_step "Fly redeploy (upgrade web runs doctor with settle window per rc12)"
+    "$MNEMON_VENV_BIN/mnemon" upgrade web --app-name mnemon-memory --mnemon-version "$TARGET_VERSION"
+    echo_ok "Fly redeploy complete"
+
+    echo_step "Live doctor (audit trail)"
+    "$MNEMON_VENV_BIN/mnemon" doctor
+    echo_ok "live doctor green"
+
+    echo_step "PUBLISH COMPLETE — $TARGET_VERSION live on PyPI + Fly"
+    echo ""
+    echo "  PyPI:    https://pypi.org/project/mnemon-memory/$TARGET_VERSION/"
+    echo "  Release: https://github.com/cipher813/mnemon/releases/tag/v$TARGET_VERSION"
+    echo "  Fly:     https://mnemon-memory.fly.dev/health"
+    echo ""
+    echo "  Don't forget to update private/SYSTEM_STATE.md (Recent Changes + Current State + Last verified)."
+}
+
+# ============================================================
+# verify — post-publish confirmation
+# ============================================================
+cmd_verify() {
+    echo_step "Verify $TARGET_VERSION live"
+
+    local pypi_line
+    pypi_line="$("$MNEMON_VENV_BIN/pip" index versions mnemon-memory 2>/dev/null | head -1 || true)"
+    echo "  PyPI: $pypi_line"
+    "$MNEMON_VENV_BIN/pip" index versions mnemon-memory 2>/dev/null | head -1 | grep -q "$TARGET_VERSION" \
+      || die "PyPI does not show $TARGET_VERSION as a known version"
+    echo_ok "PyPI shows $TARGET_VERSION"
+
+    echo_step "Live doctor"
+    "$MNEMON_VENV_BIN/mnemon" doctor
+    echo_ok "doctor green"
+
+    echo_step "GitHub Release"
+    gh release view "v$TARGET_VERSION" --json url,tagName,publishedAt
+    echo_ok "release present"
+}
+
+# ============================================================
+# dispatch
+# ============================================================
+case "${1:-}" in
+    preflight) cmd_preflight ;;
+    layer3)    cmd_layer3 ;;
+    publish)   cmd_publish ;;
+    verify)    cmd_verify ;;
+    *)
+        cat >&2 <<EOF
+usage: $0 <subcommand>
+
+Subcommands (run in this order around the promote PR merge):
+  preflight   — read-only: branch/version/CHANGELOG/tests/auth all check out
+  layer3      — E2E web test (test-scoped Fly app, ~15 min)
+  ── MERGE THE PROMOTE PR ON GITHUB HERE ──
+  publish     — post-merge: build → twine upload → tag → GH Release → Fly redeploy
+  verify      — post-publish sanity check
+
+Target version read from src/mnemon/__init__.py (currently: $TARGET_VERSION).
+
+Operator-only steps are sequenced but credentials remain operator-owned
+(twine reads ~/.pypirc, flyctl uses your login, gh uses your session).
+Each step fails loud on error; rerun-safe per phase.
+EOF
+        exit 2
+        ;;
+esac
