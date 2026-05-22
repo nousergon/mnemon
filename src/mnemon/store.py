@@ -29,6 +29,9 @@ from .config import (
     MEMORY_TYPE_MAP,
     DEFAULT_CONFIDENCE,
     PIN_BOOST,
+    STANDING_TIER_BLOCKED_SOURCE_CLIENTS,
+    STANDING_TIER_DEFAULT_CAP,
+    STANDING_TIER_HARD_CEILING,
     ContentType,
     MemoryType,
     vault_path,
@@ -44,6 +47,28 @@ class CaptureAttentionUnavailableError(RuntimeError):
     best-effort hook) is expected to catch + log + continue without
     the attention side effects. Fail-loud per the
     [[feedback_no_silent_fails]] discipline — never silently swallow.
+    """
+
+
+class StandingTierError(ValueError):
+    """Raised when ``promote_to_standing`` rejects a candidate.
+
+    Distinct subclasses surface the reason so MCP / CLI callers can
+    render a user-actionable message instead of an opaque False. Per
+    the salience-tier plan invariant: "promotion is operator-approved,
+    not auto" — operator gets a clear "why not" message.
+    """
+
+
+class StandingTierCapReached(StandingTierError):
+    """Already at the runtime cap (STANDING_TIER_DEFAULT_CAP)."""
+
+
+class StandingTierProvenanceRejected(StandingTierError):
+    """Source client is in STANDING_TIER_BLOCKED_SOURCE_CLIENTS.
+
+    Layer 4 composition: hook-sourced memories cannot be promoted —
+    operator-explicit gesture only.
     """
 
 
@@ -205,6 +230,39 @@ class Store:
         self.db.commit()
         self._migrate_source_key()
         self._migrate_recurrence_count()
+        self._migrate_tier()
+
+    def _migrate_tier(self) -> None:
+        """Additive migration: ``documents.tier`` distinguishes
+        unconditionally-injected standing memories from situational
+        recall. Salience tier Phase 1 (added 2026-05-22) —
+        private/mnemon-salience-tier-plan-260521.md.
+
+        Values: ``'situational'`` (default; current `memory_search`
+        path applies, ranked retrieval) or ``'standing'`` (injected
+        into every <mnemon-context> envelope regardless of query
+        similarity, capped). Pre-existing rows default to
+        ``'situational'`` — every existing memory keeps its current
+        behavior. Schema is additive + harmless if
+        ``STANDING_TIER_ENABLED`` stays off.
+        """
+        cols = {
+            r["name"]
+            for r in self.db.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "tier" not in cols:
+            self.db.execute(
+                "ALTER TABLE documents ADD COLUMN "
+                "tier TEXT NOT NULL DEFAULT 'situational'"
+            )
+            # Lookup index for the cap-count probe and the search
+            # exclusion. Filtered to live rows because invalidated
+            # standing-tier members don't count against the cap.
+            self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_tier "
+                "ON documents (tier) WHERE invalidated_at IS NULL"
+            )
+            self.db.commit()
 
     def _migrate_recurrence_count(self) -> None:
         """Additive migration: ``documents.recurrence_count`` counts
@@ -492,8 +550,18 @@ class Store:
             ).fetchall()
         return [_row_to_document(r) for r in rows]
 
-    def search_bm25(self, query: str, limit: int = 20) -> list[SearchResult]:
-        """BM25 full-text search via FTS5."""
+    def search_bm25(
+        self, query: str, limit: int = 20, *, include_standing: bool = False
+    ) -> list[SearchResult]:
+        """BM25 full-text search via FTS5.
+
+        ``include_standing`` — when False (default), tier='standing'
+        docs are excluded. They're injected unconditionally into the
+        <mnemon-context> envelope via ``list_standing()``; including
+        them in ranked retrieval would double-count and crowd out the
+        situational signal. The dashboard / explicit operator queries
+        can opt-in (e.g. an explicit "show all memories" surface).
+        """
         safe_query = " OR ".join(
             f'"{token}"*'
             for token in query.replace("'", "").replace('"', "").split()
@@ -502,9 +570,11 @@ class Store:
         if not safe_query:
             return []
 
+        tier_filter = "" if include_standing else " AND d.tier = 'situational'"
+
         try:
             rows = self.db.execute(
-                """SELECT
+                f"""SELECT
                       d.id AS doc_id,
                       d.title,
                       c.doc AS content,
@@ -518,7 +588,7 @@ class Store:
                    JOIN documents d ON d.id = fts.rowid
                    JOIN content c ON d.hash = c.hash
                    WHERE documents_fts MATCH ?
-                     AND d.invalidated_at IS NULL
+                     AND d.invalidated_at IS NULL{tier_filter}
                    ORDER BY rank
                    LIMIT ?""",
                 (safe_query, limit),
@@ -551,8 +621,14 @@ class Store:
         """Persist vector store to disk."""
         self.vec_store.save()
 
-    def search_vector(self, embedding: np.ndarray, limit: int = 20) -> list[SearchResult]:
-        """Vector similarity search via in-process brute-force cosine."""
+    def search_vector(
+        self, embedding: np.ndarray, limit: int = 20, *, include_standing: bool = False
+    ) -> list[SearchResult]:
+        """Vector similarity search via in-process brute-force cosine.
+
+        ``include_standing`` — see ``search_bm25`` for the rationale.
+        Standing-tier docs are excluded from ranked retrieval by default.
+        """
         if self.vec_store.size() == 0:
             return []
 
@@ -560,14 +636,16 @@ class Store:
         results: list[SearchResult] = []
         seen_ids: set[int] = set()
 
+        tier_filter = "" if include_standing else " AND d.tier = 'situational'"
+
         for vr in vec_results:
             content_hash = vr["id"].split("_")[0]
             row = self.db.execute(
-                """SELECT d.id AS doc_id, d.title, c.doc AS content, d.content_type,
+                f"""SELECT d.id AS doc_id, d.title, c.doc AS content, d.content_type,
                           d.memory_type, d.confidence, d.created_at, d.source_client
                    FROM documents d
                    JOIN content c ON d.hash = c.hash
-                   WHERE d.hash = ? AND d.invalidated_at IS NULL
+                   WHERE d.hash = ? AND d.invalidated_at IS NULL{tier_filter}
                    LIMIT 1""",
                 (content_hash,),
             ).fetchone()
@@ -827,6 +905,130 @@ class Store:
             (doc_id,),
         )
         self.db.commit()
+
+    # ── Salience tier Phase 1 — standing-context recall ──────────────
+    # private/mnemon-salience-tier-plan-260521.md
+    #
+    # Standing-tier memories are injected unconditionally into the
+    # <mnemon-context> envelope on every prompt. The cap is the
+    # contract: never exceed STANDING_TIER_HARD_CEILING. Per the
+    # 2026-05-22 reframing, Phase 1 ships gated; the validation is
+    # operator-flips-flag + observes ≥1 week soak for runway-style
+    # under-weighting recurrence vs absence.
+
+    def promote_to_standing(self, doc_id: int) -> bool:
+        """Promote a memory to the capped standing tier.
+
+        Raises:
+            StandingTierCapReached: at the runtime cap
+                (``STANDING_TIER_DEFAULT_CAP`` live standing docs)
+            StandingTierProvenanceRejected: source_client is in
+                ``STANDING_TIER_BLOCKED_SOURCE_CLIENTS`` (Layer 4
+                composition — hook-sourced cannot promote)
+            StandingTierError: doc not found or invalidated
+
+        Returns True on success. Idempotent — re-promoting an
+        already-standing doc returns True without counting against
+        the cap. The hard ceiling
+        (``STANDING_TIER_HARD_CEILING``) is an invariant the runtime
+        cap never exceeds even if an operator overrides
+        ``STANDING_TIER_DEFAULT_CAP`` upward.
+        """
+        row = self.db.execute(
+            "SELECT tier, source_client, invalidated_at FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            raise StandingTierError(f"memory #{doc_id} not found")
+        if row["invalidated_at"] is not None:
+            raise StandingTierError(
+                f"memory #{doc_id} is invalidated — cannot promote"
+            )
+        if row["source_client"] in STANDING_TIER_BLOCKED_SOURCE_CLIENTS:
+            raise StandingTierProvenanceRejected(
+                f"memory #{doc_id} is hook-sourced ({row['source_client']}); "
+                "only user-authored memories can be promoted "
+                "(Layer 4 composition — auto-mirror / session_extractor "
+                "captures cannot be elevated to unconditional injection)"
+            )
+        if row["tier"] == "standing":
+            return True  # idempotent re-promote
+
+        # Cap enforcement scoped to live rows.
+        current = self.db.execute(
+            "SELECT COUNT(*) AS c FROM documents "
+            "WHERE tier = 'standing' AND invalidated_at IS NULL"
+        ).fetchone()["c"]
+        cap = min(STANDING_TIER_DEFAULT_CAP, STANDING_TIER_HARD_CEILING)
+        if current >= cap:
+            raise StandingTierCapReached(
+                f"standing tier at cap ({current}/{cap}); demote an existing "
+                "member via memory_demote first. The cap is the contract — "
+                "past ~20 it stops being salient and becomes noise again."
+            )
+
+        self.db.execute(
+            "UPDATE documents SET tier = 'standing', updated_at = datetime('now') "
+            "WHERE id = ?",
+            (doc_id,),
+        )
+        self.db.commit()
+        return True
+
+    def demote_to_situational(self, doc_id: int) -> bool:
+        """Demote a standing-tier memory back to situational.
+
+        Idempotent — demoting an already-situational doc returns False
+        (nothing to do). Returns True when an actual demote happened.
+        Raises StandingTierError on a missing or invalidated doc.
+        """
+        row = self.db.execute(
+            "SELECT tier, invalidated_at FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            raise StandingTierError(f"memory #{doc_id} not found")
+        if row["invalidated_at"] is not None:
+            raise StandingTierError(
+                f"memory #{doc_id} is invalidated — nothing to demote"
+            )
+        if row["tier"] != "standing":
+            return False
+        self.db.execute(
+            "UPDATE documents SET tier = 'situational', updated_at = datetime('now') "
+            "WHERE id = ?",
+            (doc_id,),
+        )
+        self.db.commit()
+        return True
+
+    def list_standing(self) -> list[Document]:
+        """Return all live standing-tier memories, ordered most-recent first.
+
+        Consumed by ``build_context`` (hook injection path) and
+        ``mnemon standing list`` (operator CLI). Includes content body
+        so callers can render snippets without a second fetch.
+        """
+        rows = self.db.execute(
+            """SELECT d.*, c.doc
+               FROM documents d
+               JOIN content c ON d.hash = c.hash
+               WHERE d.tier = 'standing' AND d.invalidated_at IS NULL
+               ORDER BY d.created_at DESC"""
+        ).fetchall()
+        return [_row_to_document(r) for r in rows]
+
+    def standing_tier_status(self) -> dict[str, Any]:
+        """Stats for ``mnemon status`` + dashboards: current count vs cap."""
+        current = self.db.execute(
+            "SELECT COUNT(*) AS c FROM documents "
+            "WHERE tier = 'standing' AND invalidated_at IS NULL"
+        ).fetchone()["c"]
+        return {
+            "count": current,
+            "cap": STANDING_TIER_DEFAULT_CAP,
+            "hard_ceiling": STANDING_TIER_HARD_CEILING,
+        }
 
     def status(self) -> dict[str, Any]:
         """Vault health stats."""

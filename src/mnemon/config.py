@@ -112,6 +112,25 @@ CAPTURE_ATTENTION_BOOST = 0.05                  # per-trigger confidence bump on
 CAPTURE_ATTENTION_REQUIRE_DISTINCT_SESSIONS = True  # neighbors must span ≥MIN_HITS distinct days
 CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX = 0.25    # acceptance criterion: boosts/saves ratio ceiling over 7d
 
+# Salience tier — standing-context recall, Phase 1 (added 2026-05-22) —
+# private/mnemon-salience-tier-plan-260521.md
+#
+# Standing-tier memories are injected unconditionally into the Layer 1
+# <mnemon-context> envelope on every prompt, regardless of query
+# similarity, conditioning reasoning rather than answering it. The cap
+# is the contract: past ~20, salience degrades and the tier becomes
+# noise again, recreating the failure mode at a different scale.
+# Default-off through soak per the 2026-05-22 reframing — Phase 1 ships
+# the substrate gated; promote ≤5 career-context memories via the new
+# memory_promote MCP tool; flip the flag; observe ≥1 week soak for
+# runway-style under-weighting recurrence vs absence.
+STANDING_TIER_ENABLED = False                   # feature flag — flip after soak
+STANDING_TIER_DEFAULT_CAP = 15                  # operator-tunable runtime cap
+STANDING_TIER_HARD_CEILING = 20                 # invariant — never exceed
+# Reuse Layer 4 hook-sourced set: hook-sourced memories cannot be promoted —
+# operator-explicit gesture only. Composes with provenance demotion.
+STANDING_TIER_BLOCKED_SOURCE_CLIENTS = HOOK_SOURCE_CLIENTS
+
 # Hook timeouts and budgets (seconds / chars)
 #
 # HOOK_REMOTE_TIMEOUT_SEC — matches Claude Code's ~/.claude/settings.json

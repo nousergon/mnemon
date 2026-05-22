@@ -101,7 +101,9 @@ class TestMcpServer:
     def test_mcp_has_tools(self):
         from mnemon.server import mcp
         tools = mcp._tool_manager._tools
-        assert len(tools) == 14
+        # 14 originals + 3 salience-tier Phase 1 (memory_promote /
+        # memory_demote / memory_list_standing, added 2026-05-22)
+        assert len(tools) == 17
 
     def test_mcp_tool_names(self):
         from mnemon.server import mcp
@@ -114,5 +116,8 @@ class TestMcpServer:
             "memory_export_vectors",
             "memory_rebuild", "memory_check_contradictions",
             "profile_get", "profile_update",
+            # Salience tier Phase 1 (added 2026-05-22) —
+            # private/mnemon-salience-tier-plan-260521.md
+            "memory_promote", "memory_demote", "memory_list_standing",
         }
         assert tool_names == expected
