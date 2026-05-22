@@ -337,7 +337,7 @@ def main() -> int:
 
     all_docs = [dict(r) for r in conn.execute(
         """
-        SELECT d.id, d.title, d.content_type, d.confidence, d.hash, c.doc AS content
+        SELECT d.id, d.title, d.content_type, d.confidence, d.hash, d.source_key, c.doc AS content
         FROM documents d
         JOIN content c ON d.hash = c.hash
         WHERE d.invalidated_at IS NULL
@@ -357,10 +357,44 @@ def main() -> int:
         docs = all_docs
     n_filtered = n_before - len(docs)
 
+    # Dedup near-duplicate iterations of the same memory. Caught
+    # 2026-05-21 when "System-wide deploy changelog" appeared 3x in
+    # auto-selected top-10 — same title, content edited iteratively
+    # across sessions, three different content_hashes.
+    #
+    # Dedup key priority:
+    #   1. source_key (post-rc16 canonical identity from mnemon.store.save)
+    #   2. title (lowercased, stripped)
+    #   3. id (untouchable — no-title memories or unique titles)
+    #
+    # Keep the most recent (highest id) per dedup key — it has the
+    # most current title / confidence / content metadata.
+    by_key: dict[str, dict] = {}
+    for d in docs:
+        sk = (d["source_key"] or "").strip() if "source_key" in d.keys() else ""
+        title = (d["title"] or "").strip().lower()
+        if sk:
+            key = f"sk:{sk}"
+        elif title:
+            key = f"title:{title}"
+        else:
+            # No source_key, no title — never dedup with another memory.
+            key = f"id:{d['id']}"
+        existing = by_key.get(key)
+        if existing is None or d["id"] > existing["id"]:
+            by_key[key] = d
+    n_deduped = len(docs) - len(by_key)
+    docs = list(by_key.values())
+
     print(f"# Standing-tier scoring (embedding-based, SOTA non-LLM)", file=sys.stderr)
     print(f"# Vault:    {db_path}", file=sys.stderr)
     print(f"# Vecstore: {vecstore_path}", file=sys.stderr)
-    print(f"# Live memories: {len(docs)} (filtered {n_filtered} below {min_len}-char threshold)", file=sys.stderr)
+    print(
+        f"# Live memories: {len(docs)} "
+        f"(filtered {n_filtered} below {min_len}-char, "
+        f"deduped {n_deduped} content-hash duplicates)",
+        file=sys.stderr,
+    )
 
     # Embedding-based signals
     print(f"# Embedding exemplars + memories ...", file=sys.stderr)
