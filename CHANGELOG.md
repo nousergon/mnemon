@@ -69,7 +69,23 @@
   label mapping, error surfacing, availability probe.
   `tests/test_contradiction.py` refactored to mock the NLI layer
   instead of `mnemon.llm.generate`; adds dry-run mutation-skip
-  test + nli-unavailable clean-flag test. Suite 836 → 847 passing.
+  test + nli-unavailable clean-flag test.
+
+- **`tests/test_tools_integration.py` (3 new) — every-MCP-tool
+  round-trip canary.** Closes the unit-test-coverage gap that let
+  `memory_check_contradictions` ship to Fly with a hidden bug
+  (mocked unit tests passed; the real call path raised an opaque
+  envelope client-side). Iterates the entire registered tool
+  manager, invokes each tool with minimal-valid inputs against a
+  seeded vault, asserts no unhandled exception + sane return shape
+  + no opaque-error strings in outputs. Per-tool fixture entries
+  enforce that future tools can't ship without being exercised
+  here (registered-tools-vs-fixture-keys diff check). Stubs the
+  heavy external calls (NLI classify, FastEmbed re-embed) so the
+  full suite stays ~17s. Composes with the existing
+  `test_server.py` per-tool unit tests (mocked deps, isolated
+  contracts) — that suite covers logic; this suite covers
+  no-exception-escapes-the-boundary. Suite 836 → 850 passing.
 
 ## [0.7.0rc1] - 2026-05-22
 
