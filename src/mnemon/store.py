@@ -18,6 +18,11 @@ from typing import Any
 import numpy as np
 
 from .config import (
+    CAPTURE_ATTENTION_BOOST,
+    CAPTURE_ATTENTION_ENABLED,
+    CAPTURE_ATTENTION_MIN_HITS,
+    CAPTURE_ATTENTION_REQUIRE_DISTINCT_SESSIONS,
+    CAPTURE_ATTENTION_THRESHOLD,
     HALF_LIVES,
     HOOK_SOURCE_CLIENTS,
     HOOK_SOURCE_CONFIDENCE_CEILING,
@@ -29,6 +34,17 @@ from .config import (
     vault_path,
 )
 from .vecstore import VecStore
+
+
+class CaptureAttentionUnavailableError(RuntimeError):
+    """Raised when the capture-attention path can't complete its check.
+
+    Surface conditions: embedder unavailable, vecstore IO failure,
+    schema-version mismatch on `recurrence_count`. Caller (typically a
+    best-effort hook) is expected to catch + log + continue without
+    the attention side effects. Fail-loud per the
+    [[feedback_no_silent_fails]] discipline — never silently swallow.
+    """
 
 
 @dataclass
@@ -188,6 +204,29 @@ class Store:
         """)
         self.db.commit()
         self._migrate_source_key()
+        self._migrate_recurrence_count()
+
+    def _migrate_recurrence_count(self) -> None:
+        """Additive migration: ``documents.recurrence_count`` counts
+        cross-session restatements detected by capture attention Phase A.
+
+        Incremented once per ``_apply_capture_attention`` trigger on the
+        canonical neighbor of a detected cluster. Pre-existing rows get
+        a count of 0 and recurrence detection starts forward from the
+        next save. The column is additive + harmless if
+        ``CAPTURE_ATTENTION_ENABLED`` stays off — backout = flip the
+        flag; column stays.
+        """
+        cols = {
+            r["name"]
+            for r in self.db.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "recurrence_count" not in cols:
+            self.db.execute(
+                "ALTER TABLE documents ADD COLUMN "
+                "recurrence_count INTEGER NOT NULL DEFAULT 0"
+            )
+            self.db.commit()
 
     def _migrate_source_key(self) -> None:
         """Additive migration: ``documents.source_key`` is a stable
@@ -225,6 +264,7 @@ class Store:
         source_client: str | None = None,
         confidence: float | None = None,
         source_key: str | None = None,
+        correction_of: int | None = None,
     ) -> int:
         """Save a memory. Returns the document ID.
 
@@ -237,6 +277,13 @@ class Store:
         live row(s) and inserts a fresh one (supersession recorded via
         ``invalidated_by``). Without ``source_key`` the historical
         insert-only behaviour is preserved exactly.
+
+        ``correction_of`` — when set — is an explicit operator gesture
+        that THIS memory corrects/supersedes a prior one (the Phase 2
+        promotion signal from the salience-tier plan). Reserved here
+        for forward compatibility; today its only effect is to SKIP
+        the capture-attention path (operator gesture beats automated
+        recurrence detection).
         """
         content_hash = _sha256(content)
         ct = ContentType(content_type)
@@ -343,6 +390,31 @@ class Store:
             (doc_id, title, content),
         )
         self.db.commit()
+
+        # Capture attention Phase A — preserve+relate+boost. Gated on
+        # the feature flag (default off through soak). Skipped when
+        # ``correction_of`` is set (operator gesture beats automated
+        # recurrence detection per the salience-tier plan composition).
+        #
+        # Failure is a NAMED swallow per
+        # [[feedback_no_silent_fails]] acceptable-category (b) —
+        # secondary observability hung off a primary path (the save
+        # itself) that survives independently. Mirrors the existing
+        # embed_document() WARN pattern in server.py:memory_save.
+        if CAPTURE_ATTENTION_ENABLED and correction_of is None:
+            try:
+                self.apply_capture_attention(
+                    new_doc_id=doc_id, content=content,
+                    source_client=source_client,
+                )
+            except CaptureAttentionUnavailableError as exc:
+                import logging
+                logging.getLogger("mnemon.store").warning(
+                    "save: capture-attention skipped for doc_id=%d (%s); "
+                    "memory is saved but recurrence-boost was not applied",
+                    doc_id, exc,
+                )
+
         return doc_id
 
     def get(self, doc_id: int) -> Document | None:
@@ -553,6 +625,206 @@ class Store:
         self.db.execute(
             "INSERT OR REPLACE INTO relations (source_id, target_id, relation_type, weight) VALUES (?, ?, ?, ?)",
             (source_id, target_id, relation_type, weight),
+        )
+        self.db.commit()
+
+    # ── Capture attention Phase A ────────────────────────────────────
+    # private/mnemon-capture-attention-plan-260522.md
+    #
+    # When a new memory's content is semantically close to ≥
+    # CAPTURE_ATTENTION_MIN_HITS prior memories across distinct
+    # sessions, boost the canonical neighbor's confidence + insert
+    # 'restates' relations + increment its recurrence_count. The new
+    # memory itself is preserved unchanged (no information loss — SOTA
+    # preserve+relate+boost pattern). Operator-reviewed merge is
+    # Phase C; this layer only does the non-destructive auto-apply.
+
+    def apply_capture_attention(
+        self, new_doc_id: int, content: str, source_client: str | None = None
+    ) -> dict[str, Any]:
+        """Run the capture-attention check on a freshly-saved document.
+
+        Returns a dict describing the side effects:
+          ``{"fired": bool, "canonical_id": int | None,
+             "neighbors": [int, ...], "boost_applied": float}``
+
+        The new doc must already be in the documents table; it does
+        NOT need to be in the vec store yet (this method embeds the
+        content for its own neighbor query, and excludes the new doc
+        by id from the results).
+
+        Raises CaptureAttentionUnavailableError if the embedder or
+        vecstore is unreachable. Callers in best-effort paths
+        (session_extractor, auto_mirror) must catch + log + continue.
+        """
+        # Lazy import — keep store.py module-load cheap; FastEmbed's
+        # ONNX model only materializes on first embed() call anyway.
+        try:
+            from .embedder import embed
+        except ImportError as e:
+            raise CaptureAttentionUnavailableError(
+                f"capture attention skipped — embedder import: {e}"
+            ) from e
+
+        try:
+            query_vec = embed(content)
+            vec_results = self.vec_store.search(query_vec, k=20)
+        except Exception as e:
+            raise CaptureAttentionUnavailableError(
+                f"capture attention skipped — embed/vecstore: {e}"
+            ) from e
+
+        hits = self._resolve_neighbor_docs(
+            vec_results,
+            threshold=CAPTURE_ATTENTION_THRESHOLD,
+            exclude_doc_id=new_doc_id,
+        )
+
+        # Distinct-session gate defends against vault-crowding from a
+        # single long session that repeats itself.
+        if CAPTURE_ATTENTION_REQUIRE_DISTINCT_SESSIONS:
+            distinct_days = {h["created_at"][:10] for h in hits}
+            if len(distinct_days) < CAPTURE_ATTENTION_MIN_HITS:
+                return {
+                    "fired": False, "canonical_id": None,
+                    "neighbors": [], "boost_applied": 0.0,
+                    "reason": "insufficient_distinct_sessions",
+                }
+
+        if len(hits) < CAPTURE_ATTENTION_MIN_HITS:
+            return {
+                "fired": False, "canonical_id": None,
+                "neighbors": [], "boost_applied": 0.0,
+                "reason": "insufficient_neighbors",
+            }
+
+        canonical = self._pick_canonical(hits)
+
+        # Side effects (auto-apply, non-destructive)
+        for hit in hits:
+            self.add_relation(
+                source_id=new_doc_id,
+                target_id=hit["id"],
+                relation_type="restates",
+                weight=float(hit["similarity"]),
+            )
+        boost_applied = self._boost_confidence(canonical["id"])
+        self._increment_recurrence(canonical["id"])
+
+        return {
+            "fired": True,
+            "canonical_id": canonical["id"],
+            "neighbors": [h["id"] for h in hits],
+            "boost_applied": boost_applied,
+        }
+
+    def _resolve_neighbor_docs(
+        self,
+        vec_results: list[dict],
+        *,
+        threshold: float,
+        exclude_doc_id: int,
+    ) -> list[dict[str, Any]]:
+        """Map vec_store search hits → live document rows above threshold.
+
+        vec_results entries are ``{"id": "{hash}_{seq}", "similarity": float}``.
+        Multiple fragments from the same doc collapse to one row (keep the
+        highest-similarity hit). Excludes the just-saved doc by id +
+        anything invalidated.
+        """
+        # Group by content_hash, keep max similarity per hash
+        best_by_hash: dict[str, float] = {}
+        for vr in vec_results:
+            if vr["similarity"] < threshold:
+                continue
+            content_hash = vr["id"].split("_")[0]
+            prev = best_by_hash.get(content_hash, 0.0)
+            if vr["similarity"] > prev:
+                best_by_hash[content_hash] = vr["similarity"]
+
+        if not best_by_hash:
+            return []
+
+        # Resolve to live documents, exclude the just-saved one
+        hashes = list(best_by_hash.keys())
+        qmarks = ",".join("?" * len(hashes))
+        rows = self.db.execute(
+            f"""SELECT id, hash, confidence, pinned, created_at, source_client
+                FROM documents
+                WHERE hash IN ({qmarks})
+                  AND invalidated_at IS NULL
+                  AND id != ?""",
+            (*hashes, exclude_doc_id),
+        ).fetchall()
+
+        return [
+            {
+                "id": r["id"],
+                "hash": r["hash"],
+                "confidence": r["confidence"],
+                "pinned": r["pinned"],
+                "created_at": r["created_at"],
+                "source_client": r["source_client"],
+                "similarity": best_by_hash[r["hash"]],
+            }
+            for r in rows
+        ]
+
+    @staticmethod
+    def _pick_canonical(hits: list[dict[str, Any]]) -> dict[str, Any]:
+        """Select the canonical memory from a near-neighbor cluster.
+
+        Order of preference: pinned (operator gesture) > highest
+        confidence > most recent created_at > lowest id (deterministic
+        tiebreak). Matches the contradiction.py canonical-selection
+        spirit + adds explicit pinned-first per the salience-tier
+        invariant that operator gestures beat automated signals.
+        """
+        return max(
+            hits,
+            key=lambda h: (
+                int(h["pinned"]),
+                float(h["confidence"]),
+                h["created_at"],
+                -int(h["id"]),  # negate so lowest id wins on tie
+            ),
+        )
+
+    def _boost_confidence(self, doc_id: int) -> float:
+        """Increment a canonical's confidence by CAPTURE_ATTENTION_BOOST,
+        capped at HOOK_SOURCE_CONFIDENCE_CEILING for hook-sourced docs
+        (existing Layer 4 invariant), or 1.0 for user-authored. Returns
+        the actual delta applied (zero if already at ceiling).
+        """
+        row = self.db.execute(
+            "SELECT confidence, source_client FROM documents WHERE id = ?",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            return 0.0
+        ceiling = (
+            HOOK_SOURCE_CONFIDENCE_CEILING
+            if row["source_client"] in HOOK_SOURCE_CLIENTS
+            else 1.0
+        )
+        new_conf = min(row["confidence"] + CAPTURE_ATTENTION_BOOST, ceiling)
+        delta = new_conf - row["confidence"]
+        if delta <= 0:
+            return 0.0
+        self.db.execute(
+            "UPDATE documents SET confidence = ?, updated_at = datetime('now') "
+            "WHERE id = ?",
+            (new_conf, doc_id),
+        )
+        self.db.commit()
+        return delta
+
+    def _increment_recurrence(self, doc_id: int) -> None:
+        """Bump the canonical's recurrence_count by 1."""
+        self.db.execute(
+            "UPDATE documents SET recurrence_count = recurrence_count + 1, "
+            "updated_at = datetime('now') WHERE id = ?",
+            (doc_id,),
         )
         self.db.commit()
 

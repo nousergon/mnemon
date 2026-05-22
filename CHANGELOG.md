@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.7.0] - Unreleased
+
+### Features
+
+- **Capture attention Phase A — recurrence-weighted memory convergence
+  (default-off, soak-gated).** When a new save's content is semantically
+  close to ≥2 prior memories spanning distinct sessions, capture
+  attention preserves the new memory + inserts `'restates'` relations
+  to each cluster member + boosts the canonical neighbor's confidence
+  + increments the canonical's new `recurrence_count` column. The
+  cluster of restatements stays discoverable; the load-bearing signal
+  accretes on the canonical; MMR diversity at recall naturally
+  suppresses near-duplicates without us dropping them at capture.
+  Plan: `private/mnemon-capture-attention-plan-260522.md`. Driver: the
+  2026-05-22 finding that load-bearing facts stated across many
+  sessions land as fragmented memories rather than a single canonical
+  assertion (the operator was implicitly substituting for a missing
+  mechanism).
+  - **SOTA invariant: preserve+relate+boost, never skip-the-save.**
+    Earlier draft considered "boost canonical + skip the new save"
+    as the auto-apply path — rejected because each restatement
+    carries different framing and discarding it throws away the very
+    signal the recurrence detector is honoring. The institutional
+    pattern is preserve the data, link via relations, accrete the
+    importance signal — operator-reviewed merge is Phase C of the
+    plan, not Phase A's job.
+  - **Embedding-only (no LLM dependency).** Same SOTA-for-public-
+    release-constraint logic that drove `build_standing_set.py`'s
+    embedding-based scorer (the roadmapped LLM-judge opt-in P2 item
+    composes as an advanced mode but isn't required).
+  - **Feature flag `CAPTURE_ATTENTION_ENABLED` default-off** through
+    soak. Two acceptance criteria to flip default-on (per plan
+    §"Soak acceptance criteria"): (1) `boost_rate ≤ 0.25` over a 7-day
+    window measured via `mnemon attention-status`; (2) ≥80% precision
+    on a 20-canonical manual review.
+  - **`correction_of` parameter on `Store.save()`** (forward-compat
+    for salience-tier Phase 2 promotion signals). When set, capture
+    attention is skipped — operator explicit gesture beats automated
+    recurrence detection.
+  - **`mnemon attention-status` CLI** — soak monitor: boost-rate
+    ratio over 7 days, recurrence-count distribution, top-10
+    canonicals, last-10 `'restates'` relations audit trail.
+  - **`scripts/calibrate_capture_threshold.py`** — data-tuned
+    threshold selection. Samples N pairs from the operator's vault
+    snapshot, prompts for same/different tagging, computes
+    precision-recall at {0.70, 0.75, 0.80, 0.85, 0.90}, recommends
+    the precision-leaning sweet spot. Persists tagged pairs to
+    `tests/fixtures/capture_attention_pairs.json` for regression
+    locking.
+  - **Failure mode: named exception + WARN swallow.** Embedder /
+    vecstore unavailability raises `CaptureAttentionUnavailableError`
+    from `apply_capture_attention()`; `Store.save()` catches +
+    `logger.warning`s + continues (the new memory is saved; only the
+    recurrence-boost side effect is skipped). Acceptable swallow per
+    `feedback_no_silent_fails` category (b) — secondary observability
+    hung off a primary save path that records the failure.
+  - **Composes with the existing layered defenses unchanged.**
+    Capture attention runs AFTER Layer 0 (`is_well_shaped` rejects
+    scaffolding before the path is reached) + AFTER Layer 4 ceiling
+    (`HOOK_SOURCE_CONFIDENCE_CEILING` clamp survives the boost).
+    `'restates'` is a new relation type — doesn't collide with the
+    existing `'supersedes'` / `'contradicts'` / `'related'`.
+  - 13 new tests in `tests/test_capture_attention.py` covering: the
+    preserve-everything invariant, feature-flag-off no-behavior-
+    change, distinct-sessions trigger, same-session no-trigger,
+    threshold respected, hook ceiling, user uncapped, pinned-canonical
+    selection, `correction_of` override, fail-loud on embedder
+    unavailability, schema migration idempotency. Suite 801 → 814
+    passing.
+
+### Schema
+
+- **`documents.recurrence_count INTEGER NOT NULL DEFAULT 0`** —
+  additive migration in `_migrate_recurrence_count()`. Pre-existing
+  rows get count=0 and recurrence detection starts forward from the
+  next save. Harmless if `CAPTURE_ATTENTION_ENABLED` stays off.
+
 ## [0.6.0] - 2026-05-21
 
 ### Release

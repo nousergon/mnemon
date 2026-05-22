@@ -95,6 +95,23 @@ QUERY_EXPANSION_MAX_TOKENS = 200       # LLM token cap for alt-query generation
 CONTRADICTION_OVERLAP_THRESHOLD = 0.7  # minimum vector similarity to treat candidate as potentially conflicting
 CONTRADICTION_CONTEXT_MAX_CHARS = 500  # per-memory content truncation in the LLM classification prompt
 
+# Capture attention Phase A (added 2026-05-22) —
+# private/mnemon-capture-attention-plan-260522.md
+#
+# When a new memory's content is semantically close to ≥MIN_HITS prior
+# memories across distinct sessions, the canonical neighbor's
+# confidence is boosted and a 'restates' relation is recorded — the
+# new memory itself is still saved (no information loss, per the SOTA
+# preserve+relate+boost pattern). Default-off through soak; flip to
+# default-on once boost-rate ≤ SOAK_BOOST_RATE_MAX AND a 20-canonical
+# manual review shows ≥80% precision.
+CAPTURE_ATTENTION_ENABLED = False               # feature flag — flip default after soak
+CAPTURE_ATTENTION_THRESHOLD = 0.85              # cosine similarity floor; data-tune via scripts/calibrate_capture_threshold.py
+CAPTURE_ATTENTION_MIN_HITS = 2                  # neighbors required to trigger
+CAPTURE_ATTENTION_BOOST = 0.05                  # per-trigger confidence bump on canonical
+CAPTURE_ATTENTION_REQUIRE_DISTINCT_SESSIONS = True  # neighbors must span ≥MIN_HITS distinct days
+CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX = 0.25    # acceptance criterion: boosts/saves ratio ceiling over 7d
+
 # Hook timeouts and budgets (seconds / chars)
 #
 # HOOK_REMOTE_TIMEOUT_SEC — matches Claude Code's ~/.claude/settings.json
