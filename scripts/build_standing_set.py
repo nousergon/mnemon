@@ -107,6 +107,27 @@ CONSTRAINT_EXEMPLARS = [
     "runway is not a constraint, optimize for preference not necessity",
     "X is not Y — assert the constraint explicitly",
     "this fact conditions reasoning regardless of query similarity",
+    # ── Declarative-posture exemplars (added 2026-05-22 per ROADMAP P1) ──
+    # Imperative-shape exemplars above ("never," "always," "must,"
+    # "default to") under-weight career / lifestyle / posture constraints
+    # that the user encodes declaratively. The 2026-05-22 finding: the
+    # auto-selected top-10 against the real vault was 100% engineering
+    # rules; career-context memories spanning multi-year load-bearing
+    # posture (runway, recruiter posture, start-date framing, search
+    # mode) did not surface despite being equally durable. These
+    # exemplars represent the declarative shape of the same constraint
+    # class — facts stated as if they govern future advice across many
+    # domains, but phrased as posture not as imperative.
+    "Brian's stance is correct as-is, posture is by design",
+    "current preference is to wait, not to push",
+    "his stated preference: keep replies minimal, not desperate",
+    "passive / selective mode is correct given runway and pipeline",
+    "their silence is information; outreach signals desperation",
+    "this decouples cash pressure from outreach push timing",
+    "lump sum severance through August is in hand, not biweekly",
+    "deliberately niche, not chasing scale or virality",
+    "the constraint binding decisions is preference, not necessity",
+    "soft target for start date preserves negotiating leverage",
 ]
 
 TIME_BOUNDED_EXEMPLARS = [
