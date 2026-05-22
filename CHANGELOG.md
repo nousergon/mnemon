@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.7.0] - Unreleased
+
+### CI / release tooling
+
+- **New `.github/workflows/ci-server-extras.yml` workflow.** Installs
+  `mnemon-memory[server]` ONLY (the production-equivalent install
+  used by the Fly Docker image) plus pytest as a separate test
+  runner, and runs the full suite under that minimal install. Catches
+  the failure class that bit `memory_check_contradictions` on
+  2026-05-22 — production code that imports something from `[llm]` /
+  `[ui]` would pass `ci.yml` (full `[dev]` extras installed) but
+  fail this workflow. Includes a guard assertion that
+  `llama-cpp-python` is NOT installed under `[server]` — so a future
+  PR can't accidentally move it across without flipping the
+  intentional "mnemon is LLM-free by default" posture.
+
+- **`scripts/promote_stable.sh layer3 --exercise-all-tools`.** New
+  opt-in flag that, after the test Fly app is up but before the
+  downgrade step, iterates every registered MCP tool against the
+  remote and asserts each returns cleanly (no opaque error envelope,
+  no unhandled exception, no NLI/embedder/baked-model breakage).
+  Composes with `tests/test_tools_integration.py` (PR #158, local-
+  process Python-level canary): this Fly-level probe catches the
+  failure modes the local canary can't see (missing baked models,
+  Anthropic MCP proxy timeouts, transport regressions). Tool list
+  resolved dynamically from `mcp._tool_manager._tools` so tools
+  added in future PRs are exercised automatically. Adds ~30-60s to
+  the layer3 run; opt-in so non-NLI-touching releases aren't taxed.
+
+- **`scripts/_layer3_remote_helper.py`** gains an `exercise-all-tools`
+  subcommand wired through the FastMCP tool manager. Two regression-
+  lock tests added to `tests/test_promote_stable.sh` harness (15
+  passing, was 13) covering helper dispatch + flag plumbing through
+  the bash dispatcher.
+
 ## [0.7.0rc2] - 2026-05-22
 
 ### Features
