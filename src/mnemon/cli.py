@@ -298,10 +298,94 @@ def main() -> None:
             print(f"downgrade failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    elif command == "attention-status":
+        # Capture attention Phase A observability — soak monitor.
+        # private/mnemon-capture-attention-plan-260522.md
+        from .store import Store
+        store = Store()
+        try:
+            _print_attention_status(store)
+        finally:
+            store.close()
+
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         _print_usage()
         sys.exit(1)
+
+
+def _print_attention_status(store) -> None:
+    """Print capture-attention soak metrics for the operator.
+
+    Surfaces the two acceptance criteria from the plan-doc:
+      1. boost_rate = (boosts in last 7d) / (saves in last 7d) ≤ 0.25
+      2. precision floor (operator-judged via --review, not auto-checked)
+    """
+    from .config import (
+        CAPTURE_ATTENTION_ENABLED,
+        CAPTURE_ATTENTION_THRESHOLD,
+        CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX,
+    )
+
+    # Boost rate over 7d (boosts = restates relations created)
+    boosts_7d = store.db.execute(
+        "SELECT COUNT(*) AS c FROM relations "
+        "WHERE relation_type = 'restates' "
+        "AND created_at >= datetime('now', '-7 days')"
+    ).fetchone()["c"]
+    saves_7d = store.db.execute(
+        "SELECT COUNT(*) AS c FROM documents "
+        "WHERE created_at >= datetime('now', '-7 days')"
+    ).fetchone()["c"]
+    rate = (boosts_7d / saves_7d) if saves_7d else 0.0
+    rate_ok = "✓" if rate <= CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX else "⚠"
+
+    print(f"Capture attention — soak status")
+    print(f"  Flag enabled       : {CAPTURE_ATTENTION_ENABLED}")
+    print(f"  Threshold (cosine) : {CAPTURE_ATTENTION_THRESHOLD}")
+    print(f"  Boost-rate 7d      : {boosts_7d} / {saves_7d} = "
+          f"{rate:.3f}  {rate_ok} (ceiling {CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX})")
+
+    # Recurrence count distribution
+    hist = store.db.execute(
+        "SELECT recurrence_count, COUNT(*) AS n "
+        "FROM documents WHERE invalidated_at IS NULL "
+        "GROUP BY recurrence_count "
+        "ORDER BY recurrence_count"
+    ).fetchall()
+    print("\n  Recurrence count distribution (live docs):")
+    for r in hist:
+        print(f"    count={r['recurrence_count']:>3}: {r['n']} docs")
+
+    # Top-10 canonicals
+    top = store.db.execute(
+        "SELECT id, title, recurrence_count, confidence "
+        "FROM documents "
+        "WHERE invalidated_at IS NULL AND recurrence_count > 0 "
+        "ORDER BY recurrence_count DESC, confidence DESC "
+        "LIMIT 10"
+    ).fetchall()
+    if top:
+        print("\n  Top canonicals by recurrence_count:")
+        for r in top:
+            title = r["title"][:60]
+            print(f"    #{r['id']:>5}  ×{r['recurrence_count']:<3}  "
+                  f"conf={r['confidence']:.2f}  {title}")
+    else:
+        print("\n  No canonicals with recurrence_count > 0 yet.")
+
+    # Recent 'restates' relations (audit trail)
+    recent = store.db.execute(
+        "SELECT source_id, target_id, weight, created_at "
+        "FROM relations WHERE relation_type = 'restates' "
+        "ORDER BY created_at DESC LIMIT 10"
+    ).fetchall()
+    if recent:
+        print("\n  Last 10 'restates' relations:")
+        for r in recent:
+            print(f"    {r['created_at']}  "
+                  f"#{r['source_id']:>5} → #{r['target_id']:>5}  "
+                  f"w={r['weight']:.3f}")
 
 
 def _parse_upgrade_args(args: list[str]) -> dict:
@@ -435,6 +519,9 @@ Local vault (development/server-side only):
   mnemon status             Show local vault health stats
   mnemon search <query>     Search local vault
   mnemon save <title> <c>   Save to local vault
+  mnemon attention-status   Capture-attention soak monitor — boost rate,
+                            recurrence distribution, top canonicals,
+                            recent 'restates' relations
   mnemon forget <id>        Soft-delete from local vault
   mnemon rebuild            Re-embed every document (run after a model
                             change, or to recover from skipped embeddings)
