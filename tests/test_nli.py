@@ -8,7 +8,7 @@ classifier mocked so they run fast and offline.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -121,3 +121,124 @@ class TestErrorSurfacing:
         # The message survives string conversion (needed for the MCP
         # tool's clear-error path).
         assert "model load failed" in str(e)
+
+    def test_ensure_loaded_raises_on_hub_download_failure(self):
+        """Network / 403 / 404 errors during model download must
+        surface as NLIUnavailableError, not bubble unchanged."""
+        import mnemon.nli
+        original_session = mnemon.nli._session
+        mnemon.nli._session = None
+        try:
+            with patch(
+                "huggingface_hub.hf_hub_download",
+                side_effect=ConnectionError("simulated network failure"),
+            ):
+                with pytest.raises(NLIUnavailableError) as exc:
+                    mnemon.nli._ensure_loaded()
+            assert "simulated network failure" in str(exc.value)
+        finally:
+            mnemon.nli._session = original_session
+
+    def test_ensure_loaded_raises_on_unexpected_label_set(self, tmp_path):
+        """A model with a different label space than the expected
+        contradiction/entailment/neutral triple must fail fast at
+        load time, not produce mis-classifications downstream."""
+        import json as json_mod
+        import mnemon.nli
+
+        # Fake config + tokenizer files
+        config_path = tmp_path / "config.json"
+        config_path.write_text(json_mod.dumps({"id2label": {"0": "happy", "1": "sad"}}))
+        tokenizer_path = tmp_path / "tokenizer.json"
+        tokenizer_path.write_text('{"version":"1.0"}')  # minimal stub
+        onnx_path = tmp_path / "model.onnx"
+        onnx_path.write_bytes(b"")  # not actually loaded; rejected earlier
+
+        original_session = mnemon.nli._session
+        mnemon.nli._session = None
+        try:
+            def fake_download(repo_id, filename):
+                if filename == "config.json":
+                    return str(config_path)
+                if filename == "tokenizer.json":
+                    return str(tokenizer_path)
+                return str(onnx_path)
+
+            with patch("huggingface_hub.hf_hub_download", side_effect=fake_download):
+                with pytest.raises(NLIUnavailableError) as exc:
+                    mnemon.nli._ensure_loaded()
+            assert "unexpected label set" in str(exc.value)
+        finally:
+            mnemon.nli._session = original_session
+
+
+class TestPrewarm:
+    def test_prewarm_swallows_unavailability(self):
+        """prewarm() is best-effort observability — must NOT raise
+        even when the underlying model can't load. (Acceptable
+        swallow per feedback_no_silent_fails — pre-warm is secondary;
+        the first real call surfaces the named error.)"""
+        from mnemon.nli import prewarm
+        with patch("mnemon.nli._ensure_loaded",
+                   side_effect=NLIUnavailableError("simulated")):
+            prewarm()  # must not raise
+
+    def test_prewarm_calls_ensure_loaded(self):
+        from mnemon.nli import prewarm
+        with patch("mnemon.nli._ensure_loaded") as ensure:
+            prewarm()
+            assert ensure.called
+
+
+class TestClassifyPairTokenization:
+    """Smoke-test the input-building path with a stubbed session +
+    tokenizer. Exercises lines 164-189 (the input dict construction
+    + softmax over logits) without paying the real model load cost."""
+
+    def test_classify_pair_returns_argmax_label(self):
+        """Given fake logits that favor 'contradiction', the result
+        label is 'contradiction' and probs sum to ~1.0."""
+        import numpy as np
+        import mnemon.nli
+
+        # Stub the session: return fixed logits favoring contradiction (idx 0)
+        fake_session = MagicMock()
+        fake_session.get_inputs.return_value = [
+            MagicMock(name="input_ids"),
+            MagicMock(name="attention_mask"),
+        ]
+        # Configure .name attrs explicitly (MagicMock(name=...) doesn't
+        # set the attribute, just the repr)
+        for input_mock, real_name in zip(
+            fake_session.get_inputs.return_value, ["input_ids", "attention_mask"]
+        ):
+            input_mock.name = real_name
+        fake_session.run.return_value = [np.array([[5.0, -2.0, 0.0]], dtype=np.float32)]
+
+        fake_tokenizer = MagicMock()
+        fake_enc = MagicMock()
+        fake_enc.ids = [101, 1000, 102, 2000, 102]
+        fake_enc.attention_mask = [1, 1, 1, 1, 1]
+        fake_enc.type_ids = [0, 0, 0, 1, 1]
+        fake_tokenizer.encode.return_value = fake_enc
+
+        original_session = mnemon.nli._session
+        original_tokenizer = mnemon.nli._tokenizer
+        original_id2label = mnemon.nli._id2label
+        mnemon.nli._session = fake_session
+        mnemon.nli._tokenizer = fake_tokenizer
+        mnemon.nli._id2label = {0: "contradiction", 1: "entailment", 2: "neutral"}
+        try:
+            result = mnemon.nli.classify_pair("premise", "hypothesis")
+            assert result.label == "contradiction"
+            # Softmax probs sum to 1
+            assert abs(sum(result.probs.values()) - 1.0) < 1e-5
+            # Contradiction has highest prob
+            assert result.probs["contradiction"] > result.probs["entailment"]
+            assert result.probs["contradiction"] > result.probs["neutral"]
+        finally:
+            mnemon.nli._session = original_session
+            mnemon.nli._tokenizer = original_tokenizer
+            mnemon.nli._id2label = original_id2label
+
+

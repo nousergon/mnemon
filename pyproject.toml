@@ -77,6 +77,46 @@ markers = [
     "integration: end-to-end tests that spawn a real mnemon serve-remote subprocess (skip with -m 'not integration')",
 ]
 
+# Coverage configuration (used when pytest is invoked with --cov).
+# CI runs `pytest --cov=src/mnemon --cov-fail-under=80` so a regression
+# below the 80% floor fails the build. Excluded modules below are
+# under-testable-by-design — keeping them in the coverage denominator
+# would force fake/superficial tests that don't actually exercise the
+# code (Streamlit dashboard, entry-point shim, release-engineering
+# scripts that require real Fly/AWS).
+[tool.coverage.run]
+source = ["src/mnemon"]
+omit = [
+    # Streamlit dashboard — UI code that's only meaningfully testable
+    # by running Streamlit. Operator runs this; CI doesn't.
+    "src/mnemon/dashboard/*",
+    # __main__ entry-point shim — 4 lines, no logic
+    "src/mnemon/__main__.py",
+    # Release-engineering operations on Fly + AWS — exercised by the
+    # Layer-3 web test ritual (scripts/promote_stable.sh), not unit
+    # tests. Mocking the full upgrade/downgrade path adds maintenance
+    # cost without surfacing real bugs (those surface in Layer-3).
+    "src/mnemon/upgrade.py",
+    "src/mnemon/downgrade.py",
+    # Deprecated / optional LLM path — kept for local-mode operators
+    # who explicitly install [llm] extras. The deployed product is
+    # LLM-free by design (2026-05-22 decision); NLI replaced the only
+    # production use of this module (mnemon.contradiction). Tests
+    # cover the surface that's actually called.
+    "src/mnemon/llm.py",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+
 [tool.ruff.lint.per-file-ignores]
 # Streamlit convention: st.set_page_config(...) must precede any other
 # Streamlit command, so page modules import library code after the

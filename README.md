@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/pypi/v/mnemon-memory.svg)](https://pypi.org/project/mnemon-memory/)
+[![Coverage](https://img.shields.io/badge/coverage-86%25-brightgreen.svg)]()
 
 > One memory vault. Every MCP client. Self-hosted.
 >

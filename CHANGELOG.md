@@ -2,6 +2,27 @@
 
 ## [0.7.0] - Unreleased
 
+### Test coverage
+
+- **CI now enforces ≥80% test coverage.** `pyproject.toml` gains
+  `[tool.coverage.run]` + `[tool.coverage.report]` config with
+  `fail_under = 80`; `ci.yml` runs `pytest --cov` so a PR that drops
+  coverage below the floor fails the build. Excluded modules
+  (`dashboard/*`, `__main__.py`, `upgrade.py`, `downgrade.py`,
+  `llm.py`) are under-testable-by-design and documented in the
+  config — Streamlit UI / entry-point shim / release-engineering
+  scripts requiring real Fly+AWS / deprecated optional-LLM module
+  the deployed product doesn't use.
+- **Current coverage: 86%** (suite 850 → 855 passing).
+- **README coverage badge** added: `coverage-86%-brightgreen`.
+  Static, manually updated on each release (matches the existing
+  static-badge pattern for Status / Python / License / MCP).
+- New `tests/test_nli.py` additions cover: `_ensure_loaded` HF
+  download failure → `NLIUnavailableError`; `_ensure_loaded`
+  unexpected label-set rejection; `prewarm()` swallows
+  unavailability per acceptable-secondary-observability category;
+  `classify_pair` softmax + input-building path with stubbed session.
+
 ### CI / release tooling
 
 - **New `.github/workflows/ci-server-extras.yml` workflow.** Installs
