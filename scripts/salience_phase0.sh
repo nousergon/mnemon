@@ -78,10 +78,16 @@ cmd_snapshot() {
     echo_ok "remote /tmp/snap.sqlite written"
 
     echo_step "  Step 2/4 — vecstore copy on Fly (numpy savez is atomic)"
-    flyctl ssh console -a "$FLY_APP" -C \
-        "cp /data/default.vec.npz /tmp/snap.vec.npz && echo 'vec copy done'" \
-        || echo_warn "remote vecstore copy failed — embedding signals will be zero"
-    echo_ok "remote /tmp/snap.vec.npz written"
+    # flyctl ssh -C does NOT spawn a shell — it execs the command directly,
+    # so shell operators like `&& echo X` get passed as literal cp args
+    # (caught 2026-05-21: cp tried to use "vec copy done" as a destination).
+    # Single command only. If we need chaining, wrap in `sh -c "..."`.
+    if flyctl ssh console -a "$FLY_APP" -C \
+        "cp /data/default.vec.npz /tmp/snap.vec.npz"; then
+        echo_ok "remote /tmp/snap.vec.npz written"
+    else
+        echo_warn "remote vecstore copy failed — embedding signals will be zero"
+    fi
 
     echo_step "  Step 3/4 — sftp download (sqlite + vec.npz)"
     rm -f "$SNAPSHOT_PATH" "$VEC_PATH"
@@ -100,9 +106,11 @@ cmd_snapshot() {
     fi
 
     echo_step "  Step 4/4 — clean up remote temp files"
-    flyctl ssh console -a "$FLY_APP" -C "rm -f /tmp/snap.sqlite /tmp/snap.vec.npz" \
-        || echo_warn "remote cleanup failed (harmless — /tmp churns on machine restart)"
-    echo_ok "remote /tmp files removed"
+    if flyctl ssh console -a "$FLY_APP" -C "rm -f /tmp/snap.sqlite /tmp/snap.vec.npz"; then
+        echo_ok "remote /tmp files removed"
+    else
+        echo_warn "remote cleanup failed (harmless — /tmp churns on machine restart)"
+    fi
 
     # Quick sanity: count live memories + verify vec.npz is loadable
     local live_count vec_count
