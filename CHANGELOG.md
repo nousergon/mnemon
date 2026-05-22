@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.7.0] - Unreleased
+## [0.7.0rc3] - 2026-05-22
 
 ### Test coverage
 
