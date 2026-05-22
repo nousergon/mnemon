@@ -82,29 +82,57 @@ import numpy as np  # noqa: E402
 # rule-like, anchoring to date/event markers means it's not durable.
 
 CONSTRAINT_EXEMPLARS = [
-    "default to the institutional approach with no shortcuts",
+    # SOTA / institutional rules
+    "default to the SOTA / institutional approach, no shortcuts",
+    "use the right primitive, not the smaller diff",
+    "the most-correct, most-robust route is also the faster path to production",
+    "only deviate from SOTA with an explicit written rationale",
+    "lift to library when two or more consumers exist",
+    # Verification / discipline
     "always verify before promoting to production",
-    "never argmax-route to a per-regime sub-model",
-    "fail loud and fast on errors, no silent swallows",
-    "prefer the most correct path over the smaller diff",
-    "runway is not a constraint, optimize for preference not necessity",
-    "use the SOTA primitive when it exists, do not ship a workaround",
-    "the most robust route is also the faster path to production",
-    "X is not Y — assert the constraint explicitly",
     "audit before scoping, the codebase is the source of truth",
+    "every audit finding becomes a ROADMAP follow-up item",
+    "verify branch state before running apply.sh",
+    "test reproduction before shipping the static root cause",
+    # Failure / error handling
+    "fail loud and fast on errors, no silent swallows",
+    "any swallow must carry an inline comment naming the failure mode",
+    "raise so the failure surfaces at the earliest possible callsite",
+    "graceful degrade is forbidden on producer / writer paths",
+    # Process / coordination
+    "every PR deploy appends to the system-wide changelog automatically",
+    "never argmax-route to a per-regime sub-model",
+    "use canonical alpha labels with explicit clipping over raw arithmetic returns",
+    # Existential constraints
+    "runway is not a constraint, optimize for preference not necessity",
+    "X is not Y — assert the constraint explicitly",
+    "this fact conditions reasoning regardless of query similarity",
 ]
 
 TIME_BOUNDED_EXEMPLARS = [
+    # Session handoffs (these consistently get caught by FTS-breadth noise)
+    "Session: proceed with option A",
+    "Session: pr merged",
+    "Session: ok so you are telling me",
+    "Session: i was wondering",
+    "Session: i think it may be best",
+    # Status updates with date markers
     "today's saturday SF run completed successfully",
     "yesterday's deploy of PR was merged to main",
     "shipped this week as part of the rc18 release",
     "tomorrow's market open at 6:30 AM PT",
     "the 2026-05-21 incident response writeup",
-    "session handoff from the Tuesday evening session",
     "scheduled for Wednesday afternoon trigger",
     "merged commit abc123 to main on Friday",
     "this morning's MorningEnrich step in the weekday SF",
     "post-market reconciliation completed for May 21",
+    # PR / commit specific
+    "PR #143 merged at 22:17:17Z",
+    "v0.6.0 tag pushed to origin",
+    # Tiny single-thought memories (no constraint, no context)
+    "halt the run",
+    "propagate",
+    "Option 1 or 3",
 ]
 
 # Operator-tunable correction patterns (existing heuristic, kept).
@@ -122,6 +150,14 @@ W_TIME_PENALTY = 1.5
 
 DEFAULT_TOP_N = 10
 HARD_CEILING = 20  # plan invariant: never exceed 20
+
+# Minimum content length for standing-tier consideration. A 2-word
+# memory like "halt the run" or "propagate" technically scores via
+# breadth (FTS-matches many queries) but carries no actual constraint
+# — too thin to condition reasoning. Hard-filter rather than soft-penalty
+# because no amount of other signal saves a 2-word memory from being
+# noise in a standing-tier context.
+DEFAULT_MIN_CONTENT_LENGTH = 50
 
 
 def _resolve_db(vault_override: str | None, db_override: str | None) -> Path:
@@ -277,6 +313,11 @@ def main() -> int:
                     help="print candidates but don't write standing.json / standing-rendered.md")
     ap.add_argument("--show", type=int, default=30,
                     help="how many top-scored candidates to display (default: 30)")
+    ap.add_argument("--min-content-length", type=int, default=DEFAULT_MIN_CONTENT_LENGTH,
+                    help=f"drop memories whose content is shorter than N chars BEFORE scoring "
+                         f"(default: {DEFAULT_MIN_CONTENT_LENGTH}; set to 0 to disable). "
+                         f"Filters out tiny noise memories like 'halt the run' / 'propagate' that "
+                         f"FTS-match many queries but carry no actual constraint.")
     args = ap.parse_args()
 
     if args.top > HARD_CEILING:
@@ -294,7 +335,7 @@ def main() -> int:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
 
-    docs = [dict(r) for r in conn.execute(
+    all_docs = [dict(r) for r in conn.execute(
         """
         SELECT d.id, d.title, d.content_type, d.confidence, d.hash, c.doc AS content
         FROM documents d
@@ -303,14 +344,23 @@ def main() -> int:
         """
     ).fetchall()]
 
-    if not docs:
+    if not all_docs:
         print(f"vault {db_path} has no live memories", file=sys.stderr)
         return 1
+
+    # Length filter — drop tiny noise BEFORE scoring.
+    n_before = len(all_docs)
+    min_len = max(0, args.min_content_length)
+    if min_len > 0:
+        docs = [d for d in all_docs if len(d["content"] or "") >= min_len]
+    else:
+        docs = all_docs
+    n_filtered = n_before - len(docs)
 
     print(f"# Standing-tier scoring (embedding-based, SOTA non-LLM)", file=sys.stderr)
     print(f"# Vault:    {db_path}", file=sys.stderr)
     print(f"# Vecstore: {vecstore_path}", file=sys.stderr)
-    print(f"# Live memories: {len(docs)}", file=sys.stderr)
+    print(f"# Live memories: {len(docs)} (filtered {n_filtered} below {min_len}-char threshold)", file=sys.stderr)
 
     # Embedding-based signals
     print(f"# Embedding exemplars + memories ...", file=sys.stderr)
