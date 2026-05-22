@@ -15,6 +15,17 @@ RUN pip install --no-cache-dir ".[server]"
 ENV FASTEMBED_CACHE_DIR=/app/.cache/fastembed
 RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BAAI/bge-small-en-v1.5', cache_dir='/app/.cache/fastembed')"
 
+# Bake the NLI cross-encoder (~87 MB INT8 ONNX) for
+# memory_check_contradictions — same rationale as the FastEmbed bake.
+# Without this, the first contradiction check pays a 5-15 second
+# download cost AND risks Anthropic's MCP-proxy timeout on the call.
+# Model lives in /app/.cache/huggingface (default HF cache root).
+ENV HF_HOME=/app/.cache/huggingface
+RUN python -c "from huggingface_hub import hf_hub_download; \
+    hf_hub_download(repo_id='cross-encoder/nli-deberta-v3-xsmall', filename='onnx/model_qint8_avx512.onnx'); \
+    hf_hub_download(repo_id='cross-encoder/nli-deberta-v3-xsmall', filename='tokenizer.json'); \
+    hf_hub_download(repo_id='cross-encoder/nli-deberta-v3-xsmall', filename='config.json')"
+
 # Vault data persists in /data (mount a Fly volume here)
 ENV MNEMON_VAULT_DIR=/data
 RUN mkdir -p /data
@@ -25,10 +36,12 @@ ENV PORT=8080
 EXPOSE 8080
 
 # Health check has a generous start period because the server pre-loads
-# the embedding model on startup (see server_remote.py) — uvicorn does
-# not bind the port until that load completes (~3-5 seconds on warm
-# disk, longer on first-ever boot if the model isn't yet cached).
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+# BOTH the embedding model and the NLI classifier on startup (see
+# server_remote.py) — uvicorn does not bind the port until both loads
+# complete (~5-8 seconds on warm disk, longer on first-ever boot if
+# models aren't yet cached). Start period bumped to 45s for the dual
+# pre-warm.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
     CMD python -c "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health', timeout=3).status == 200 else 1)"
 
 CMD ["mnemon", "serve-remote"]

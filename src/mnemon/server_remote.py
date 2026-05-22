@@ -76,6 +76,25 @@ def run_remote() -> None:
             file=sys.stderr,
         )
 
+    # Eager NLI init for contradiction detection — non-fatal if it
+    # fails. ~87 MB INT8 ONNX model; load on first call would block
+    # the calling MCP tool for several seconds. Pre-loading here
+    # shifts that cost to server startup, identical pattern to
+    # embedder above.
+    try:
+        from .nli import prewarm as nli_prewarm
+
+        print("Pre-loading NLI classifier...", file=sys.stderr)
+        nli_prewarm()
+        print("NLI classifier ready.", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(
+            f"WARN: failed to pre-load NLI classifier "
+            f"({type(e).__name__}: {e}); first memory_check_contradictions "
+            "will pay the load cost lazily",
+            file=sys.stderr,
+        )
+
     config = OAuthConfig.from_env()
 
     # Self-hosted Authorization Server. When MNEMON_AS_ENABLED=true, the

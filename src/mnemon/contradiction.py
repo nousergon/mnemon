@@ -1,19 +1,34 @@
 """Contradiction detection — finds and resolves conflicting memories.
 
-When a new memory is saved, searches for existing memories on the same
-topic. Uses the local LLM to classify the relationship:
-  - same: identical fact, no action (adds "related" relation)
-  - update: new supersedes old, decay old confidence
-  - contradiction: direct conflict, decay old confidence more aggressively
-  - unrelated: different topics, no action
+When a new memory is saved, searches for existing memories on the
+same topic. Uses **NLI** (Natural Language Inference) to classify
+the relationship between each candidate pair:
+
+  - ``same``         : semantic equivalence, no action (adds ``related`` relation)
+  - ``update``       : new supersedes old, decay old confidence
+  - ``contradiction``: direct conflict, decay old confidence more aggressively
+  - ``unrelated``    : different topics, no action
+
+Two-stage pipeline:
+  1. Cosine similarity gate (``CONTRADICTION_OVERLAP_THRESHOLD``) —
+     cheap filter; unrelated pairs never reach the classifier
+  2. NLI cross-encoder bidirectional classification — outputs the
+     mnemon taxonomy label
+
+Replaces the prior LLM-based classifier (2026-05-22 — see
+``private/mnemon-salience-tier-plan-260521.md``) per the standing
+"mnemon is LLM-free by design" decision. NLI is the SOTA non-LLM
+ML primitive for this exact task; the embedded cross-encoder model
+(``cross-encoder/nli-deberta-v3-xsmall``, ~87 MB INT8) ships through
+the same FastEmbed-style ONNX path that already powers embeddings —
+zero new deps.
 
 Also provides time-based confidence decay with access reinforcement.
-
-Phase 3: LLM-based contradiction detection + confidence decay.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
@@ -27,19 +42,11 @@ from .config import (
 if TYPE_CHECKING:
     from .store import Store
 
+logger = logging.getLogger(__name__)
+
 UPDATE_DECAY = 0.15      # confidence reduction for superseded memories
 CONTRADICTION_DECAY = 0.25
 CONFIDENCE_FLOOR = 0.2
-
-CLASSIFY_SYSTEM_PROMPT = (
-    "You classify the relationship between two memories. "
-    "Given an existing memory and a new memory, respond with exactly one word:\n\n"
-    "- same: they express the same fact or decision\n"
-    "- update: the new memory supersedes or refines the old one\n"
-    "- contradiction: they directly conflict\n"
-    "- unrelated: different topics\n\n"
-    "Respond with ONLY the classification word, nothing else."
-)
 
 VALID_CLASSIFICATIONS = {"same", "update", "contradiction", "unrelated"}
 
@@ -49,90 +56,164 @@ def check_contradictions(
     new_title: str,
     new_content: str,
     new_doc_id: int,
+    *,
+    dry_run: bool = False,
 ) -> dict:
     """Check a new memory against existing memories for contradictions.
 
-    Returns {decayed: int, relationships: [{doc_id, title, relationship}]}.
+    Two-stage pipeline:
+      1. Vector-similarity gate filters to genuinely overlapping
+         candidates (``CONTRADICTION_OVERLAP_THRESHOLD``).
+      2. NLI bidirectional classify maps each candidate to mnemon's
+         taxonomy (``same`` / ``update`` / ``contradiction`` /
+         ``unrelated``).
+
+    Side effects on classification (skipped when ``dry_run=True``):
+      - ``update``        : decay old confidence by ``UPDATE_DECAY``,
+                            insert ``'supersedes'`` relation
+      - ``contradiction`` : decay old confidence by ``CONTRADICTION_DECAY``,
+                            insert ``'contradicts'`` relation
+      - ``same``          : insert ``'related'`` relation, no decay
+      - ``unrelated``     : no action
+
+    Returns:
+        {
+          "decayed": int,                  # # of confidence decays applied
+          "relationships": [
+            {
+              "doc_id": int,
+              "title": str,
+              "relationship": "same" | "update" | "contradiction" | "unrelated",
+              "probs": {"contradiction": float, "entailment": float, "neutral": float},  # NLI a→b
+            },
+            ...
+          ],
+          "nli_unavailable": bool,         # True iff NLI couldn't load (downgrades to cosine-only)
+          "dry_run": bool,                 # echoes the input flag
+        }
     """
     relationships: list[dict] = []
     decayed = 0
 
-    # Find overlapping memories via vector similarity
+    # Stage 1 — vector similarity gate
     try:
         from .embedder import embed
         query_emb = embed(f"title: {new_title} | text: {new_content}")
         overlapping = store.search_vector(query_emb, 5)
-    except Exception:
-        return {"decayed": 0, "relationships": []}
+    except Exception as e:
+        logger.warning("contradiction: embed/search failed (%s); skipping check", e)
+        return {
+            "decayed": 0, "relationships": [],
+            "nli_unavailable": False, "dry_run": dry_run,
+        }
 
-    # Filter to genuinely overlapping results (exclude self)
     candidates = [
         r for r in overlapping
         if r.doc_id != new_doc_id and r.score >= CONTRADICTION_OVERLAP_THRESHOLD
     ]
 
     if not candidates:
-        return {"decayed": 0, "relationships": []}
+        return {
+            "decayed": 0, "relationships": [],
+            "nli_unavailable": False, "dry_run": dry_run,
+        }
 
-    # Classify each relationship via LLM
+    # Stage 2 — NLI classify (bidirectional)
     try:
-        from .llm import generate
-    except ImportError:
-        return {"decayed": 0, "relationships": []}
+        from .nli import NLIUnavailableError, classify_pair_bidirectional
+    except ImportError as e:
+        logger.warning("contradiction: NLI module import failed: %s", e)
+        return {
+            "decayed": 0, "relationships": [],
+            "nli_unavailable": True, "dry_run": dry_run,
+        }
 
     for candidate in candidates:
         try:
-            prompt = (
-                f"Existing memory:\nTitle: {candidate.title}\n"
-                f"Content: {candidate.content[:CONTRADICTION_CONTEXT_MAX_CHARS]}\n\n"
-                f"New memory:\nTitle: {new_title}\n"
-                f"Content: {new_content[:CONTRADICTION_CONTEXT_MAX_CHARS]}"
+            premise = (
+                f"title: {candidate.title} | "
+                f"text: {candidate.content[:CONTRADICTION_CONTEXT_MAX_CHARS]}"
             )
-
-            response = generate(CLASSIFY_SYSTEM_PROMPT, prompt, max_tokens=10)
-            classification = response.strip().lower()
-
-            if classification not in VALID_CLASSIFICATIONS:
-                continue
-
-            relationships.append({
-                "doc_id": candidate.doc_id,
-                "title": candidate.title,
-                "relationship": classification,
-            })
-
-            # Apply confidence decay
-            if classification == "update":
-                doc = store.get(candidate.doc_id)
-                if doc:
-                    new_confidence = max(CONFIDENCE_FLOOR, doc.confidence - UPDATE_DECAY)
-                    store.db.execute(
-                        "UPDATE documents SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
-                        (new_confidence, candidate.doc_id),
-                    )
-                    store.db.commit()
-                    store.add_relation(new_doc_id, candidate.doc_id, "supersedes", 0.8)
-                    decayed += 1
-
-            elif classification == "contradiction":
-                doc = store.get(candidate.doc_id)
-                if doc:
-                    new_confidence = max(CONFIDENCE_FLOOR, doc.confidence - CONTRADICTION_DECAY)
-                    store.db.execute(
-                        "UPDATE documents SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
-                        (new_confidence, candidate.doc_id),
-                    )
-                    store.db.commit()
-                    store.add_relation(new_doc_id, candidate.doc_id, "contradicts", 0.9)
-                    decayed += 1
-
-            elif classification == "same":
-                store.add_relation(new_doc_id, candidate.doc_id, "related", 1.0)
-
-        except Exception:
+            hypothesis = (
+                f"title: {new_title} | "
+                f"text: {new_content[:CONTRADICTION_CONTEXT_MAX_CHARS]}"
+            )
+            result = classify_pair_bidirectional(premise, hypothesis)
+            classification = result.mnemon_label
+        except NLIUnavailableError as e:
+            # First candidate's NLI failure → bail out entirely with the
+            # named-error path; subsequent candidates would fail
+            # identically (singleton model load). Surfaces a clear
+            # "nli unavailable" flag for the caller to communicate.
+            logger.warning("contradiction: NLI unavailable: %s", e)
+            return {
+                "decayed": decayed,
+                "relationships": relationships,
+                "nli_unavailable": True,
+                "dry_run": dry_run,
+            }
+        except Exception as e:
+            # Per-candidate failure (tokenization edge case, etc.) —
+            # log + skip this candidate, continue with others.
+            logger.warning(
+                "contradiction: classify failed for candidate #%d: %s",
+                candidate.doc_id, e,
+            )
             continue
 
-    return {"decayed": decayed, "relationships": relationships}
+        if classification not in VALID_CLASSIFICATIONS:
+            logger.warning(
+                "contradiction: unexpected classification %r for #%d; skipping",
+                classification, candidate.doc_id,
+            )
+            continue
+
+        relationships.append({
+            "doc_id": candidate.doc_id,
+            "title": candidate.title,
+            "relationship": classification,
+            "probs": result.b_implies_a.probs,
+        })
+
+        # Side effects — skipped under dry_run
+        if dry_run:
+            if classification in ("update", "contradiction"):
+                decayed += 1  # would-decay count
+            continue
+
+        if classification == "update":
+            doc = store.get(candidate.doc_id)
+            if doc:
+                new_confidence = max(CONFIDENCE_FLOOR, doc.confidence - UPDATE_DECAY)
+                store.db.execute(
+                    "UPDATE documents SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
+                    (new_confidence, candidate.doc_id),
+                )
+                store.db.commit()
+                store.add_relation(new_doc_id, candidate.doc_id, "supersedes", 0.8)
+                decayed += 1
+
+        elif classification == "contradiction":
+            doc = store.get(candidate.doc_id)
+            if doc:
+                new_confidence = max(CONFIDENCE_FLOOR, doc.confidence - CONTRADICTION_DECAY)
+                store.db.execute(
+                    "UPDATE documents SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
+                    (new_confidence, candidate.doc_id),
+                )
+                store.db.commit()
+                store.add_relation(new_doc_id, candidate.doc_id, "contradicts", 0.9)
+                decayed += 1
+
+        elif classification == "same":
+            store.add_relation(new_doc_id, candidate.doc_id, "related", 1.0)
+
+    return {
+        "decayed": decayed,
+        "relationships": relationships,
+        "nli_unavailable": False,
+        "dry_run": dry_run,
+    }
 
 
 # ── Confidence Decay ────────────────────────────────────────────────────────
