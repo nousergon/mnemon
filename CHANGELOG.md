@@ -2,6 +2,27 @@
 
 ## [0.7.0] - Unreleased
 
+### Fixes
+
+- **`build_standing_set.py` exemplar bias — added declarative-posture
+  patterns.** The pre-fix `CONSTRAINT_EXEMPLARS` list leaned heavily
+  imperative ("never," "always," "must," "default to"). Surfaced
+  2026-05-22: against the real prod vault the auto-selected top-10
+  was 100% engineering rules — career / lifestyle / posture
+  constraints spanning multi-year load-bearing facts (runway,
+  recruiter posture, start-date framing, job-search mode) did not
+  surface despite being equally durable, because the user encodes
+  them declaratively ("Brian's stance," "current preference,"
+  "passive/selective mode") rather than imperatively. Added 10
+  declarative-posture exemplars representing the same constraint
+  class in declarative shape. Exemplar list 22 → 30; imperative /
+  declarative split now roughly balanced. ROADMAP audit-finding
+  follow-up per `feedback_audit_findings_become_roadmap_followups`.
+  Operator should re-run `scripts/salience_phase0.sh snapshot &&
+  scripts/salience_phase0.sh score` to verify the bias fix surfaces
+  career-context memories alongside the engineering rules in the
+  top-10.
+
 ### Features
 
 - **Salience tier Phase 1 — first-class standing-context recall
