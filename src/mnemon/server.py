@@ -501,11 +501,18 @@ def profile_update(title: str, content: str) -> str:
 
 
 @mcp.tool()
-def memory_check_contradictions(id: int) -> str:
+def memory_check_contradictions(id: int, dry_run: bool = False) -> str:
     """Check a memory for contradictions against existing memories.
 
-    Uses vector similarity + LLM classification to find conflicts.
-    Automatically decays confidence of superseded or contradicting memories.
+    Uses vector-similarity gate (>= overlap threshold) then NLI
+    bidirectional classification (no LLM required) to find conflicts.
+    Automatically decays confidence of superseded or contradicting
+    memories — unless ``dry_run=True``, in which case mutations are
+    skipped and the response indicates what WOULD have changed.
+
+    Returns a human-readable summary including the NLI classification
+    per pair. On NLI unavailability (model not loadable), returns a
+    clear "skipped" message rather than an opaque error.
     """
     store = _get_store()
     doc = store.get(id)
@@ -513,7 +520,17 @@ def memory_check_contradictions(id: int) -> str:
         return f"Memory #{id} not found."
 
     from .contradiction import check_contradictions
-    result = check_contradictions(store, doc.title, doc.content, id)
+    result = check_contradictions(
+        store, doc.title, doc.content, id, dry_run=dry_run,
+    )
+
+    if result.get("nli_unavailable"):
+        return (
+            f'Contradiction check for #{id} skipped — NLI classifier '
+            f'unavailable on this server (model load failed). Try again '
+            f'after a server restart, or run locally with the NLI model '
+            f'pre-cached. No vault state was modified.'
+        )
 
     if not result["relationships"]:
         return f"No contradictions found for memory #{id}."
@@ -523,10 +540,18 @@ def memory_check_contradictions(id: int) -> str:
         for r in result["relationships"]
     ]
 
+    if dry_run:
+        action = (
+            f'\n\n[dry-run] {result["decayed"]} memories WOULD have had '
+            f'their confidence decayed. No mutations applied.'
+        )
+    else:
+        action = f'\n\n{result["decayed"]} memories had their confidence decayed.'
+
     return (
         f'Contradiction check for #{id} "{doc.title}":\n'
         + "\n".join(lines)
-        + f'\n\n{result["decayed"]} memories had their confidence decayed.'
+        + action
     )
 
 

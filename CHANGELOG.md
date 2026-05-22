@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.7.0rc2] - 2026-05-22
+
+### Features
+
+- **Contradiction detection rebuilt with NLI (no LLM dep).** The
+  `memory_check_contradictions` MCP tool now uses a Natural Language
+  Inference cross-encoder (`cross-encoder/nli-deberta-v3-xsmall`,
+  22M params, ~87 MB INT8 ONNX) instead of an LLM classifier. NLI
+  is the canonical non-LLM ML primitive for this exact task —
+  entailment / contradiction / neutral classification on a sentence
+  pair — and ships through the same FastEmbed-style ONNX runtime
+  path already in mnemon. **Zero new dependencies** (onnxruntime +
+  tokenizers + huggingface_hub all transitively required by
+  FastEmbed already). Replaces the prior LLM-based path that
+  couldn't work on Fly (`[server]` extras don't install
+  `llama-cpp-python` per the 2026-05-21 "mnemon is LLM-free by
+  design" decision, so the LLM path was effectively broken since
+  the original `[server]`/`[llm]` split).
+  - **Bidirectional classification.** Each candidate pair is run
+    through the cross-encoder twice (premise→hypothesis +
+    hypothesis→premise, ~10-20ms total on CPU INT8). The two
+    directions disambiguate the mnemon taxonomy: both entail →
+    `same`; new entails old but not vice versa → `update`;
+    contradiction in either direction → `contradiction`; both
+    neutral → `unrelated`.
+  - **Cosine gate preserved.** Existing
+    `CONTRADICTION_OVERLAP_THRESHOLD=0.7` still filters candidates
+    before NLI — protects against the rare NLI false-positive on
+    obviously-unrelated pairs.
+  - **Model baked into Fly image.** Dockerfile downloads the 87 MB
+    quantized ONNX model + tokenizer at build time, mirroring the
+    existing FastEmbed bake. Cold start adds the NLI load to the
+    pre-warm path (~5-8 seconds total vs 3-5 seconds prior). Health
+    check start period bumped 30s → 45s.
+  - **Clean error surface.** When NLI isn't loadable (e.g., model
+    download fails on a fresh local install without network), the
+    MCP tool returns a clear "skipped — NLI classifier unavailable"
+    message instead of an opaque "Error occurred during tool
+    execution" envelope. Fail-loud per
+    `feedback_no_silent_fails`. Composes with the recalled
+    `feedback-mnemon-pypi-upload-claude-is-authorized` mental model:
+    surface failure causes specifically, never the generic envelope.
+
+- **`dry_run` parameter on `memory_check_contradictions`.** When
+  `dry_run=True`, the tool reports what WOULD have decayed without
+  applying any mutations (no confidence changes, no relations
+  inserted). Closes the read/command-separation violation in the
+  prior `check_*` naming; useful for operator audit before
+  committing destructive changes (the 2026-05-22 standing-tier
+  promotion incident — operator review of three contradictory
+  liquidity figures — would have benefited from this).
+
+### Internal
+
+- **New module `src/mnemon/nli.py`** mirroring `embedder.py`:
+  lazy-loaded singleton, `prewarm()` for lifespan startup,
+  `classify_pair()` for single-direction, `classify_pair_bidirectional()`
+  for the mnemon-taxonomy mapping, `is_available()` probe,
+  `NLIUnavailableError` named exception. Operator override:
+  `MNEMON_NLI_ONNX_VARIANT` env var to swap between FP32 / FP16 /
+  INT8 variants (default INT8 AVX-512 for x86 Fly).
+- **`contradiction.py` refactored**: LLM imports + prompt
+  construction removed; vector gate + NLI classify pipeline now
+  explicit in the docstring. Return shape gains `nli_unavailable`
+  and `dry_run` flags for caller-side handling.
+- **Tests**: `tests/test_nli.py` (11 new) covers bidirectional
+  label mapping, error surfacing, availability probe.
+  `tests/test_contradiction.py` refactored to mock the NLI layer
+  instead of `mnemon.llm.generate`; adds dry-run mutation-skip
+  test + nli-unavailable clean-flag test. Suite 836 → 847 passing.
+
 ## [0.7.0rc1] - 2026-05-22
 
 ### Fixes
