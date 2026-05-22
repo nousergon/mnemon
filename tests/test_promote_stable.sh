@@ -287,6 +287,45 @@ test_layer3_uses_remote_helper_not_mnemon_status() {
     return 0
 }
 
+test_helper_exposes_exercise_all_tools_subcommand() {
+    # The 2026-05-22 layer3 extension added an exercise-all-tools
+    # subcommand to _layer3_remote_helper.py. Regression-lock the
+    # dispatcher so the entry-point doesn't silently disappear in a
+    # future edit. Doesn't run the actual exercise (would need a live
+    # Fly app); just verifies the subcommand is registered + named.
+    local helper="$REPO_ROOT/scripts/_layer3_remote_helper.py"
+    [ -f "$helper" ] || { echo "    helper not found at $helper" >&2; return 1; }
+
+    # The usage string in the bare-invocation output should mention
+    # the new subcommand. (Bare invocation exits non-zero with the
+    # usage on stderr.)
+    local out
+    out="$("$REPO_ROOT/.venv/bin/python" "$helper" 2>&1)" && return 1
+    echo "$out" | grep -q "exercise-all-tools" \
+        || { echo "    usage text doesn't advertise exercise-all-tools: $out" >&2; return 1; }
+    return 0
+}
+
+test_layer3_passes_through_exercise_all_tools_flag() {
+    # The 2026-05-22 layer3 extension added a --exercise-all-tools
+    # flag wired through the dispatcher (cmd_layer3 "$@"). Regression-
+    # lock so a future refactor doesn't drop the $@ forwarding.
+    local script="$REPO_ROOT/scripts/promote_stable.sh"
+
+    # Dispatcher line forwards args
+    grep -E 'layer3\)\s+shift;\s+cmd_layer3 "\$@"' "$script" \
+        || { echo "    layer3 case doesn't forward args to cmd_layer3" >&2; return 1; }
+
+    # cmd_layer3 parses --exercise-all-tools into EXERCISE_ALL_TOOLS=1
+    grep -q 'EXERCISE_ALL_TOOLS=1' "$script" \
+        || { echo "    cmd_layer3 doesn't set EXERCISE_ALL_TOOLS=1" >&2; return 1; }
+
+    # And the Step 4.5 gate references it
+    grep -q 'EXERCISE_ALL_TOOLS' "$script" \
+        || { echo "    Step 4.5 doesn't gate on EXERCISE_ALL_TOOLS" >&2; return 1; }
+    return 0
+}
+
 test_publish_extracts_changelog_section_correctly() {
     # Regression for the 2026-05-21 publish-step bug: the naive awk
     # range `/^## \[VER\]/,/^## \[/` extracted ZERO bytes because
@@ -405,6 +444,8 @@ run_test test_sourcing_does_not_dispatch
 run_test test_step2_seed_contents_are_unique
 run_test test_remote_helper_exists_and_is_invokable
 run_test test_layer3_uses_remote_helper_not_mnemon_status
+run_test test_helper_exposes_exercise_all_tools_subcommand
+run_test test_layer3_passes_through_exercise_all_tools_flag
 run_test test_publish_extracts_changelog_section_correctly
 
 echo ""

@@ -1,0 +1,65 @@
+name: CI — [server] extras only
+
+# Purpose: verify mnemon's production install (Fly Docker image) — which
+# uses `mnemon-memory[server]` and NOTHING else — passes the suite that
+# matters for production behavior.
+#
+# Driver: 2026-05-22 finding that `memory_check_contradictions` was
+# silently broken on Fly because the LLM code path imported deps only
+# available in the `[llm]` extra (NOT in `[server]`). All unit tests
+# passed because they ran under `[dev]` extras, which include `[llm]`
+# transitively in some operators' setups. This workflow runs the suite
+# against ONLY the `[server]` extras + a minimal test framework — if a
+# test fails here that passes in `ci.yml`, an optional dep has leaked
+# into a production path.
+#
+# Composes with the all-tools integration canary in
+# `tests/test_tools_integration.py` (PR #158): the canary catches
+# tools that raise through their wrapper at the Python level; this
+# workflow catches tools that work under `[dev]` but break under
+# `[server]`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-server-extras-only:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Install production-equivalent extras. The Fly Dockerfile runs
+      # `pip install ".[server]"` — this mirrors that exactly.
+      - name: Install [server] extras only (production-equivalent)
+        run: pip install -e ".[server]"
+
+      # Test framework installed SEPARATELY (not via `[dev]` extra) so
+      # we don't accidentally pull in anything via mnemon's own
+      # imports that would mask a server-only break. pytest itself is
+      # a test runner, not a mnemon runtime dep.
+      - name: Install test framework
+        run: pip install "pytest>=8.0" "pytest-asyncio>=0.23" "httpx>=0.27"
+
+      # Verify the [llm] extras are NOT installed. If a future PR
+      # accidentally moves llama-cpp-python or huggingface-hub into
+      # [server], this assertion catches it.
+      - name: Assert [llm] extras NOT installed
+        run: |
+          ! pip show llama-cpp-python > /dev/null 2>&1 \
+            || (echo "::error::llama-cpp-python is installed under [server] — it must remain in [llm]"; exit 1)
+
+      # Run the full test suite under [server]-only install. Any test
+      # that imports something only available in [llm]/[ui] will fail
+      # here — that's a real bug worth catching at PR time, not after
+      # a Fly redeploy surfaces it client-side.
+      - name: Run tests under [server]-only install
+        run: pytest tests/ -v --tb=short

@@ -21,6 +21,7 @@
 # Usage:
 #   scripts/promote_stable.sh preflight   # read-only, runs before everything else
 #   scripts/promote_stable.sh layer3      # E2E web test (creates+destroys test Fly app, ~15 min)
+#   scripts/promote_stable.sh layer3 --exercise-all-tools   # also probe every MCP tool (~30-60s extra)
 #                                         # pins mnemon upgrade web --mnemon-version to TARGET_VERSION
 #                                         # if it's on PyPI, otherwise the latest published version
 #                                         # as proxy (LAYER3_VERSION_OVERRIDE=<ver> to override).
@@ -223,7 +224,32 @@ _layer3_cleanup() {
 }
 
 cmd_layer3() {
+    # Parse layer3-specific flags. Currently:
+    #   --exercise-all-tools  After upgrade, iterate every registered
+    #                         MCP tool against the test Fly app and
+    #                         assert each returns cleanly. Catches
+    #                         Fly-specific breakage (missing baked
+    #                         models, MCP proxy timeouts) that the
+    #                         local-process integration canary
+    #                         tests/test_tools_integration.py can't
+    #                         see. Added 2026-05-22.
+    local EXERCISE_ALL_TOOLS=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --exercise-all-tools)
+                EXERCISE_ALL_TOOLS=1
+                shift
+                ;;
+            *)
+                die "unknown layer3 flag: $1"
+                ;;
+        esac
+    done
+
     echo_step "Layer-3 web test — $TARGET_VERSION E2E against test-scoped Fly app"
+    if [ "$EXERCISE_ALL_TOOLS" = "1" ]; then
+        echo "  (--exercise-all-tools: every MCP tool will be invoked against the test app)"
+    fi
 
     flyctl auth whoami >/dev/null 2>&1 || die "flyctl not logged in"
     aws sts get-caller-identity >/dev/null 2>&1 || die "aws creds not configured"
@@ -362,6 +388,20 @@ cmd_layer3() {
     remote_count="$("$MNEMON_VENV_BIN/python" "$REMOTE_HELPER" status)"
     [[ "$remote_count" == "4" ]] || die "expected 4 docs on remote, got '$remote_count'"
     echo_ok "4 docs on remote"
+
+    # Step 4.5 — exercise every MCP tool against the test app. Opt-in
+    # via --exercise-all-tools because it adds ~30-60s to the layer3
+    # run (one HTTP round-trip per tool). Catches Fly-specific failures
+    # the local Python integration canary can't surface — missing
+    # baked models in the Docker image, Anthropic MCP proxy timeouts,
+    # transport regressions. Composes with tests/test_tools_integration.py
+    # (PR #158).
+    if [ "$EXERCISE_ALL_TOOLS" = "1" ]; then
+        echo_step "Step 4.5 — exercise all MCP tools against the test app"
+        "$MNEMON_VENV_BIN/python" "$REMOTE_HELPER" exercise-all-tools \
+            || die "all-tools exercise failed against test app — see output above"
+        echo_ok "every MCP tool returned cleanly"
+    fi
 
     echo_step "Step 5 — downgrade local + destroy fly app"
     "$M" downgrade local --destroy-fly-app
@@ -544,7 +584,7 @@ fi
 
 case "${1:-}" in
     preflight) cmd_preflight ;;
-    layer3)    cmd_layer3 ;;
+    layer3)    shift; cmd_layer3 "$@" ;;
     publish)   cmd_publish ;;
     verify)    cmd_verify ;;
     *)
