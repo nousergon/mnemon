@@ -66,21 +66,82 @@ _SPOTLIGHT_INSTRUCTION = (
 )
 
 
-# ── Phase 0 of the salience-tier plan ─────────────────────────────
+# ── Salience tier — standing context recall ───────────────────────
 # (private/mnemon-salience-tier-plan-260521.md)
 #
-# Standing context — feature-flagged, opt-in via MNEMON_STANDING_TIER_FILE.
-# When the env var points at a JSON file shaped {"ids": [<id>, <id>, ...]},
-# build_context fetches each ID via the remote MCP client and prepends a
-# labeled "Standing context" sub-section inside the existing
-# <mnemon-context> envelope, ahead of the query-driven block.
+# Two paths today, gated by the STANDING_TIER_ENABLED feature flag:
 #
-# Per-prompt cost: ~500ms × N (sequential memory_get HTTP calls). For N=10
-# that's ~5s added latency. Phase 0 accepts this cost — the diagnostic is
-# about hypothesis validation, not perf. Phase 1 will optimize via local
-# cache or batch fetch.
+# 1. Phase 1 (default when flag is on): single ``memory_list_standing``
+#    MCP call fetches the live standing-tier set in one round-trip.
+#    Cap-bounded (default 15, hard ceiling 20), so the payload is small.
+#    Source of truth = ``documents.tier='standing'`` in the Fly vault.
 #
-# Defaults to unset = original behavior unchanged.
+# 2. Phase 0 (fallback when flag is off, or as operator override):
+#    env-var MNEMON_STANDING_TIER_FILE → ~/.mnemon/standing.json IDs
+#    → cached rendered block at ~/.mnemon/standing-rendered.md.
+#    Useful when an operator wants to override the schema-backed set
+#    with a hand-picked ID list per session.
+#
+# The Phase 0 path is preserved as a fallback per the 2026-05-22
+# reframing — Phase 1 ships gated; the env-var path stays operational
+# either way. Defaults: STANDING_TIER_ENABLED False (config) + no env
+# override = nothing injected, original behavior unchanged.
+
+def _standing_tier_enabled() -> bool:
+    """Check whether the Phase 1 standing tier is active.
+
+    Truth sources, in order:
+      1. ``MNEMON_STANDING_TIER_ENABLED`` env var (operator override)
+      2. ``config.STANDING_TIER_ENABLED`` (default-off through soak)
+    """
+    env = os.environ.get("MNEMON_STANDING_TIER_ENABLED", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    from ..config import STANDING_TIER_ENABLED
+    return STANDING_TIER_ENABLED
+
+
+def _fetch_standing_via_mcp() -> str:
+    """Phase 1 path: single memory_list_standing MCP call.
+
+    Returns the rendered standing block (markdown bullets) or "" if
+    the call fails / returns empty. One round-trip vs Phase 0's
+    ~500ms × N sequential per-id fetches.
+    """
+    try:
+        from ._remote_client import call_tool_sync
+    except ImportError:
+        return ""
+
+    from ..safety import defang_control_markup
+
+    try:
+        raw, _elapsed = call_tool_sync("memory_list_standing", {}, timeout=5.0)
+        docs = json.loads(raw)
+    except Exception:
+        # Best-effort hook contract — failures here mean no standing
+        # block on this prompt, situational recall still runs.
+        return ""
+
+    if not isinstance(docs, list) or not docs:
+        return ""
+
+    lines: list[str] = []
+    for d in docs:
+        title = defang_control_markup(str(d.get("title", "")))
+        content = str(d.get("content", ""))
+        content_type = str(d.get("content_type", "note"))
+        doc_id = d.get("doc_id", "?")
+        snippet = defang_control_markup(content[:_SNIPPET_CHARS])
+        ellipsis = "..." if len(content) > _SNIPPET_CHARS else ""
+        lines.append(
+            f"- [{content_type}] **{title}** (id={doc_id})\n"
+            f"  {snippet}{ellipsis}"
+        )
+    return "\n\n".join(lines)
+
 
 def _load_standing_ids() -> list[int]:
     """Read standing-tier IDs from MNEMON_STANDING_TIER_FILE, if set."""
@@ -211,14 +272,26 @@ def build_context(raw_text: str, *, prefix: str = "") -> str:
     Returns an empty string when there's nothing worth injecting — no
     standing IDs AND no situational results (or unparseable JSON).
     """
-    # Standing context — Phase 0 opt-in. Computed first so the function
-    # can inject standing-only when no situational results exist.
+    # Standing context — Phase 1 (preferred) or Phase 0 (fallback).
+    # Computed first so the function can inject standing-only when no
+    # situational results exist.
     #
-    # Cache-first: ~/.mnemon/standing-rendered.md (microseconds). If
-    # the cache doesn't exist, fall back to per-prompt HTTP fetch
-    # (~500ms × N). build_standing_set.py writes both on every run.
-    standing_block = _read_rendered_cache()
+    # Phase 1: when STANDING_TIER_ENABLED, single memory_list_standing
+    # MCP call fetches the live schema-backed standing-tier set
+    # (one round-trip, cap-bounded payload). This is the canonical
+    # path once an operator has promoted memories via memory_promote.
+    #
+    # Phase 0 (fallback): env-var-driven ID list → cached rendered
+    # block. Useful as an operator override or before any memories
+    # have been promoted to the schema-backed tier.
+    standing_block = ""
+    if _standing_tier_enabled():
+        standing_block = _fetch_standing_via_mcp()
     if not standing_block:
+        # Phase 0 cache-first
+        standing_block = _read_rendered_cache()
+    if not standing_block:
+        # Phase 0 per-id HTTP fallback
         standing_ids = _load_standing_ids()
         standing_block = _fetch_standing_block(standing_ids) if standing_ids else ""
 

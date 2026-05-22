@@ -4,6 +4,93 @@
 
 ### Features
 
+- **Salience tier Phase 1 — first-class standing-context recall
+  (default-off, soak-gated).** Memories explicitly promoted via
+  `memory_promote` are injected into every `<mnemon-context>`
+  envelope on every prompt, regardless of query similarity. The cap
+  is the contract: default 15, hard ceiling 20. Plan:
+  `private/mnemon-salience-tier-plan-260521.md`.
+  - **Reframed validation gate (2026-05-22).** Phase 1 IS the
+    validation. Earlier plan called for a synthetic A/B against the
+    Phase 0 env-var-flagged form before committing to schema +
+    tooling. Reframed because the injection mechanism is identical
+    between the two forms — an A/B of the gated env-var path
+    carries no marginal information once Phase 1 ships gated behind
+    `STANDING_TIER_ENABLED=false`. Operator promotes ~5 career-
+    context memories, flips the flag, observes ≥1 week soak for
+    runway-style under-weighting recurrence vs absence. Per
+    `feedback_phase_gated_soak_consumer_must_be_ready`: ship the
+    substrate gated, flip activation at a separate milestone.
+  - **Schema migration**: `documents.tier TEXT NOT NULL DEFAULT
+    'situational'` via `_migrate_tier()`. Index `idx_documents_tier`
+    on live rows for the cap-count probe + search exclusion filter.
+    Additive + harmless if `STANDING_TIER_ENABLED` stays off.
+  - **`Store.promote_to_standing(id)`** + **`demote_to_situational(id)`**
+    + **`list_standing()`** + **`standing_tier_status()`**. Promote
+    raises **`StandingTierCapReached`** at the runtime cap,
+    **`StandingTierProvenanceRejected`** when source_client is in
+    `STANDING_TIER_BLOCKED_SOURCE_CLIENTS` (Layer 4 composition —
+    hook-sourced memories cannot be promoted; operator-explicit
+    gesture only), and **`StandingTierError`** on missing /
+    invalidated docs. Idempotent re-promote returns True; demote
+    of a situational doc returns False (no-op).
+  - **`Store.search_bm25` + `Store.search_vector`** gain
+    `include_standing: bool = False` keyword param. Standing-tier
+    docs excluded from ranked retrieval by default — they're
+    injected unconditionally already; ranking them too would
+    double-count and crowd the situational signal. Threaded through
+    `search.search()` so the higher-level entry respects the
+    invariant.
+  - **MCP tools**: `memory_promote(id)`, `memory_demote(id)`,
+    `memory_list_standing()` — both stdio (`server.py`) and
+    Streamable HTTP (`server_remote.py` reuses the same `mcp`
+    object). 14 → 17 registered tools.
+  - **CLI**: `mnemon standing list / promote <id> / demote <id>`.
+    `mnemon status` gains a `Standing tier: N/CAP` line.
+  - **`build_context` integration**: when `STANDING_TIER_ENABLED`
+    (config constant OR `MNEMON_STANDING_TIER_ENABLED` env override,
+    accepting `1/true/yes/on`), build_context calls
+    `memory_list_standing` via the remote client in a single
+    round-trip and renders the result as the "Standing context"
+    sub-section ahead of "Situational recall." Phase 0 env-var path
+    (`MNEMON_STANDING_TIER_FILE` → standing.json → standing-rendered.md
+    cache) is **preserved as fallback** so operators retain a
+    per-session override mechanism.
+  - **Composability invariants** (all preserved):
+    - Layer 0 (`is_well_shaped`) — capture rejection runs before
+      anything reaches the standing-tier promotion path
+    - Layer 1 envelope — standing block sits inside the same
+      `<mnemon-context>` data-marking + nonce as situational
+    - Layer 4 (`HOOK_SOURCE_CONFIDENCE_CEILING` + provenance) —
+      hook-sourced memories cannot be promoted; explicit
+      `StandingTierProvenanceRejected` rejection
+    - rc16 `source_key` upsert — unchanged; tier orthogonal
+    - Capture attention Phase A — `recurrence_count` accretes
+      against canonical situational memories; standing-tier
+      promotion is operator-gated on top of that signal
+  - **Soak gates** for flipping default-on: (a) ≥1 week with the
+    flag on; (b) observed reduction in runway-style under-weighting
+    recurrence on real career-strategy conversations; (c) zero
+    spurious-injection complaints from operator review of every
+    promoted memory.
+  - 22 new tests in `tests/test_standing_tier.py` covering: promote
+    success / cap-rejection (cap=2 in test, 3rd raises) /
+    hook-sourced rejection / invalidated rejection / missing rejection
+    / cap respects invalidated (freed slot reclaimable) / demote
+    round-trip / demote idempotent on situational / demote frees cap
+    slot / list_standing ordering + content / search excludes by
+    default / search includes when requested / build_context
+    flag-off no-fetch / flag-on memory_list_standing call /
+    env-var truthy value parsing. Suite 814 → 836 passing
+    (`test_server_remote.py` tool-count assertions bumped 14 → 17).
+
+### Schema
+
+- **`documents.tier TEXT NOT NULL DEFAULT 'situational'`** —
+  additive migration in `_migrate_tier()` after the existing
+  `_migrate_recurrence_count`. Index `idx_documents_tier` scoped to
+  live rows for cap-count + search-filter queries.
+
 - **Capture attention Phase A — recurrence-weighted memory convergence
   (default-off, soak-gated).** When a new save's content is semantically
   close to ≥2 prior memories spanning distinct sessions, capture

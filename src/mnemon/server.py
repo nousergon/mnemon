@@ -1,6 +1,7 @@
 """MCP server — exposes mnemon memory tools via stdio transport.
 
 Tools: memory_search, memory_get, memory_save, memory_pin, memory_forget,
+       memory_promote, memory_demote, memory_list_standing,
        memory_status, memory_sweep, memory_timeline, memory_related, memory_rebuild,
        memory_check_contradictions, profile_get, profile_update
 """
@@ -209,6 +210,90 @@ def memory_forget(id: int) -> str:
         if success
         else f"Memory #{id} not found or already forgotten."
     )
+
+
+@mcp.tool()
+def memory_promote(id: int) -> str:
+    """Promote a memory to the capped standing tier.
+
+    Standing-tier memories are injected into every recall context
+    regardless of query similarity — they condition reasoning rather
+    than answering it. Use sparingly: the cap is the contract
+    (default 15, hard ceiling 20). Past ~20, the tier stops being
+    salient and becomes noise again.
+
+    Hook-sourced memories (auto-mirror, session_extractor) cannot be
+    promoted — operator-explicit gesture only (Layer 4 composition).
+    """
+    from .store import (
+        StandingTierCapReached,
+        StandingTierError,
+        StandingTierProvenanceRejected,
+    )
+    store = _get_store()
+    try:
+        ok = store.promote_to_standing(id)
+        status = store.standing_tier_status()
+        return (
+            f"Promoted memory #{id} to standing tier "
+            f"({status['count']}/{status['cap']})."
+            if ok else f"Memory #{id} could not be promoted."
+        )
+    except StandingTierCapReached as e:
+        return f"Cap reached: {e}"
+    except StandingTierProvenanceRejected as e:
+        return f"Provenance rejected: {e}"
+    except StandingTierError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def memory_demote(id: int) -> str:
+    """Demote a standing-tier memory back to situational.
+
+    The opposite of memory_promote. Idempotent: demoting a memory
+    that isn't on the standing tier is a no-op (returns "not on
+    standing tier" rather than failing).
+    """
+    from .store import StandingTierError
+    store = _get_store()
+    try:
+        actually_demoted = store.demote_to_situational(id)
+        status = store.standing_tier_status()
+        if actually_demoted:
+            return (
+                f"Demoted memory #{id} to situational "
+                f"({status['count']}/{status['cap']} remain standing)."
+            )
+        return f"Memory #{id} was not on the standing tier."
+    except StandingTierError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def memory_list_standing() -> str:
+    """Return all live standing-tier memories as a JSON array.
+
+    Consumed by ``hooks/context_surfacing.py`` to render the always-on
+    standing block when ``STANDING_TIER_ENABLED`` is True. The same
+    list is shown by ``mnemon standing list`` on the CLI.
+
+    Each element: ``{doc_id, title, content, content_type, confidence,
+    created_at}``. Empty array when nothing has been promoted.
+    """
+    store = _get_store()
+    docs = store.list_standing()
+    return json.dumps([
+        {
+            "doc_id": d.id,
+            "title": d.title,
+            "content": d.content,
+            "content_type": d.content_type,
+            "confidence": d.confidence,
+            "created_at": d.created_at,
+        }
+        for d in docs
+    ])
 
 
 # ── Lifecycle Tools ──────────────────────────────────────────────────────────

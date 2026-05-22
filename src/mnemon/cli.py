@@ -48,10 +48,13 @@ def main() -> None:
         from .store import Store
         store = Store()
         stats = store.status()
+        standing = store.standing_tier_status()
         print(f"Vault: {stats['vault_path']}")
         print(f"Total memories: {stats['total_documents']}")
         print(f"Vectors: {stats['total_vectors']}")
         print(f"Pinned: {stats['pinned']}")
+        print(f"Standing tier: {standing['count']}/{standing['cap']} "
+              f"(hard ceiling {standing['hard_ceiling']})")
         print(f"Invalidated: {stats['invalidated']}")
         print("\nBy type:")
         for t in stats["by_type"]:
@@ -308,10 +311,98 @@ def main() -> None:
         finally:
             store.close()
 
+    elif command == "standing":
+        # Salience tier Phase 1 — operator-facing tier management.
+        # private/mnemon-salience-tier-plan-260521.md
+        subcommand = args[1] if len(args) > 1 else "list"
+        _handle_standing(subcommand, args[2:])
+
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         _print_usage()
         sys.exit(1)
+
+
+def _handle_standing(subcommand: str, rest: list[str]) -> None:
+    """Salience tier Phase 1 — list / promote / demote subcommands."""
+    from .store import (
+        Store,
+        StandingTierCapReached,
+        StandingTierError,
+        StandingTierProvenanceRejected,
+    )
+    store = Store()
+    try:
+        if subcommand == "list":
+            docs = store.list_standing()
+            status = store.standing_tier_status()
+            print(f"Standing tier: {status['count']}/{status['cap']} "
+                  f"(hard ceiling {status['hard_ceiling']})")
+            if not docs:
+                print("  (empty — promote memories via `mnemon standing promote <id>`)")
+                return
+            print()
+            for d in docs:
+                snippet = (d.content or "")[:120].replace("\n", " ")
+                ellipsis = "..." if len(d.content or "") > 120 else ""
+                print(f"  #{d.id:>5}  [{d.content_type}]  {d.title}")
+                print(f"         {snippet}{ellipsis}")
+                print()
+
+        elif subcommand == "promote":
+            if not rest:
+                print("Usage: mnemon standing promote <id>", file=sys.stderr)
+                sys.exit(2)
+            try:
+                doc_id = int(rest[0])
+            except ValueError:
+                print(f"Error: <id> must be an integer (got {rest[0]!r})",
+                      file=sys.stderr)
+                sys.exit(2)
+            try:
+                store.promote_to_standing(doc_id)
+                status = store.standing_tier_status()
+                print(f"Promoted memory #{doc_id} to standing tier "
+                      f"({status['count']}/{status['cap']}).")
+            except StandingTierCapReached as e:
+                print(f"Cap reached: {e}", file=sys.stderr)
+                sys.exit(1)
+            except StandingTierProvenanceRejected as e:
+                print(f"Provenance rejected: {e}", file=sys.stderr)
+                sys.exit(1)
+            except StandingTierError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+
+        elif subcommand == "demote":
+            if not rest:
+                print("Usage: mnemon standing demote <id>", file=sys.stderr)
+                sys.exit(2)
+            try:
+                doc_id = int(rest[0])
+            except ValueError:
+                print(f"Error: <id> must be an integer (got {rest[0]!r})",
+                      file=sys.stderr)
+                sys.exit(2)
+            try:
+                ok = store.demote_to_situational(doc_id)
+                status = store.standing_tier_status()
+                if ok:
+                    print(f"Demoted memory #{doc_id} to situational "
+                          f"({status['count']}/{status['cap']} remain standing).")
+                else:
+                    print(f"Memory #{doc_id} was not on the standing tier.")
+            except StandingTierError as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+
+        else:
+            print(f"Unknown subcommand: standing {subcommand}", file=sys.stderr)
+            print("Usage: mnemon standing list | promote <id> | demote <id>",
+                  file=sys.stderr)
+            sys.exit(2)
+    finally:
+        store.close()
 
 
 def _print_attention_status(store) -> None:
@@ -522,6 +613,15 @@ Local vault (development/server-side only):
   mnemon attention-status   Capture-attention soak monitor — boost rate,
                             recurrence distribution, top canonicals,
                             recent 'restates' relations
+
+Salience tier (standing-context recall):
+  mnemon standing list      Show all standing-tier memories + count vs cap
+  mnemon standing promote <id>   Promote memory to standing tier (capped)
+  mnemon standing demote <id>    Demote back to situational
+                            Standing memories are injected into every
+                            recall context regardless of query similarity.
+                            Cap is the contract — default 15, hard 20.
+                            Hook-sourced memories cannot be promoted.
   mnemon forget <id>        Soft-delete from local vault
   mnemon rebuild            Re-embed every document (run after a model
                             change, or to recover from skipped embeddings)

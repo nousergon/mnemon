@@ -207,9 +207,18 @@ def search(
     content_type: str | None = None,
     use_vector: bool = True,
     use_expansion: bool = False,
+    *,
+    include_standing: bool = False,
 ) -> list[ScoredResult]:
-    """Main search entry point. Hybrid BM25 + vector search with composite scoring."""
-    bm25_results = store.search_bm25(query, limit * 2)
+    """Main search entry point. Hybrid BM25 + vector search with composite scoring.
+
+    ``include_standing`` — when False (default), standing-tier memories
+    are excluded from ranked retrieval. They're injected unconditionally
+    into the <mnemon-context> envelope via ``Store.list_standing()`` —
+    including them here would double-count and crowd the situational
+    signal. Per salience-tier plan invariant 3.
+    """
+    bm25_results = store.search_bm25(query, limit * 2, include_standing=include_standing)
 
     # Skip expansion if BM25 already has a strong signal
     strong_bm25 = (
@@ -222,7 +231,7 @@ def search(
     expansion_results: list[SearchResult] = []
     if use_expansion and not strong_bm25:
         for eq in expand_query(query):
-            expansion_results.extend(store.search_bm25(eq, limit))
+            expansion_results.extend(store.search_bm25(eq, limit, include_standing=include_standing))
 
     # Vector search (optional, fails gracefully)
     vector_results: list[SearchResult] = []
@@ -230,7 +239,7 @@ def search(
         try:
             from .embedder import embed
             query_embedding = embed(f"query: {query}")
-            vector_results = store.search_vector(query_embedding, limit * 2)
+            vector_results = store.search_vector(query_embedding, limit * 2, include_standing=include_standing)
         except Exception as exc:
             # BM25 still serves results — but we need the cause visible so
             # "why is semantic search suddenly missing obvious matches?"
