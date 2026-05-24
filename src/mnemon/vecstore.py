@@ -86,6 +86,17 @@ class VecStore:
     def has(self, vec_id: str) -> bool:
         return vec_id in self._ids
 
+    def get(self, vec_id: str) -> np.ndarray | None:
+        """Return the vector for ``vec_id``, or ``None`` if not present.
+
+        Returns a defensive copy — callers can mutate freely without
+        affecting the in-memory store (matches ``export_all``'s contract).
+        """
+        if vec_id not in self._ids or self._vectors is None:
+            return None
+        idx = self._ids.index(vec_id)
+        return self._vectors[idx].copy()
+
     def delete(self, vec_id: str) -> bool:
         if vec_id not in self._ids:
             return False

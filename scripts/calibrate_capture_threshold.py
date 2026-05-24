@@ -43,13 +43,31 @@ THRESHOLDS = (0.70, 0.75, 0.80, 0.85, 0.90)
 
 
 def _load_pairs(db_path: Path, n: int) -> list[dict]:
-    """Sample N random memory pairs + their pairwise cosine similarity."""
+    """Sample N near-neighbor memory pairs from the threshold decision region.
+
+    The naive uniform-random sample over a 2510-memory vault produces pairs
+    whose cosines cluster at 0.1–0.4 (clearly-different topics) — operator
+    verdicts on those pairs carry no information about whether the
+    CAPTURE_ATTENTION_THRESHOLD cut should be 0.80 or 0.85. Every pair
+    a calibration operator tags should sit in the decision region (cosine
+    near the candidate thresholds).
+
+    Strategy: pick a random anchor, take its top non-self neighbor via
+    vector search, and accept the pair if cosine ≥ ``MIN_PAIR_COSINE``.
+    Repeat until ``n`` pairs are collected or the search budget is
+    exhausted. Bias toward higher-cosine pairs is the desired calibration
+    behavior — the threshold lives in the high-cosine tail.
+    """
     import numpy as np
 
     src = REPO_ROOT / "src"
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
     from mnemon.vecstore import VecStore
+
+    MIN_PAIR_COSINE = 0.55  # well below the lowest calibration threshold (0.70)
+                            # — preserves edge-negatives the threshold should NOT flag
+    MAX_ATTEMPTS = max(n * 20, 200)  # generous budget for the rejection loop
 
     vec_path = str(db_path).replace(".sqlite", ".vec")
     if not Path(vec_path + ".npz").exists():
@@ -72,31 +90,54 @@ def _load_pairs(db_path: Path, n: int) -> list[dict]:
            ORDER BY id"""
     ).fetchall()
 
-    # Build hash → embedding map (seq=0 only — that's the full-doc fragment)
-    embs: dict[str, "np.ndarray"] = {}
+    # Build hash → (id, title, embedding) map (seq=0 only — full-doc fragment).
+    by_hash: dict[str, dict] = {}
     for r in rows:
         vec_id = f"{r['hash']}_0"
         vec = vs.get(vec_id)
         if vec is not None:
-            embs[r["hash"]] = vec
+            by_hash[r["hash"]] = {"id": r["id"], "title": r["title"], "vec": vec}
 
-    eligible = [r for r in rows if r["hash"] in embs]
-    if len(eligible) < 2 * n:
+    if len(by_hash) < n + 5:
         sys.exit(
-            f"ERROR: only {len(eligible)} eligible memories in vault "
-            f"(need ≥{2 * n} for {n} pairs)"
+            f"ERROR: only {len(by_hash)} eligible memories in vault "
+            f"(need at least {n + 5} for {n} near-neighbor pairs)"
         )
 
     random.seed(42)
-    chosen = random.sample(eligible, 2 * n)
-    pairs = []
-    for i in range(0, 2 * n, 2):
-        a, b = chosen[i], chosen[i + 1]
-        va, vb = embs[a["hash"]], embs[b["hash"]]
-        cos = float(np.dot(va, vb) / (np.linalg.norm(va) * np.linalg.norm(vb)))
-        # Pull content snippets for review
-        ac = db.execute("SELECT doc FROM content WHERE hash = ?", (a["hash"],)).fetchone()
-        bc = db.execute("SELECT doc FROM content WHERE hash = ?", (b["hash"],)).fetchone()
+    candidate_hashes = list(by_hash.keys())
+    pairs: list[dict] = []
+    seen_pair_keys: set[tuple[str, str]] = set()
+    attempts = 0
+
+    while len(pairs) < n and attempts < MAX_ATTEMPTS:
+        attempts += 1
+        anchor_hash = random.choice(candidate_hashes)
+        anchor = by_hash[anchor_hash]
+        # k=3 → first hit is the anchor itself (cosine 1.0); take the next
+        # distinct hash. Occasionally a vault has duplicate-content fragments
+        # so we filter by hash, not just rank.
+        results = vs.search(anchor["vec"], k=3)
+        neighbor = None
+        for res in results:
+            res_hash = res["id"].rsplit("_", 1)[0]
+            if res_hash == anchor_hash or res_hash not in by_hash:
+                continue
+            neighbor = (res_hash, float(res["similarity"]))
+            break
+        if neighbor is None:
+            continue
+        nhash, cos = neighbor
+        if cos < MIN_PAIR_COSINE:
+            continue
+        pair_key = tuple(sorted([anchor_hash, nhash]))
+        if pair_key in seen_pair_keys:
+            continue
+        seen_pair_keys.add(pair_key)
+
+        a, b = by_hash[anchor_hash], by_hash[nhash]
+        ac = db.execute("SELECT doc FROM content WHERE hash = ?", (anchor_hash,)).fetchone()
+        bc = db.execute("SELECT doc FROM content WHERE hash = ?", (nhash,)).fetchone()
         pairs.append({
             "id_a": a["id"], "id_b": b["id"],
             "title_a": a["title"], "title_b": b["title"],
@@ -104,7 +145,17 @@ def _load_pairs(db_path: Path, n: int) -> list[dict]:
             "snippet_b": (bc["doc"] if bc else "")[:200],
             "cosine": cos,
         })
+
     db.close()
+    if len(pairs) < n:
+        print(
+            f"WARNING: only {len(pairs)} pairs found above cosine "
+            f"{MIN_PAIR_COSINE} in {attempts} attempts — vault may lack "
+            f"semantic clusters. Proceeding with what we have."
+        )
+    # Sort by cosine descending so the operator tags high-confidence
+    # near-dupes first (catches the calibration intuition early).
+    pairs.sort(key=lambda p: -p["cosine"])
     return pairs
 
 

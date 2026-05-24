@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.7.0rc4] - 2026-05-24
+
+### Capture-attention Phase A — activation infrastructure
+
+- **New `MNEMON_CAPTURE_ATTENTION_ENABLED` env-var override** on the
+  Phase A feature flag. Mirrors the standing-tier pattern
+  (`MNEMON_STANDING_TIER_ENABLED`) — operators can flip activation on
+  Fly via `flyctl secrets set` without a code change + redeploy, and
+  the next save picks it up without restarting the server. Accepts
+  `1`/`true`/`yes`/`on` (truthy) or `0`/`false`/`no`/`off` (falsy);
+  unset / unrecognized falls back to `config.CAPTURE_ATTENTION_ENABLED`
+  (still default `False` through soak). New
+  `store._capture_attention_enabled()` helper called at request time
+  from `Store.save` and `cli attention-status`. 5 new tests.
+- **`mnemon attention-status` now reports the effective flag value**
+  with the env-var override applied — a Fly secret flip shows up here
+  immediately instead of misleading the operator with the unchanged
+  config default.
+
+### Calibration fixture privacy hardening
+
+- **`tests/fixtures/capture_attention_pairs.json` is now gitignored.**
+  PR #153 shipped this path tracked with a placeholder schema —
+  intended as a seed, but every operator calibration run overwrites
+  it with real vault titles + snippets (personal context, in-flight
+  work, etc.) that must not land in a public-repo commit. The
+  placeholder schema moves to
+  `tests/fixtures/capture_attention_pairs.example.json` (tracked) so
+  future contributors still see the format; the operator output stays
+  local-only.
+
+### Calibration script fixes (`scripts/calibrate_capture_threshold.py`)
+
+- **`VecStore.get(vec_id) -> np.ndarray | None`** added — mirrors the
+  `has` / `delete` single-id shape; returns a defensive copy. The
+  calibration script's `vs.get(vec_id)` call site failed on first
+  invocation because the method did not exist. 3 new tests (returns
+  vector, missing → None, defensive-copy invariant).
+- **Near-neighbor pair sampling** replaces uniform-random. The previous
+  random sample across a 2510-memory vault produced pair cosines
+  clustered at 0.1-0.4 (clearly-different topics) — operator verdicts
+  carried no information about whether the threshold cut should be
+  0.80 or 0.85. New sampler picks anchors, takes each one's top
+  non-self neighbor above cosine 0.55 (well below the lowest
+  calibration threshold so edge-negatives survive), and sorts
+  descending so the operator tags high-confidence near-dupes first.
+  Verified against the 2026-05-24 prod snapshot: 20-pair sample spans
+  cosine 0.751-0.999, entirely in the calibration-relevant range.
+  Calibration on that snapshot recommended
+  `CAPTURE_ATTENTION_THRESHOLD = 0.85` — matches the existing default,
+  so no config change needed.
+
 ## [0.7.0rc3] - 2026-05-22
 
 ### Test coverage

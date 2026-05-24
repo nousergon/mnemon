@@ -21,7 +21,11 @@ import numpy as np
 import pytest
 
 from mnemon import config
-from mnemon.store import CaptureAttentionUnavailableError, Store
+from mnemon.store import (
+    CaptureAttentionUnavailableError,
+    Store,
+    _capture_attention_enabled,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────
@@ -44,12 +48,13 @@ def store():
 
 @pytest.fixture
 def attention_on(monkeypatch):
-    """Flip the feature flag on for the test scope."""
+    """Flip the feature flag on for the test scope.
+
+    The helper ``_capture_attention_enabled`` re-reads ``config`` at
+    every call, so a single monkeypatch on the config constant covers
+    every call site (Store.save and CLI status alike).
+    """
     monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", True)
-    # store.py read the constant via module import — patch the
-    # in-module reference too
-    import mnemon.store
-    monkeypatch.setattr(mnemon.store, "CAPTURE_ATTENTION_ENABLED", True)
 
 
 def _fake_embed_constant(_text: str) -> np.ndarray:
@@ -87,6 +92,48 @@ def _set_created_at(store, doc_id: int, days_ago: int) -> None:
         (when, doc_id),
     )
     store.db.commit()
+
+
+# ── Feature flag resolution (env-var override) ────────────────────
+
+
+class TestFeatureFlagResolution:
+    """``MNEMON_CAPTURE_ATTENTION_ENABLED`` env var must take precedence
+    over the config default — mirrors ``MNEMON_STANDING_TIER_ENABLED``
+    pattern so operators can flip activation on Fly via ``flyctl secrets
+    set`` without a code change + redeploy.
+    """
+
+    def test_defaults_to_config_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("MNEMON_CAPTURE_ATTENTION_ENABLED", raising=False)
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", False)
+        assert _capture_attention_enabled() is False
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", True)
+        assert _capture_attention_enabled() is True
+
+    @pytest.mark.parametrize("truthy", ["1", "true", "True", "TRUE", "yes", "on"])
+    def test_env_truthy_overrides_config_false(self, monkeypatch, truthy):
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", False)
+        monkeypatch.setenv("MNEMON_CAPTURE_ATTENTION_ENABLED", truthy)
+        assert _capture_attention_enabled() is True
+
+    @pytest.mark.parametrize("falsy", ["0", "false", "False", "FALSE", "no", "off"])
+    def test_env_falsy_overrides_config_true(self, monkeypatch, falsy):
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", True)
+        monkeypatch.setenv("MNEMON_CAPTURE_ATTENTION_ENABLED", falsy)
+        assert _capture_attention_enabled() is False
+
+    def test_env_unrecognized_falls_back_to_config(self, monkeypatch):
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", True)
+        monkeypatch.setenv("MNEMON_CAPTURE_ATTENTION_ENABLED", "maybe")
+        assert _capture_attention_enabled() is True
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", False)
+        assert _capture_attention_enabled() is False
+
+    def test_env_whitespace_stripped(self, monkeypatch):
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", False)
+        monkeypatch.setenv("MNEMON_CAPTURE_ATTENTION_ENABLED", "  true  ")
+        assert _capture_attention_enabled() is True
 
 
 # ── Schema migration ──────────────────────────────────────────────

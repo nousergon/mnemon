@@ -8,6 +8,7 @@ Vectors stored in a companion .npz file (brute-force cosine search).
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import time
 import uuid
@@ -19,7 +20,6 @@ import numpy as np
 
 from .config import (
     CAPTURE_ATTENTION_BOOST,
-    CAPTURE_ATTENTION_ENABLED,
     CAPTURE_ATTENTION_MIN_HITS,
     CAPTURE_ATTENTION_REQUIRE_DISTINCT_SESSIONS,
     CAPTURE_ATTENTION_THRESHOLD,
@@ -37,6 +37,29 @@ from .config import (
     vault_path,
 )
 from .vecstore import VecStore
+
+
+def _capture_attention_enabled() -> bool:
+    """Resolve the capture-attention feature flag (env-var override).
+
+    Truth sources, in order:
+      1. ``MNEMON_CAPTURE_ATTENTION_ENABLED`` env var (operator override) —
+         lets the operator flip activation on Fly via ``flyctl secrets
+         set`` without a code change + redeploy.
+      2. ``config.CAPTURE_ATTENTION_ENABLED`` (default-off through soak).
+
+    Mirrors the standing-tier helper in
+    ``hooks/context_surfacing.py:_standing_tier_enabled``. Called at
+    request time (in ``Store.save``), so secret flips take effect on
+    the next save without restarting the server.
+    """
+    env = os.environ.get("MNEMON_CAPTURE_ATTENTION_ENABLED", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    from .config import CAPTURE_ATTENTION_ENABLED
+    return CAPTURE_ATTENTION_ENABLED
 
 
 class CaptureAttentionUnavailableError(RuntimeError):
@@ -459,7 +482,7 @@ class Store:
         # secondary observability hung off a primary path (the save
         # itself) that survives independently. Mirrors the existing
         # embed_document() WARN pattern in server.py:memory_save.
-        if CAPTURE_ATTENTION_ENABLED and correction_of is None:
+        if _capture_attention_enabled() and correction_of is None:
             try:
                 self.apply_capture_attention(
                     new_doc_id=doc_id, content=content,

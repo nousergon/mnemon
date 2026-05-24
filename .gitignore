@@ -46,3 +46,8 @@ flow_doctor.db
 # Fly deployment config — user-specific, must not be committed.
 # Template lives at fly.toml.example; copy + edit for your own deploy.
 fly.toml
+
+# Capture-attention calibration output — contains operator vault content
+# (real memory titles + snippets), must not be committed. Schema template
+# lives at tests/fixtures/capture_attention_pairs.example.json.
+tests/fixtures/capture_attention_pairs.json
