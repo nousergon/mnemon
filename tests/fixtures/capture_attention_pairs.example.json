@@ -1,0 +1,13 @@
+[
+  {
+    "_comment": "Schema template for capture-attention threshold calibration. The real fixture at tests/fixtures/capture_attention_pairs.json is gitignored because it contains real operator vault snippets (titles + content) — never commit operator output. Generate yours by running `python scripts/calibrate_capture_threshold.py --db <vault.sqlite>` against a fresh snapshot. Schema: each entry needs cosine + verdict; recommend() tolerates 'unclear' verdicts.",
+    "id_a": 0,
+    "id_b": 0,
+    "title_a": "placeholder",
+    "title_b": "placeholder",
+    "snippet_a": "synthetic seed — operator-tagged output is gitignored",
+    "snippet_b": "synthetic seed — operator-tagged output is gitignored",
+    "cosine": 0.0,
+    "verdict": "unclear"
+  }
+]

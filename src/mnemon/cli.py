@@ -413,10 +413,10 @@ def _print_attention_status(store) -> None:
       2. precision floor (operator-judged via --review, not auto-checked)
     """
     from .config import (
-        CAPTURE_ATTENTION_ENABLED,
         CAPTURE_ATTENTION_THRESHOLD,
         CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX,
     )
+    from .store import _capture_attention_enabled
 
     # Boost rate over 7d (boosts = restates relations created)
     boosts_7d = store.db.execute(
@@ -431,8 +431,10 @@ def _print_attention_status(store) -> None:
     rate = (boosts_7d / saves_7d) if saves_7d else 0.0
     rate_ok = "✓" if rate <= CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX else "⚠"
 
+    # Effective flag value reflects MNEMON_CAPTURE_ATTENTION_ENABLED env-var
+    # override; a Fly secret flip shows up here without restarting the server.
     print(f"Capture attention — soak status")
-    print(f"  Flag enabled       : {CAPTURE_ATTENTION_ENABLED}")
+    print(f"  Flag enabled       : {_capture_attention_enabled()}")
     print(f"  Threshold (cosine) : {CAPTURE_ATTENTION_THRESHOLD}")
     print(f"  Boost-rate 7d      : {boosts_7d} / {saves_7d} = "
           f"{rate:.3f}  {rate_ok} (ceiling {CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX})")
