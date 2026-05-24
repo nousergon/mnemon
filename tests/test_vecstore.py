@@ -39,6 +39,24 @@ class TestVecStore:
         assert vecstore.size() == 0
         assert not vecstore.delete("a_0")
 
+    def test_get_returns_vector(self, vecstore):
+        vecstore.set("a_0", np.array([1, 0, 0, 0], dtype=np.float32))
+        vec = vecstore.get("a_0")
+        assert vec is not None
+        np.testing.assert_array_equal(vec, np.array([1, 0, 0, 0], dtype=np.float32))
+
+    def test_get_missing_returns_none(self, vecstore):
+        assert vecstore.get("nonexistent") is None
+        vecstore.set("a_0", np.array([1, 0, 0, 0], dtype=np.float32))
+        assert vecstore.get("b_0") is None
+
+    def test_get_returns_defensive_copy(self, vecstore):
+        vecstore.set("a_0", np.array([1, 0, 0, 0], dtype=np.float32))
+        vec = vecstore.get("a_0")
+        vec[0] = 99.0
+        vec2 = vecstore.get("a_0")
+        assert vec2[0] == 1.0
+
     def test_search_cosine(self, vecstore):
         vecstore.set("a_0", np.array([1, 0, 0, 0], dtype=np.float32))
         vecstore.set("b_0", np.array([0, 1, 0, 0], dtype=np.float32))
