@@ -445,6 +445,31 @@ test_cleanup_destroy_retries_on_failure() {
         || { echo "    cleanup must surface persistent-failure path" >&2; return 1; }
 }
 
+test_publish_pypi_poll_uses_json_api_not_pip_index() {
+    # 2026-05-27: rc6 uploaded cleanly to PyPI but cmd_publish's
+    # "Wait for PyPI to surface" loop died after 5 min because it was
+    # polling via 'pip index versions mnemon-memory' — that command
+    # filters out pre-releases by default + has known cache flakiness
+    # (the existing latest_pypi_version helper docstring calls it out
+    # explicitly). Fix routes the polling check through
+    # is_pypi_published which hits the JSON API directly.
+    local script_path
+    script_path="$REPO_ROOT/scripts/promote_stable.sh"
+
+    # No runtime invocation of `pip index versions` should remain.
+    # Match only the executable-call form ("$MNEMON_VENV_BIN/pip" index
+    # versions ...) so docstring/comment mentions explaining WHY we
+    # avoid the command don't trip the check.
+    if grep -qE '"\$MNEMON_VENV_BIN/pip"[[:space:]]+index[[:space:]]+versions' "$script_path"; then
+        echo "    found \"\$MNEMON_VENV_BIN/pip\" index versions invocation — must use is_pypi_published" >&2
+        return 1
+    fi
+    # Wait-for-pypi block must call is_pypi_published.
+    grep -A6 'Wait for PyPI to surface' "$script_path" \
+        | grep -q 'is_pypi_published' \
+        || { echo "    cmd_publish wait-for-pypi must call is_pypi_published" >&2; return 1; }
+}
+
 test_step2_seed_contents_are_unique() {
     # mnemon's store.save() does content-hash dedup (rc15+). The original
     # runbook passed the same content to all three Step-2 saves, which
@@ -497,6 +522,7 @@ run_test test_awk_handles_zero_count
 run_test test_awk_returns_empty_when_field_missing
 run_test test_sourcing_does_not_dispatch
 run_test test_step2_seed_contents_are_unique
+run_test test_publish_pypi_poll_uses_json_api_not_pip_index
 run_test test_step2_removes_remote_url_before_seed
 run_test test_mnemon_venv_bin_env_var_is_honored
 run_test test_cleanup_destroy_retries_on_failure
