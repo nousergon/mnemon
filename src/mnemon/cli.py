@@ -186,6 +186,41 @@ def main() -> None:
             sys.exit(1)
         store.close()
 
+    elif command == "sweep-contradictions":
+        # Retroactive contradiction sweep — walks the vault, classifies
+        # pair-wise NLI on cosine-overlapping candidates, applies decays +
+        # relations. Closes the gap for memories that landed before
+        # check_contradictions was wired in or that slipped past the
+        # save-time vector window.
+        from .store import Store
+        from .contradiction import sweep_contradictions
+        max_pairs = 50
+        dry_run = "--dry-run" in args[1:]
+        for i, a in enumerate(args[1:], start=1):
+            if a == "--max-pairs" and i + 1 < len(args):
+                try:
+                    max_pairs = int(args[i + 1])
+                except ValueError:
+                    print("Error: --max-pairs must be an integer", file=sys.stderr)
+                    sys.exit(2)
+        store = Store()
+        try:
+            result = sweep_contradictions(
+                store, max_pairs=max_pairs, dry_run=dry_run,
+            )
+        finally:
+            store.close()
+        print(f"Sweep complete{' (dry-run)' if dry_run else ''}:")
+        print(f"  pairs examined  : {result['pairs_examined']}")
+        print(f"  pairs classified: {result['pairs_classified']}")
+        print(f"  pairs skipped   : {result['pairs_skipped']}  (already had classification relation)")
+        print(f"  decayed         : {result['decayed']}  (update + contradiction outcomes)")
+        print(f"  relations added : {result['relations_added']}")
+        if result["nli_unavailable"]:
+            print("\n  ⚠ NLI unavailable — sweep aborted early. See server logs.",
+                  file=sys.stderr)
+            sys.exit(1)
+
     elif command == "sync":
         subcommand = args[1] if len(args) > 1 else ""
         if subcommand == "push":
@@ -869,6 +904,11 @@ Local vault (development/server-side only):
   mnemon salience-report    Phase 2 promotion-signal candidates — rank
                             situational memories by correction_count +
                             contradiction_win_count [--limit N]
+  mnemon sweep-contradictions
+                            Retroactive NLI sweep — classify cosine-
+                            overlapping memory pairs that bypassed the
+                            save-time check; non-destructive (decay +
+                            relations only). [--max-pairs N] [--dry-run]
 
 Salience tier (standing-context recall):
   mnemon standing list      Show all standing-tier memories + count vs cap
