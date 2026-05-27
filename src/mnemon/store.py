@@ -758,6 +758,28 @@ class Store:
         vecstore is unreachable. Callers in best-effort paths
         (session_extractor, auto_mirror) must catch + log + continue.
         """
+        # Hook-source provenance gate. Hook-sourced saves are best-effort
+        # transcripts of a chat session, not deliberate operator
+        # assertions — already capped at HOOK_SOURCE_CONFIDENCE_CEILING
+        # and demoted by PROVENANCE_DEMOTION_FACTOR at recall. Letting
+        # them drive capture-attention means "the hook-extractor recorded
+        # N echoes of session noise; boost the first echo," which is the
+        # inverse of the mechanism's intent (consolidate operator signal).
+        # Composes with Layer 4 (PR #126) + STANDING_TIER_BLOCKED_SOURCE_CLIENTS:
+        # the same provenance set that can't be promoted to standing tier
+        # also can't drive an auto-boost.
+        #
+        # Surfaced 2026-05-27 — Phase A soak boost-rate hit 232/325 = 0.714
+        # (ceiling 0.25); canonicals were "Session: pr merged, continue"
+        # handoff fragments. Skipping here brings firing back to the
+        # operator-authored signal the mechanism was designed for.
+        if source_client in HOOK_SOURCE_CLIENTS:
+            return {
+                "fired": False, "canonical_id": None,
+                "neighbors": [], "boost_applied": 0.0,
+                "reason": "hook_sourced_save",
+            }
+
         # Lazy import — keep store.py module-load cheap; FastEmbed's
         # ONNX model only materializes on first embed() call anyway.
         try:
