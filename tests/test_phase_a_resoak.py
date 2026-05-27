@@ -63,7 +63,14 @@ class TestHelp:
             capture_output=True, text=True,
             cwd=str(REPO_ROOT), env=_env_with_venv_bin(),
         )
-        for sub in ("preflight", "activate", "status", "close", "deactivate"):
+        for sub in (
+            "preflight",
+            "activate",
+            "release-and-activate",
+            "status",
+            "close",
+            "deactivate",
+        ):
             assert sub in result.stdout, f"help text missing {sub}"
 
 
