@@ -305,11 +305,14 @@ def main() -> None:
         # Capture attention Phase A observability — soak monitor.
         # private/mnemon-capture-attention-plan-260522.md
         from .store import Store
+        strict = "--strict" in args[1:]
         store = Store()
         try:
-            _print_attention_status(store)
+            rate, ceiling = _print_attention_status(store)
         finally:
             store.close()
+        if strict and rate > ceiling:
+            sys.exit(1)
 
     elif command == "standing":
         # Salience tier Phase 1 — operator-facing tier management.
@@ -405,12 +408,15 @@ def _handle_standing(subcommand: str, rest: list[str]) -> None:
         store.close()
 
 
-def _print_attention_status(store) -> None:
+def _print_attention_status(store) -> tuple[float, float]:
     """Print capture-attention soak metrics for the operator.
 
     Surfaces the two acceptance criteria from the plan-doc:
       1. boost_rate = (boosts in last 7d) / (saves in last 7d) ≤ 0.25
       2. precision floor (operator-judged via --review, not auto-checked)
+
+    Returns ``(boost_rate, ceiling)`` so a caller can drive --strict
+    exit codes without re-running the SQL.
     """
     from .config import (
         CAPTURE_ATTENTION_THRESHOLD,
@@ -479,6 +485,8 @@ def _print_attention_status(store) -> None:
             print(f"    {r['created_at']}  "
                   f"#{r['source_id']:>5} → #{r['target_id']:>5}  "
                   f"w={r['weight']:.3f}")
+
+    return rate, CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX
 
 
 def _parse_upgrade_args(args: list[str]) -> dict:
@@ -615,6 +623,8 @@ Local vault (development/server-side only):
   mnemon attention-status   Capture-attention soak monitor — boost rate,
                             recurrence distribution, top canonicals,
                             recent 'restates' relations
+                            [--strict: exit 1 if boost-rate > ceiling,
+                            for periodic health-check wiring]
 
 Salience tier (standing-context recall):
   mnemon standing list      Show all standing-tier memories + count vs cap

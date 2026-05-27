@@ -20,6 +20,16 @@ RUN python -c "from fastembed import TextEmbedding; TextEmbedding(model_name='BA
 # Without this, the first contradiction check pays a 5-15 second
 # download cost AND risks Anthropic's MCP-proxy timeout on the call.
 # Model lives in /app/.cache/huggingface (default HF cache root).
+#
+# NLI cache resolution (audit 2026-05-27): nli.py:_model_dir() reads
+# MNEMON_NLI_MODEL_DIR with a default of ~/.cache/huggingface/hub.
+# HF_HOME=/app/.cache/huggingface (set here) is the huggingface_hub
+# library's own cache-root convention; with HOME=/root the two paths
+# coincide at /app/.cache/huggingface/hub via hf_hub's internal
+# resolution. If a future operator needs to override the location,
+# set BOTH env vars (HF_HOME for the hf_hub download path AND
+# MNEMON_NLI_MODEL_DIR for the runtime load path) to avoid a
+# silent-divergence trap.
 ENV HF_HOME=/app/.cache/huggingface
 RUN python -c "from huggingface_hub import hf_hub_download; \
     hf_hub_download(repo_id='cross-encoder/nli-deberta-v3-xsmall', filename='onnx/model_qint8_avx512.onnx'); \

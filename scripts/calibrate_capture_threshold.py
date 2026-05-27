@@ -37,6 +37,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "capture_attention_pairs.json"
+FIXTURE_EXAMPLE_PATH = REPO_ROOT / "tests" / "fixtures" / "capture_attention_pairs.example.json"
 DEFAULT_DB = "/tmp/mnemon-prod-snap.sqlite"
 DEFAULT_N = 20
 THRESHOLDS = (0.70, 0.75, 0.80, 0.85, 0.90)
@@ -242,9 +243,22 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.use_fixture:
-        if not FIXTURE_PATH.exists():
-            sys.exit(f"no fixture at {FIXTURE_PATH} — drop --use-fixture")
-        tagged = json.loads(FIXTURE_PATH.read_text())
+        # Operator output fixture is gitignored (see 2026-05-24 privacy
+        # hardening — real titles + snippets must not land in the repo).
+        # Fall back to the tracked .example.json template so a fresh-clone
+        # run can still exercise the recompute path. P3 follow-up filed
+        # 2026-05-24, closed 2026-05-27.
+        if FIXTURE_PATH.exists():
+            tagged = json.loads(FIXTURE_PATH.read_text())
+        elif FIXTURE_EXAMPLE_PATH.exists():
+            print(f"# {FIXTURE_PATH.name} not present — falling back to "
+                  f"{FIXTURE_EXAMPLE_PATH.name}", file=sys.stderr)
+            tagged = json.loads(FIXTURE_EXAMPLE_PATH.read_text())
+        else:
+            sys.exit(
+                f"no fixture at {FIXTURE_PATH} or {FIXTURE_EXAMPLE_PATH} "
+                "— drop --use-fixture"
+            )
     else:
         db_path = Path(args.db)
         if not db_path.exists():

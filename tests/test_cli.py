@@ -611,3 +611,47 @@ class TestUnknownCommand:
         combined = capsys.readouterr()
         assert "Unknown command: badcmd" in combined.err
         assert "mnemon setup" in combined.out
+
+
+class TestAttentionStatusStrict:
+    """Regression: --strict exits 1 when boost-rate > ceiling so the
+    soak gate can drive periodic health checks. Without this, a soak
+    regression like 2026-05-27 (boost-rate hit 0.714) requires manual
+    eyeball during a "close the soak" prompt to surface."""
+
+    def test_default_exits_zero_even_when_over_ceiling(self):
+        with patch("mnemon.cli._print_attention_status") as mock_status:
+            mock_status.return_value = (0.714, 0.25)
+            with patch("mnemon.store.Store") as mock_store_cls:
+                mock_store_cls.return_value = MagicMock()
+                with patch("sys.argv", ["mnemon", "attention-status"]):
+                    # Default mode = print + return 0 even when over ceiling.
+                    main()
+
+    def test_strict_exits_one_when_over_ceiling(self):
+        with patch("mnemon.cli._print_attention_status") as mock_status:
+            mock_status.return_value = (0.714, 0.25)
+            with patch("mnemon.store.Store") as mock_store_cls:
+                mock_store_cls.return_value = MagicMock()
+                with patch("sys.argv", ["mnemon", "attention-status", "--strict"]):
+                    with pytest.raises(SystemExit) as exc_info:
+                        main()
+        assert exc_info.value.code == 1
+
+    def test_strict_exits_zero_when_under_ceiling(self):
+        with patch("mnemon.cli._print_attention_status") as mock_status:
+            mock_status.return_value = (0.12, 0.25)
+            with patch("mnemon.store.Store") as mock_store_cls:
+                mock_store_cls.return_value = MagicMock()
+                with patch("sys.argv", ["mnemon", "attention-status", "--strict"]):
+                    # Under-ceiling rate → exits 0 (no SystemExit raised).
+                    main()
+
+    def test_strict_exits_zero_at_exact_ceiling(self):
+        """Boundary: rate == ceiling is still passing (≤, not <)."""
+        with patch("mnemon.cli._print_attention_status") as mock_status:
+            mock_status.return_value = (0.25, 0.25)
+            with patch("mnemon.store.Store") as mock_store_cls:
+                mock_store_cls.return_value = MagicMock()
+                with patch("sys.argv", ["mnemon", "attention-status", "--strict"]):
+                    main()

@@ -472,6 +472,40 @@ class TestBuildContext:
         assert "[truncated]" not in ctx
 
 
+class TestBoldBalance:
+    """Regression for the </n> rendering artifact: 300-char truncation
+    can land mid-**bold**, leaving a dangling ** that downstream
+    markdown handling translates to garbage. _balance_bold strips the
+    last unmatched ** when the count is odd."""
+
+    def test_balanced_pattern_unchanged(self):
+        from mnemon.hooks.context_surfacing import _balance_bold
+
+        assert _balance_bold("foo **bar** baz") == "foo **bar** baz"
+
+    def test_no_emphasis_unchanged(self):
+        from mnemon.hooks.context_surfacing import _balance_bold
+
+        assert _balance_bold("plain content with no markdown") == \
+            "plain content with no markdown"
+
+    def test_single_dangling_open_stripped(self):
+        from mnemon.hooks.context_surfacing import _balance_bold
+
+        assert _balance_bold("foo **bar") == "foo"
+
+    def test_mid_truncation_with_prior_balanced_pair(self):
+        from mnemon.hooks.context_surfacing import _balance_bold
+
+        # "foo **bar** baz **q" — first pair balanced, trailing ** dangles.
+        assert _balance_bold("foo **bar** baz **q") == "foo **bar** baz"
+
+    def test_truncation_trailing_whitespace_stripped(self):
+        from mnemon.hooks.context_surfacing import _balance_bold
+
+        assert _balance_bold("foo **") == "foo"
+
+
 # ── context_surfacing.py: Layer 1 spotlight envelope ──────────────────────────
 
 

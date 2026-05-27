@@ -64,7 +64,15 @@ _init_lock: Any = None
 def _model_dir() -> Path:
     """Where downloaded NLI files live. Honors ``MNEMON_NLI_MODEL_DIR``
     so an operator can point at a baked-in location (e.g., the Fly
-    image's ``/app/.cache/huggingface``)."""
+    image's ``/app/.cache/huggingface``).
+
+    Cache resolution interacts with ``HF_HOME`` (set on Fly to
+    ``/app/.cache/huggingface``): the huggingface_hub library writes
+    its downloads under ``{HF_HOME}/hub``; this function's default
+    resolves to ``$HOME/.cache/huggingface/hub`` which coincides
+    with the HF_HOME path when HOME=/root. Override both env vars
+    together if you need to point at a non-default location — see
+    the audit comment in ``Dockerfile`` (2026-05-27)."""
     return Path(os.environ.get(
         "MNEMON_NLI_MODEL_DIR",
         Path.home() / ".cache" / "huggingface" / "hub",
