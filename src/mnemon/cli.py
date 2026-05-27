@@ -186,6 +186,47 @@ def main() -> None:
             sys.exit(1)
         store.close()
 
+    elif command == "consolidate":
+        # Capture-attention Phase C — operator-reviewed cluster
+        # consolidation. Default mode LISTS clusters (read-only).
+        # --apply <cluster-idx> keeps the canonical (first member,
+        # natural canonical-pick order = highest recurrence then
+        # confidence) + supersedes the rest via 'supersedes' relations
+        # + forget. Operator-review only per the salience-tier plan
+        # invariant — no auto-apply.
+        from .store import Store
+        apply_idx: int | None = None
+        recent_days = 30
+        threshold = 0.85
+        for i, a in enumerate(args[1:], start=1):
+            if a == "--apply" and i + 1 < len(args):
+                try:
+                    apply_idx = int(args[i + 1])
+                except ValueError:
+                    print("Error: --apply must be an integer cluster index", file=sys.stderr)
+                    sys.exit(2)
+            elif a == "--recent-days" and i + 1 < len(args):
+                try:
+                    recent_days = int(args[i + 1])
+                except ValueError:
+                    print("Error: --recent-days must be an integer", file=sys.stderr)
+                    sys.exit(2)
+            elif a == "--threshold" and i + 1 < len(args):
+                try:
+                    threshold = float(args[i + 1])
+                except ValueError:
+                    print("Error: --threshold must be a float", file=sys.stderr)
+                    sys.exit(2)
+        store = Store()
+        try:
+            clusters = store.find_clusters(
+                similarity_threshold=threshold,
+                recent_days=recent_days,
+            )
+            _print_consolidate(store, clusters, apply_idx=apply_idx)
+        finally:
+            store.close()
+
     elif command == "sweep-contradictions":
         # Retroactive contradiction sweep — walks the vault, classifies
         # pair-wise NLI on cosine-overlapping candidates, applies decays +
@@ -627,6 +668,88 @@ def _handle_standing(subcommand: str, rest: list[str]) -> None:
         store.close()
 
 
+def _print_consolidate(
+    store, clusters: list, *, apply_idx: int | None,
+) -> None:
+    """Render the Phase C consolidation surface.
+
+    Default mode: list clusters by index with member details + the
+    natural canonical pick (first member, highest recurrence+confidence).
+    --apply mode: invoke ``store.consolidate_cluster`` on the named
+    index. ROADMAP invariant says "operator-review only, no auto-apply"
+    — the --apply gate is the operator's explicit gesture.
+    """
+    if not clusters:
+        print("No near-duplicate clusters found in the recent window.")
+        print(
+            "  Try widening --recent-days (default 30) or lowering "
+            "--threshold (default 0.85)."
+        )
+        return
+
+    if apply_idx is None:
+        print(f"Found {len(clusters)} near-duplicate cluster(s) in the recent window.")
+        print(
+            "  Default canonical = first member (highest recurrence_count, "
+            "then highest confidence)."
+        )
+        print(
+            "  Apply with: `mnemon consolidate --apply <cluster-idx>` "
+            "(supersedes the non-canonical members)\n"
+        )
+        for i, cluster in enumerate(clusters):
+            canonical = cluster[0]
+            print(f"  ── cluster #{i} ({len(cluster)} members) ──")
+            for j, m in enumerate(cluster):
+                marker = "★ canonical" if j == 0 else f"  → supersede"
+                title = (m["title"] or "")[:55]
+                print(
+                    f"    {marker:<14}  #{m['id']:>5}  "
+                    f"[{m['content_type']:<10}]  "
+                    f"rec={m['recurrence_count']}  "
+                    f"conf={m['confidence']:.2f}  {title}"
+                )
+            _ = canonical  # readability anchor
+            print()
+        return
+
+    # --apply mode
+    if apply_idx < 0 or apply_idx >= len(clusters):
+        print(
+            f"Error: cluster #{apply_idx} out of range (have "
+            f"{len(clusters)} cluster(s) 0-{len(clusters) - 1})",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    target = clusters[apply_idx]
+    cluster_ids = [m["id"] for m in target]
+    canonical = target[0]
+    victims = target[1:]
+    print(f"Consolidating cluster #{apply_idx}:")
+    print(f"  canonical:     #{canonical['id']}  {canonical['title']}")
+    for v in victims:
+        print(f"  → supersede:   #{v['id']}  {v['title']}")
+    print()
+    confirm = input(
+        f"  Proceed? This will forget {len(victims)} memory(ies) "
+        "and record 'supersedes' relations. [y/N]: "
+    ).strip().lower()
+    if confirm not in ("y", "yes"):
+        print("Aborted.")
+        return
+
+    result = store.consolidate_cluster(cluster_ids)
+    print(
+        f"\nConsolidated cluster #{apply_idx}: "
+        f"canonical=#{result['canonical_id']}, "
+        f"superseded={result['superseded_ids']}"
+    )
+    if result["errors"]:
+        print("Warnings:", file=sys.stderr)
+        for err in result["errors"]:
+            print(f"  - {err}", file=sys.stderr)
+
+
 def _print_salience_report(store, *, limit: int) -> None:
     """Render the Salience Phase 2 promotion-signal report. Each row
     shows correction_count + contradiction_win_count + combined score
@@ -909,6 +1032,11 @@ Local vault (development/server-side only):
                             overlapping memory pairs that bypassed the
                             save-time check; non-destructive (decay +
                             relations only). [--max-pairs N] [--dry-run]
+  mnemon consolidate        Phase C operator-review consolidation —
+                            list near-duplicate clusters in the recent
+                            window. [--apply <cluster-idx>] supersedes
+                            non-canonical members of the named cluster.
+                            [--recent-days N] [--threshold F]
 
 Salience tier (standing-context recall):
   mnemon standing list      Show all standing-tier memories + count vs cap

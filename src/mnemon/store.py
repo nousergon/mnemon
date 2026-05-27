@@ -1185,6 +1185,154 @@ class Store:
             self.db.commit()
         return [_row_to_document(r) for r in rows]
 
+    def find_clusters(
+        self,
+        *,
+        similarity_threshold: float = 0.85,
+        min_cluster_size: int = 2,
+        recent_days: int = 30,
+        max_clusters: int = 20,
+    ) -> list[list[dict[str, Any]]]:
+        """Find vector-similarity clusters in the recent live vault.
+
+        Capture-attention Phase C primitive — surfaces N-memory clusters
+        where every pair has cosine ≥ ``similarity_threshold``. Each
+        cluster represents a candidate consolidation: multiple
+        near-duplicate memories that operator review can fold into a
+        canonical.
+
+        Algorithm: walks live memories created within ``recent_days``,
+        seeds each as a cluster, expands via vec search neighbors above
+        threshold. Avoids re-seeding members that already appeared in
+        a discovered cluster (deterministic dedup by member-set).
+
+        Returns ``[[member_dict, ...], ...]`` — each member dict has
+        ``{id, title, content_type, confidence, access_count,
+        recurrence_count, created_at}``. Members within a cluster are
+        ordered by ``recurrence_count DESC, confidence DESC`` so the
+        first member is the natural canonical pick.
+
+        Embedding-only, no LLM dependency.
+        """
+        import datetime as _dt
+
+        cutoff = (
+            _dt.datetime.now() - _dt.timedelta(days=recent_days)
+        ).isoformat(sep=" ")
+        rows = self.db.execute(
+            """SELECT d.id, d.hash, d.title, d.content_type, d.confidence,
+                      d.access_count, d.recurrence_count, d.created_at,
+                      c.doc AS content
+               FROM documents d
+               JOIN content c ON d.hash = c.hash
+               WHERE d.invalidated_at IS NULL
+                 AND d.created_at >= ?
+               ORDER BY d.id""",
+            (cutoff,),
+        ).fetchall()
+        if len(rows) < min_cluster_size:
+            return []
+
+        docs_by_id = {r["id"]: dict(r) for r in rows}
+
+        try:
+            from .embedder import embed
+        except ImportError:
+            return []
+
+        already_clustered: set[int] = set()
+        clusters: list[list[int]] = []
+
+        for seed_id in sorted(docs_by_id.keys()):
+            if seed_id in already_clustered:
+                continue
+            seed = docs_by_id[seed_id]
+            try:
+                seed_emb = embed(
+                    f"title: {seed['title']} | text: {seed['content']}"
+                )
+                neighbors = self.search_vector(seed_emb, 10)
+            except Exception:
+                continue
+            cluster_ids = {seed_id}
+            for cand in neighbors:
+                if cand.doc_id == seed_id:
+                    continue
+                if cand.score < similarity_threshold:
+                    continue
+                if cand.doc_id not in docs_by_id:
+                    continue
+                cluster_ids.add(cand.doc_id)
+            if len(cluster_ids) >= min_cluster_size:
+                clusters.append(sorted(cluster_ids))
+                already_clustered.update(cluster_ids)
+            if len(clusters) >= max_clusters:
+                break
+
+        out: list[list[dict[str, Any]]] = []
+        for cluster_ids in clusters:
+            members = [docs_by_id[i] for i in cluster_ids]
+            members.sort(
+                key=lambda m: (m["recurrence_count"], m["confidence"]),
+                reverse=True,
+            )
+            out.append([
+                {
+                    "id": m["id"],
+                    "title": m["title"],
+                    "content_type": m["content_type"],
+                    "confidence": m["confidence"],
+                    "access_count": m["access_count"],
+                    "recurrence_count": m["recurrence_count"],
+                    "created_at": m["created_at"],
+                }
+                for m in members
+            ])
+        return out
+
+    def consolidate_cluster(
+        self, cluster_ids: list[int],
+    ) -> dict[str, Any]:
+        """Consolidate a cluster: keep the first id as canonical, mark
+        the rest as superseded via 'supersedes' relations + forget.
+
+        Phase C is operator-review-only (ROADMAP invariant); this
+        primitive is called by `mnemon consolidate --apply <idx>`
+        AFTER explicit operator confirmation. The CLI handles the
+        interactive gate.
+
+        Returns ``{canonical_id, superseded_ids, errors: [...]}``.
+        Empty / single-member clusters are no-ops.
+        """
+        result: dict[str, Any] = {
+            "canonical_id": None,
+            "superseded_ids": [],
+            "errors": [],
+        }
+        if not cluster_ids or len(cluster_ids) < 2:
+            return result
+        canonical, *rest = cluster_ids
+        canonical_doc = self.get(canonical)
+        if not canonical_doc:
+            result["errors"].append(
+                f"canonical #{canonical} not found or invalidated"
+            )
+            return result
+        result["canonical_id"] = canonical
+
+        for victim in rest:
+            victim_doc = self.get(victim)
+            if not victim_doc:
+                result["errors"].append(
+                    f"member #{victim} not found or already invalidated"
+                )
+                continue
+            self.add_relation(canonical, victim, "supersedes", 1.0)
+            self.forget(victim)
+            result["superseded_ids"].append(victim)
+
+        return result
+
     def standing_tier_aging(self) -> list[dict[str, Any]]:
         """Standing-tier aging surface for Phase 3 observability.
 
