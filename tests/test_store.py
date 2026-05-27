@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from unittest.mock import patch
 
 import pytest
 
@@ -273,6 +274,72 @@ class TestRelations:
         # Should find from either direction
         assert len(store.get_related(id1)) == 1
         assert len(store.get_related(id2)) == 1
+
+
+class TestCorrectionOf:
+    """Regression for 2026-05-22 P2 ROADMAP follow-up: ``correction_of``
+    was reserved in Store.save() but only used as a capture-attention
+    skip flag. Surfaced when #2543 was saved with prose 'Supersedes the
+    partial financial framings in id 2402' but no relation was
+    inserted — operator-explicit supersession needs to be a structural
+    'supersedes' relation, not just chat-prose."""
+
+    def test_correction_of_inserts_supersedes_relation(self, store):
+        prior = store.save(title="Old framing", content="old content")
+        new = store.save(
+            title="Corrected framing",
+            content="new authoritative content",
+            correction_of=prior,
+        )
+        # New doc has an outgoing 'supersedes' relation to the prior.
+        related = store.get_related(new)
+        supersedes = [r for r in related if r.relation_type == "supersedes"]
+        assert len(supersedes) == 1
+        assert supersedes[0].id == prior
+
+    def test_correction_of_raises_for_missing_target(self, store):
+        # Fail loud (no silent dangling relation) rather than insert a
+        # 'supersedes' pointing nowhere.
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="non-existent"):
+            store.save(
+                title="bogus", content="bogus",
+                correction_of=99999,
+            )
+
+    def test_correction_of_works_on_invalidated_target(self, store):
+        # Operator may legitimately mark a new memory as superseding an
+        # already-forgotten one to record the chain — relation is the
+        # audit trail, not a liveness check. get_related() filters
+        # invalidated targets by design, so query the relations table
+        # directly to verify the row was inserted.
+        prior = store.save(title="Old", content="old")
+        store.forget(prior)
+        new = store.save(
+            title="New", content="new",
+            correction_of=prior,
+        )
+        rows = store.db.execute(
+            "SELECT target_id, relation_type FROM relations "
+            "WHERE source_id = ?",
+            (new,),
+        ).fetchall()
+        assert len(rows) == 1
+        assert rows[0]["target_id"] == prior
+        assert rows[0]["relation_type"] == "supersedes"
+
+    def test_correction_of_skips_capture_attention(self, store, monkeypatch):
+        # The pre-existing skip behavior must still work — operator
+        # gesture beats automated recurrence detection.
+        from mnemon import config
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", True)
+        prior = store.save(title="P", content="payload")
+        with patch.object(store, "apply_capture_attention") as mock_apply:
+            store.save(
+                title="N", content="payload",
+                correction_of=prior,
+            )
+        mock_apply.assert_not_called()
 
 
 class TestStatus:

@@ -250,6 +250,7 @@ class TestMemorySave:
             collection="default",
             source_client=None,
             source_key=None,
+            correction_of=None,
         )
 
     @patch("mnemon.server.Store")
@@ -281,6 +282,32 @@ class TestMemorySave:
             collection="work",
             source_client="claude",
             source_key=None,
+            correction_of=None,
+        )
+
+    @patch("mnemon.server.Store")
+    def test_correction_of_threads_to_store(self, MockStore):
+        """The new correction_of MCP param routes through Store.save so
+        operator-explicit supersession becomes a structural 'supersedes'
+        relation. Regression for 2026-05-22 P2 — chat-prose
+        'Supersedes id N' previously didn't insert a relation."""
+        mock_store = MockStore.return_value
+        mock_store.save.return_value = 99
+        mock_store.get.return_value = None
+
+        memory_save(
+            "New framing", "new authoritative content",
+            content_type="decision",
+            correction_of=42,
+        )
+        mock_store.save.assert_called_once_with(
+            title="New framing",
+            content="new authoritative content",
+            content_type="decision",
+            collection="default",
+            source_client=None,
+            source_key=None,
+            correction_of=42,
         )
 
 
