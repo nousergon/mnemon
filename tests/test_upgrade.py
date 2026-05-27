@@ -505,6 +505,67 @@ class TestUpgradeWebRedeploy:
         assert 'app = "mnemon-test-existing"' in captured["fly_toml"]
         assert 'primary_region = "iad"' in captured["fly_toml"]
 
+    def test_redeploy_without_testpypi_uses_prod_pypi(self, tmp_path, monkeypatch):
+        """Default: Dockerfile pip install has no --index-url flags, so
+        pip resolves from prod PyPI as before. Regression-lock that the
+        --testpypi opt-in doesn't accidentally flip default behavior."""
+        monkeypatch.setattr(
+            "mnemon.config.vault_dir", lambda: tmp_path / ".mnemon"
+        )
+        captured: dict[str, str] = {}
+
+        def _capture(workdir: Path, app_name: str) -> None:
+            captured["dockerfile"] = (workdir / "Dockerfile").read_text()
+
+        with patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=True), \
+            patch("mnemon.upgrade._fly_deploy", side_effect=_capture):
+            upgrade_web(
+                app_name="mnemon-test-existing",
+                mnemon_version="0.7.0rc5",
+                skip_doctor=True,
+            )
+
+        # The Dockerfile contains explanatory comment text about
+        # --index-url and test.pypi.org, so search the actual RUN line.
+        run_line = next(
+            ln for ln in captured["dockerfile"].splitlines()
+            if ln.startswith("RUN pip install")
+        )
+        assert "test.pypi.org" not in run_line
+        assert "--index-url" not in run_line
+
+    def test_redeploy_with_testpypi_flag_threads_index_urls(
+        self, tmp_path, monkeypatch
+    ):
+        """C24 ROADMAP follow-up: --testpypi makes the Docker build
+        resolve mnemon-memory from test.pypi.org while keeping prod
+        PyPI as the fallback for transitive deps."""
+        monkeypatch.setattr(
+            "mnemon.config.vault_dir", lambda: tmp_path / ".mnemon"
+        )
+        captured: dict[str, str] = {}
+
+        def _capture(workdir: Path, app_name: str) -> None:
+            captured["dockerfile"] = (workdir / "Dockerfile").read_text()
+
+        with patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=True), \
+            patch("mnemon.upgrade._fly_deploy", side_effect=_capture):
+            upgrade_web(
+                app_name="mnemon-test-existing",
+                mnemon_version="0.7.0rc5",
+                skip_doctor=True,
+                use_testpypi=True,
+            )
+
+        # Primary index = TestPyPI (for mnemon-memory)
+        assert "--index-url https://test.pypi.org/simple/" in captured["dockerfile"]
+        # Fallback = prod PyPI (for FastEmbed, numpy, etc. transitive deps)
+        assert "--extra-index-url https://pypi.org/simple/" in captured["dockerfile"]
+        # Version pin still threads through
+        assert "mnemon-memory[server]==0.7.0rc5" in captured["dockerfile"]
+
     def test_redeploy_ignores_missing_aws_and_bucket(
         self, tmp_path, monkeypatch
     ):

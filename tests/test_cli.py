@@ -425,8 +425,27 @@ class TestUpgradeCli:
             region="sjc",
             mnemon_version=None,
             skip_doctor=True,
+            use_testpypi=False,
         )
         assert "upgrade output" in capsys.readouterr().out
+
+    @patch("mnemon.upgrade.upgrade_web")
+    def test_testpypi_flag_passes_through(self, mock_upgrade, capsys):
+        """C24 ROADMAP follow-up: --testpypi routes the Docker build's
+        pip install through test.pypi.org for true pre-publish
+        validation."""
+        mock_upgrade.return_value = "ok"
+        with patch(
+            "sys.argv",
+            [
+                "mnemon", "upgrade", "web",
+                "--app-name", "mnemon-test-cli",
+                "--testpypi",
+                "--skip-doctor",
+            ],
+        ):
+            main()
+        assert mock_upgrade.call_args.kwargs["use_testpypi"] is True
 
     @patch("mnemon.upgrade.upgrade_web")
     def test_mnemon_version_flag_passes_through(self, mock_upgrade, capsys):
