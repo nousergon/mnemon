@@ -948,6 +948,60 @@ class TestCliRemoteMode:
         mock_call.assert_called_once()
 
 
+class TestAttentionReport:
+    """Coverage for the new `mnemon attention-report` subcommand —
+    Capture-attention Phase B operator surface."""
+
+    @patch("mnemon.store.Store")
+    def test_renders_rows(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.attention_report.return_value = [
+            {"id": 42, "title": "load-bearing fact", "content_type": "preference",
+             "confidence": 0.85, "access_count": 12, "age_days": 5.2,
+             "recency": 0.88, "score": 10.56, "tier": "situational"},
+        ]
+        with patch("sys.argv", ["mnemon", "attention-report"]):
+            main()
+        out = capsys.readouterr().out
+        assert "Attention report" in out
+        assert "#  42" in out
+        assert "load-bearing fact" in out
+        assert "10.56" in out
+        mock_store.attention_report.assert_called_once_with(
+            limit=20, min_access_count=2,
+        )
+
+    @patch("mnemon.store.Store")
+    def test_empty_message(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.attention_report.return_value = []
+        with patch("sys.argv", ["mnemon", "attention-report"]):
+            main()
+        out = capsys.readouterr().out
+        assert "no memories meet the filter" in out
+
+    @patch("mnemon.store.Store")
+    def test_limit_and_min_access_flags(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.attention_report.return_value = []
+        with patch("sys.argv",
+                   ["mnemon", "attention-report",
+                    "--limit", "5", "--min-access", "10"]):
+            main()
+        mock_store.attention_report.assert_called_once_with(
+            limit=5, min_access_count=10,
+        )
+
+    @patch("mnemon.store.Store")
+    def test_non_integer_limit_exits_2(self, MockStore, capsys):
+        with patch("sys.argv",
+                   ["mnemon", "attention-report", "--limit", "abc"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        assert "must be an integer" in capsys.readouterr().err
+
+
 class TestAttentionStatusPrint:
     """Coverage for _print_attention_status — the largest uncovered
     cli.py block after _handle_standing."""

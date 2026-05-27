@@ -281,4 +281,22 @@ def search(
     if content_type:
         scored = [r for r in scored if r.content_type == content_type]
 
-    return mmr_rerank(scored[:limit])
+    reranked = mmr_rerank(scored[:limit])
+
+    # Capture-attention Phase B: increment access_count for every
+    # surfaced doc. The column already accumulates on memory_get, so
+    # wiring search hits closes the loop on `mnemon attention-report`
+    # (high-access fragments are the load-bearing facts the salience
+    # tier should consider). Batched in one UPDATE … IN (…) so the
+    # cost is one round-trip regardless of `limit`.
+    if reranked:
+        ids = [r.doc_id for r in reranked]
+        placeholders = ",".join("?" * len(ids))
+        store.db.execute(
+            f"UPDATE documents SET access_count = access_count + 1 "
+            f"WHERE id IN ({placeholders})",
+            ids,
+        )
+        store.db.commit()
+
+    return reranked
