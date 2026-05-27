@@ -655,3 +655,202 @@ class TestAttentionStatusStrict:
                 mock_store_cls.return_value = MagicMock()
                 with patch("sys.argv", ["mnemon", "attention-status", "--strict"]):
                     main()
+
+
+class TestStandingCli:
+    """Coverage for the `mnemon standing list|promote|demote` paths.
+    Closes ROADMAP P3 follow-up to push cli.py above the 80% module
+    floor — the _handle_standing block was the largest uncovered region."""
+
+    @patch("mnemon.store.Store")
+    def test_list_populated(self, MockStore, capsys):
+        from mnemon.store import Document
+        mock_store = MockStore.return_value
+        mock_store.standing_tier_status.return_value = {
+            "count": 2, "cap": 15, "hard_ceiling": 20,
+        }
+        d1 = Document(
+            id=1, collection="default", path=None, title="Rule 1",
+            hash="h1", content_type="preference", memory_type="semantic",
+            confidence=0.85, quality_score=0.0, access_count=0, pinned=0,
+            source_client=None, invalidated_at=None, invalidated_by=None,
+            created_at="2026-05-01", updated_at="2026-05-01",
+            content="some constraint content",
+        )
+        d2 = Document(
+            id=2, collection="default", path=None, title="Rule 2",
+            hash="h2", content_type="decision", memory_type="semantic",
+            confidence=0.9, quality_score=0.0, access_count=0, pinned=0,
+            source_client=None, invalidated_at=None, invalidated_by=None,
+            created_at="2026-05-02", updated_at="2026-05-02",
+            content="another constraint",
+        )
+        mock_store.list_standing.return_value = [d1, d2]
+        with patch("sys.argv", ["mnemon", "standing", "list"]):
+            main()
+        out = capsys.readouterr().out
+        assert "Standing tier: 2/15" in out
+        assert "Rule 1" in out
+        assert "Rule 2" in out
+
+    @patch("mnemon.store.Store")
+    def test_list_empty(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.standing_tier_status.return_value = {
+            "count": 0, "cap": 15, "hard_ceiling": 20,
+        }
+        mock_store.list_standing.return_value = []
+        with patch("sys.argv", ["mnemon", "standing", "list"]):
+            main()
+        out = capsys.readouterr().out
+        assert "Standing tier: 0/15" in out
+        assert "(empty" in out
+
+    @patch("mnemon.store.Store")
+    def test_promote_success(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.standing_tier_status.return_value = {
+            "count": 3, "cap": 15, "hard_ceiling": 20,
+        }
+        with patch("sys.argv", ["mnemon", "standing", "promote", "42"]):
+            main()
+        out = capsys.readouterr().out
+        assert "Promoted memory #42" in out
+        mock_store.promote_to_standing.assert_called_once_with(42)
+
+    @patch("mnemon.store.Store")
+    def test_promote_cap_reached_exits_1(self, MockStore, capsys):
+        from mnemon.store import StandingTierCapReached
+        mock_store = MockStore.return_value
+        mock_store.promote_to_standing.side_effect = StandingTierCapReached(
+            "at cap 15/15"
+        )
+        with patch("sys.argv", ["mnemon", "standing", "promote", "7"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 1
+        assert "Cap reached" in capsys.readouterr().err
+
+    @patch("mnemon.store.Store")
+    def test_promote_provenance_rejected_exits_1(self, MockStore, capsys):
+        from mnemon.store import StandingTierProvenanceRejected
+        mock_store = MockStore.return_value
+        mock_store.promote_to_standing.side_effect = (
+            StandingTierProvenanceRejected("hook-sourced")
+        )
+        with patch("sys.argv", ["mnemon", "standing", "promote", "7"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 1
+        assert "Provenance rejected" in capsys.readouterr().err
+
+    @patch("mnemon.store.Store")
+    def test_promote_missing_id_exits_2(self, MockStore, capsys):
+        with patch("sys.argv", ["mnemon", "standing", "promote"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        assert "Usage:" in capsys.readouterr().err
+
+    @patch("mnemon.store.Store")
+    def test_promote_non_integer_id_exits_2(self, MockStore, capsys):
+        with patch("sys.argv", ["mnemon", "standing", "promote", "abc"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        assert "must be an integer" in capsys.readouterr().err
+
+    @patch("mnemon.store.Store")
+    def test_demote_success(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.demote_to_situational.return_value = True
+        mock_store.standing_tier_status.return_value = {
+            "count": 2, "cap": 15, "hard_ceiling": 20,
+        }
+        with patch("sys.argv", ["mnemon", "standing", "demote", "42"]):
+            main()
+        out = capsys.readouterr().out
+        assert "Demoted memory #42" in out
+
+    @patch("mnemon.store.Store")
+    def test_demote_idempotent_when_not_standing(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.demote_to_situational.return_value = False
+        mock_store.standing_tier_status.return_value = {
+            "count": 3, "cap": 15, "hard_ceiling": 20,
+        }
+        with patch("sys.argv", ["mnemon", "standing", "demote", "7"]):
+            main()
+        out = capsys.readouterr().out
+        assert "not on the standing tier" in out
+
+    @patch("mnemon.store.Store")
+    def test_demote_missing_id_exits_2(self, MockStore, capsys):
+        with patch("sys.argv", ["mnemon", "standing", "demote"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+
+    @patch("mnemon.store.Store")
+    def test_unknown_standing_subcommand_exits_2(self, MockStore, capsys):
+        with patch("sys.argv", ["mnemon", "standing", "frobnicate"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "Unknown subcommand" in err
+
+
+class TestAttentionStatusPrint:
+    """Coverage for _print_attention_status — the largest uncovered
+    cli.py block after _handle_standing."""
+
+    @patch("mnemon.store.Store")
+    def test_status_with_no_recent_activity(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_cursor = MagicMock()
+        # Three SQL queries: boosts, saves, recurrence_count histogram, top, recent
+        # First call: COUNT(*) FROM relations → boosts_7d
+        # Second call: COUNT(*) FROM documents → saves_7d
+        # Third call: histogram
+        # Fourth: top canonicals
+        # Fifth: recent restates
+        mock_cursor.fetchone.side_effect = [{"c": 0}, {"c": 5}]
+        mock_cursor.fetchall.side_effect = [
+            [{"recurrence_count": 0, "n": 5}],  # histogram
+            [],  # top canonicals (none yet)
+            [],  # recent relations
+        ]
+        mock_store.db.execute.return_value = mock_cursor
+        with patch("sys.argv", ["mnemon", "attention-status"]):
+            main()
+        out = capsys.readouterr().out
+        assert "Capture attention" in out
+        assert "Boost-rate 7d      : 0 / 5 = 0.000" in out
+        assert "Recurrence count distribution" in out
+        assert "No canonicals" in out
+
+    @patch("mnemon.store.Store")
+    def test_status_with_canonicals_and_recent_restates(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_cursor = MagicMock()
+        mock_cursor.fetchone.side_effect = [{"c": 2}, {"c": 10}]
+        mock_cursor.fetchall.side_effect = [
+            # histogram
+            [{"recurrence_count": 0, "n": 8}, {"recurrence_count": 1, "n": 2}],
+            # top canonicals
+            [{"id": 42, "title": "Some canonical fact", "recurrence_count": 1,
+              "confidence": 0.85}],
+            # recent restates
+            [{"source_id": 99, "target_id": 42, "weight": 0.91,
+              "created_at": "2026-05-27 10:00:00"}],
+        ]
+        mock_store.db.execute.return_value = mock_cursor
+        with patch("sys.argv", ["mnemon", "attention-status"]):
+            main()
+        out = capsys.readouterr().out
+        assert "Boost-rate 7d      : 2 / 10 = 0.200" in out
+        assert "Top canonicals" in out
+        assert "Some canonical fact" in out
+        assert "Last 10 'restates' relations" in out
+        assert "#   99 → #   42" in out
