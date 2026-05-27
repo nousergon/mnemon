@@ -297,7 +297,7 @@ def main() -> None:
             print(
                 "Usage: mnemon upgrade web --app-name <name> "
                 "[--s3-bucket NAME] [--token TOKEN] [--region REGION] "
-                "[--mnemon-version VER] [--skip-doctor]",
+                "[--mnemon-version VER] [--skip-doctor] [--testpypi]",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -319,6 +319,7 @@ def main() -> None:
                     region=parsed["region"] or "sjc",
                     mnemon_version=parsed["mnemon_version"],
                     skip_doctor=parsed["skip_doctor"],
+                    use_testpypi=parsed["use_testpypi"],
                 )
             )
         except UpgradeError as exc:
@@ -778,6 +779,7 @@ def _parse_upgrade_args(args: list[str]) -> dict:
         "region": None,
         "mnemon_version": None,
         "skip_doctor": False,
+        "use_testpypi": False,
     }
     i = 0
     while i < len(args):
@@ -805,6 +807,9 @@ def _parse_upgrade_args(args: list[str]) -> dict:
             i += 2
         elif flag == "--skip-doctor":
             result["skip_doctor"] = True
+            i += 1
+        elif flag == "--testpypi":
+            result["use_testpypi"] = True
             i += 1
         else:
             i += 1
@@ -859,7 +864,7 @@ Idempotent: rerun to redeploy an existing app with the current mnemon
 version (clients keep their URL + token):
   mnemon upgrade web --app-name <name> [--s3-bucket NAME] [--token TOKEN]
                              [--region REGION] [--mnemon-version VER]
-                             [--skip-doctor]
+                             [--skip-doctor] [--testpypi]
                              First-time deploy requires: flyctl, aws CLI
                              with credentials, and an S3 bucket
                              (MNEMON_S3_BUCKET or --s3-bucket). Redeploy
@@ -867,6 +872,10 @@ version (clients keep their URL + token):
                              --mnemon-version pins a specific PyPI version
                              in the deployed Dockerfile (defaults to the
                              locally-installed __version__).
+                             --testpypi resolves mnemon-memory from
+                             test.pypi.org (transitive deps stay on
+                             prod PyPI); for true pre-publish validation
+                             via promote_stable.sh testpublish.
 
 Downgrade web → local (pull remote vault back, reconfigure clients to stdio):
   mnemon downgrade local    [--destroy-fly-app] [--yes] [--app-name NAME]

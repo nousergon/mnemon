@@ -224,7 +224,7 @@ _layer3_cleanup() {
 }
 
 cmd_layer3() {
-    # Parse layer3-specific flags. Currently:
+    # Parse layer3-specific flags:
     #   --exercise-all-tools  After upgrade, iterate every registered
     #                         MCP tool against the test Fly app and
     #                         assert each returns cleanly. Catches
@@ -233,11 +233,24 @@ cmd_layer3() {
     #                         local-process integration canary
     #                         tests/test_tools_integration.py can't
     #                         see. Added 2026-05-22.
+    #   --testpypi            Pass through to `mnemon upgrade web
+    #                         --testpypi` so the Docker build resolves
+    #                         mnemon-memory from test.pypi.org. Pinned
+    #                         to TARGET_VERSION (must be on TestPyPI
+    #                         already — `cmd_testpublish` is the canonical
+    #                         producer). Added 2026-05-27 for true
+    #                         pre-publish validation per the C24 ROADMAP
+    #                         follow-up.
     local EXERCISE_ALL_TOOLS=0
+    local USE_TESTPYPI=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --exercise-all-tools)
                 EXERCISE_ALL_TOOLS=1
+                shift
+                ;;
+            --testpypi)
+                USE_TESTPYPI=1
                 shift
                 ;;
             *)
@@ -279,6 +292,14 @@ cmd_layer3() {
     if [ -n "${LAYER3_VERSION_OVERRIDE:-}" ]; then
         LAYER3_VERSION="$LAYER3_VERSION_OVERRIDE"
         echo_ok "Layer-3 pinning mnemon-memory==$LAYER3_VERSION (operator override)"
+    elif [ "$USE_TESTPYPI" = "1" ]; then
+        # --testpypi mode: TARGET_VERSION must be on TestPyPI (produced
+        # by `cmd_testpublish` upstream). This is the true pre-publish
+        # validation path — Docker resolves mnemon-memory from
+        # test.pypi.org so the candidate's actual code runs in the test
+        # Fly app, not a published-proxy stand-in.
+        LAYER3_VERSION="$TARGET_VERSION"
+        echo_ok "Layer-3 pinning mnemon-memory==$LAYER3_VERSION (TestPyPI mode)"
     elif is_pypi_published "$TARGET_VERSION"; then
         LAYER3_VERSION="$TARGET_VERSION"
         echo_ok "Layer-3 pinning mnemon-memory==$LAYER3_VERSION (candidate already on PyPI)"
@@ -287,7 +308,7 @@ cmd_layer3() {
         [ -n "$LAYER3_VERSION" ] || die "could not resolve mnemon-memory latest from PyPI JSON API"
         echo_warn "candidate $TARGET_VERSION isn't on PyPI yet"
         echo_warn "Layer-3 will deploy mnemon-memory==$LAYER3_VERSION (latest published) as a proxy"
-        echo_warn "for true pre-publish validation of $TARGET_VERSION's code: file TestPyPI integration as ROADMAP follow-up"
+        echo_warn "for true pre-publish validation of $TARGET_VERSION's code, use: $0 testpublish then $0 layer3 --testpypi"
     fi
     confirm "proceed with Layer-3 deploying mnemon-memory==$LAYER3_VERSION?"
 
@@ -364,7 +385,12 @@ cmd_layer3() {
     echo_ok "3 docs seeded in local test vault"
 
     echo_step "Step 3 — upgrade web to $TEST_APP_NAME (pinned to mnemon-memory==$LAYER3_VERSION)"
-    "$M" upgrade web --app-name "$TEST_APP_NAME" --mnemon-version "$LAYER3_VERSION"
+    local UPGRADE_EXTRA_ARGS=()
+    if [ "$USE_TESTPYPI" = "1" ]; then
+        UPGRADE_EXTRA_ARGS+=("--testpypi")
+        echo "  (--testpypi: Docker resolves from test.pypi.org)"
+    fi
+    "$M" upgrade web --app-name "$TEST_APP_NAME" --mnemon-version "$LAYER3_VERSION" "${UPGRADE_EXTRA_ARGS[@]}"
     ls "$MNEMON_VAULT_DIR/archive/" | grep -q "pre-web-" || die "expected pre-web-*.sqlite archive missing"
     ! [ -f "$MNEMON_VAULT_DIR/default.sqlite" ] || die "local vault should be archived; default.sqlite still present"
 
@@ -427,6 +453,69 @@ cmd_layer3() {
 # ============================================================
 # publish — POST-MERGE: build, twine upload, tag, GH Release, Fly redeploy
 # ============================================================
+cmd_testpublish() {
+    # Pre-publish: upload candidate to TestPyPI so Layer-3 can deploy
+    # the actual candidate code (rather than the latest-published-as-
+    # proxy). Closes the 2026-05-21 chicken-and-egg gap where
+    # `mnemon upgrade web` needs the candidate already on a pip index
+    # but real PyPI publication is one-way.
+    #
+    # Operator workflow (per the C24 ROADMAP follow-up):
+    #   1. preflight             — read-only checks
+    #   2. testpublish           — build → twine upload --repository testpypi
+    #   3. layer3 --testpypi     — Docker resolves from test.pypi.org
+    #   ── merge promote PR ──
+    #   4. publish               — twine upload to prod PyPI + tag + Fly redeploy
+    #   5. verify                — post-publish sanity check
+    #
+    # Prereqs:
+    #   - ~/.pypirc has a [testpypi] section with an API token, OR
+    #     TWINE_USERNAME=__token__ + TWINE_PASSWORD=<testpypi-token> set
+    #   - dist/ either fresh-built here or pre-built from a prior preflight
+    echo_step "TestPyPI publish — $TARGET_VERSION pre-publish validation"
+
+    echo_step "Build — sdist + wheel"
+    rm -rf dist/
+    "$MNEMON_VENV_BIN/python" -m build
+    "$MNEMON_VENV_BIN/twine" check dist/*
+    echo_ok "build clean, twine check passed"
+
+    # Same sdist hygiene check the prod publish step runs — TestPyPI
+    # is public, same forbidden-path rules apply.
+    local sdist
+    sdist="$(ls dist/mnemon_memory-*.tar.gz | head -1)"
+    [ -n "$sdist" ] || die "no sdist found in dist/"
+    local leaks
+    leaks="$(tar tzf "$sdist" | grep -E "(^|/)(\.env|fly\.toml|default\.sqlite)$|(^|/)(private|\.mnemon)/" || true)"
+    if [ -n "$leaks" ]; then
+        echo_err "sdist contains forbidden paths:"
+        printf "%s\n" "$leaks" >&2
+        die "abort before twine upload"
+    fi
+    echo_ok "no forbidden files in sdist"
+
+    confirm "Upload dist/* to TestPyPI? (test.pypi.org — separate index from real PyPI)"
+    echo_step "twine upload --repository testpypi"
+    "$MNEMON_VENV_BIN/twine" upload --repository testpypi dist/*
+    echo_ok "uploaded to TestPyPI"
+
+    echo_step "Wait for TestPyPI to surface $TARGET_VERSION"
+    local tries=0
+    until curl -fsS "https://test.pypi.org/pypi/mnemon-memory/json" 2>/dev/null \
+        | "$MNEMON_VENV_BIN/python" -c \
+            "import json,sys; data=json.load(sys.stdin); sys.exit(0 if '$TARGET_VERSION' in data.get('releases', {}) else 1)"; do
+        tries=$((tries + 1))
+        [ "$tries" -gt 30 ] && die "TestPyPI didn't surface $TARGET_VERSION after 5 min"
+        sleep 10
+    done
+    echo_ok "TestPyPI surfacing mnemon-memory==$TARGET_VERSION"
+
+    echo
+    echo "Next: $0 layer3 --testpypi"
+    echo "  (Docker build will resolve mnemon-memory==$TARGET_VERSION from test.pypi.org)"
+}
+
+
 cmd_publish() {
     echo_step "Publish $TARGET_VERSION — post-merge sequence"
 
@@ -583,20 +672,23 @@ if [ "${BASH_SOURCE[0]}" != "$0" ]; then
 fi
 
 case "${1:-}" in
-    preflight) cmd_preflight ;;
-    layer3)    shift; cmd_layer3 "$@" ;;
-    publish)   cmd_publish ;;
-    verify)    cmd_verify ;;
+    preflight)    cmd_preflight ;;
+    testpublish)  cmd_testpublish ;;
+    layer3)       shift; cmd_layer3 "$@" ;;
+    publish)      cmd_publish ;;
+    verify)       cmd_verify ;;
     *)
         cat >&2 <<EOF
 usage: $0 <subcommand>
 
 Subcommands (run in this order around the promote PR merge):
-  preflight   — read-only: branch/version/CHANGELOG/tests/auth all check out
-  layer3      — E2E web test (test-scoped Fly app, ~15 min)
+  preflight    — read-only: branch/version/CHANGELOG/tests/auth all check out
+  testpublish  — (optional) upload candidate to TestPyPI for true pre-publish validation
+  layer3       — E2E web test (test-scoped Fly app, ~15 min)
+                 [--testpypi: deploy candidate from TestPyPI rather than latest-published proxy]
   ── MERGE THE PROMOTE PR ON GITHUB HERE ──
-  publish     — post-merge: build → twine upload → tag → GH Release → Fly redeploy
-  verify      — post-publish sanity check
+  publish      — post-merge: build → twine upload → tag → GH Release → Fly redeploy
+  verify       — post-publish sanity check
 
 Target version read from src/mnemon/__init__.py (currently: $TARGET_VERSION).
 

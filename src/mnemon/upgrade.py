@@ -108,8 +108,12 @@ WORKDIR /app
 
 # Install mnemon with server deps from PyPI. Pinning the version keeps
 # the deployed image reproducible even if PyPI state changes between
-# deploys.
-RUN pip install --no-cache-dir 'mnemon-memory[server]=={mnemon_version}'
+# deploys. {pip_index_args} is empty for prod PyPI; for --testpypi
+# resolution it expands to `--index-url https://test.pypi.org/simple/
+# --extra-index-url https://pypi.org/simple/` so the mnemon-memory
+# artifact comes from TestPyPI but its transitive deps (fastembed,
+# numpy, etc.) still resolve from real PyPI.
+RUN pip install --no-cache-dir {pip_index_args}'mnemon-memory[server]=={mnemon_version}'
 
 # Bake the FastEmbed bge-small-en-v1.5 ONNX model into the image so cold
 # starts don't trigger a 5-15s download from HuggingFace Hub.
@@ -499,12 +503,33 @@ def _fly_app_exists(app_name: str) -> bool:
 # ── Redeploy (existing app, version bump) ────────────────────────────────────
 
 
+def _pip_index_args(use_testpypi: bool) -> str:
+    """Pip args to thread into the Dockerfile RUN line.
+
+    Empty string for prod PyPI (default). For TestPyPI, returns the
+    flag set that points at test.pypi.org as the primary index while
+    keeping prod PyPI as the fallback for transitive deps — TestPyPI
+    only hosts mnemon-memory artifacts, every other dep (fastembed,
+    numpy, etc.) still lives on prod PyPI.
+
+    Trailing space matters: `--index-url X --extra-index-url Y` then
+    a space before the package spec.
+    """
+    if not use_testpypi:
+        return ""
+    return (
+        "--index-url https://test.pypi.org/simple/ "
+        "--extra-index-url https://pypi.org/simple/ "
+    )
+
+
 def _redeploy_web(
     *,
     app_name: str,
     region: str,
     mnemon_version: str,
     skip_doctor: bool,
+    use_testpypi: bool = False,
 ) -> str:
     """Redeploy an existing Fly mnemon app pinned to ``mnemon_version``.
 
@@ -522,7 +547,10 @@ def _redeploy_web(
     with tempfile.TemporaryDirectory(prefix="mnemon-redeploy-") as tdir:
         workdir = Path(tdir)
         (workdir / "Dockerfile").write_text(
-            _DOCKERFILE_TEMPLATE.format(mnemon_version=mnemon_version)
+            _DOCKERFILE_TEMPLATE.format(
+                mnemon_version=mnemon_version,
+                pip_index_args=_pip_index_args(use_testpypi),
+            )
         )
         (workdir / "fly.toml").write_text(
             _FLY_TOML_TEMPLATE.format(app_name=app_name, region=region)
@@ -583,6 +611,7 @@ def upgrade_web(
     region: str = "sjc",
     mnemon_version: str | None = None,
     skip_doctor: bool = False,
+    use_testpypi: bool = False,
 ) -> str:
     """Upgrade a local mnemon install to a web (Fly-hosted) deployment.
 
@@ -632,6 +661,7 @@ def upgrade_web(
             region=region,
             mnemon_version=mnemon_version,
             skip_doctor=skip_doctor,
+            use_testpypi=use_testpypi,
         )
 
     _require_aws()
@@ -676,7 +706,10 @@ def upgrade_web(
         with tempfile.TemporaryDirectory(prefix="mnemon-upgrade-") as tdir:
             workdir = Path(tdir)
             (workdir / "Dockerfile").write_text(
-                _DOCKERFILE_TEMPLATE.format(mnemon_version=mnemon_version)
+                _DOCKERFILE_TEMPLATE.format(
+                    mnemon_version=mnemon_version,
+                    pip_index_args=_pip_index_args(use_testpypi),
+                )
             )
             (workdir / "fly.toml").write_text(
                 _FLY_TOML_TEMPLATE.format(app_name=app_name, region=region)
