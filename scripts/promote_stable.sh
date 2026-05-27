@@ -605,8 +605,14 @@ cmd_publish() {
     echo_ok "uploaded to PyPI"
 
     echo_step "Wait for PyPI to surface $TARGET_VERSION"
+    # Use the JSON API via `is_pypi_published` (same primitive
+    # `latest_pypi_version` uses). `pip index versions` proved unreliable
+    # for rc surfacing: returns latest STABLE only, hiding 0.7.0rcN
+    # entirely even when the rc IS published — caught 2026-05-27 when
+    # rc6 uploaded cleanly but the polling loop died after 5 min while
+    # https://pypi.org/project/mnemon-memory/0.7.0rc6/ was live.
     local tries=0
-    until "$MNEMON_VENV_BIN/pip" index versions mnemon-memory 2>/dev/null | head -5 | grep -q "$TARGET_VERSION"; do
+    until is_pypi_published "$TARGET_VERSION"; do
         tries=$((tries + 1))
         [ "$tries" -gt 30 ] && die "PyPI didn't surface $TARGET_VERSION after 5 min"
         sleep 10
@@ -682,10 +688,10 @@ PY
 cmd_verify() {
     echo_step "Verify $TARGET_VERSION live"
 
-    local pypi_line
-    pypi_line="$("$MNEMON_VENV_BIN/pip" index versions mnemon-memory 2>/dev/null | head -1 || true)"
-    echo "  PyPI: $pypi_line"
-    "$MNEMON_VENV_BIN/pip" index versions mnemon-memory 2>/dev/null | head -1 | grep -q "$TARGET_VERSION" \
+    # Same JSON-API path as cmd_publish + latest_pypi_version. The old
+    # `pip index versions` lookup hid rc/pre-releases and missed the
+    # 2026-05-27 rc6 surfacing — see test_publish_pypi_poll_uses_json_api.
+    is_pypi_published "$TARGET_VERSION" \
       || die "PyPI does not show $TARGET_VERSION as a known version"
     echo_ok "PyPI shows $TARGET_VERSION"
 
