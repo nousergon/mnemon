@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Salience tier — Phase 1 default-on
+
+- **`config.STANDING_TIER_ENABLED` flipped to `True`.** Phase 1
+  standing-tier soak passed: activated 2026-05-22 with 3 promoted
+  memories (#2543 composite runway / #2401 recruiter posture / #2084
+  severance), observed ~5 days with no runway-style under-weighting
+  recurrence. Standing-tier injection is now on by default; operators
+  who want to opt out can still set `MNEMON_STANDING_TIER_ENABLED=0`.
+  Note: capture-attention Phase A (`CAPTURE_ATTENTION_ENABLED`) stays
+  default-off — its soak surfaced an over-firing defect (boost-rate
+  0.714 vs 0.25 ceiling) that requires a candidate-filter fix + a
+  re-calibration on live-traffic distribution before re-soak.
+
 ## [0.7.0rc4] - 2026-05-24
 
 ### Capture-attention Phase A — activation infrastructure

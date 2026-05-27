@@ -582,7 +582,10 @@ class TestContextSurfacingMain:
         ) as mock_write, patch(
             "mnemon.hooks._remote_client.call_tool_sync",
             return_value=(raw_tool_output, 0.5),
-        ) as mock_call:
+        ) as mock_call, patch(
+            "mnemon.hooks.context_surfacing._standing_tier_enabled",
+            return_value=False,
+        ):
             main()
 
         mock_call.assert_called_once()

@@ -120,11 +120,12 @@ CAPTURE_ATTENTION_SOAK_BOOST_RATE_MAX = 0.25    # acceptance criterion: boosts/s
 # similarity, conditioning reasoning rather than answering it. The cap
 # is the contract: past ~20, salience degrades and the tier becomes
 # noise again, recreating the failure mode at a different scale.
-# Default-off through soak per the 2026-05-22 reframing — Phase 1 ships
-# the substrate gated; promote ≤5 career-context memories via the new
-# memory_promote MCP tool; flip the flag; observe ≥1 week soak for
-# runway-style under-weighting recurrence vs absence.
-STANDING_TIER_ENABLED = False                   # feature flag — flip after soak
+# Default-on since 2026-05-27 — Phase 1 soak passed (activated 2026-05-22
+# with 3 promoted memories: #2543 / #2401 / #2084; ~5 day window with no
+# runway-style under-weighting recurrence). Env-var override
+# (MNEMON_STANDING_TIER_ENABLED) remains available for operators who want
+# to opt out without a code change.
+STANDING_TIER_ENABLED = True                    # default-on; env-var override remains
 STANDING_TIER_DEFAULT_CAP = 15                  # operator-tunable runtime cap
 STANDING_TIER_HARD_CEILING = 20                 # invariant — never exceed
 # Reuse Layer 4 hook-sourced set: hook-sourced memories cannot be promoted —
