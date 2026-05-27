@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0rc5] - 2026-05-27
 
 ### Salience tier — Phase 1 default-on
 
