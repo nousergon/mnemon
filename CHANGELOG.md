@@ -1,5 +1,104 @@
 # Changelog
 
+## [0.7.0rc6] - 2026-05-27
+
+### Phase 2 / 3 salience tier + Phase B / C capture-attention substrate
+
+Substantial roadmap-closure release consolidating the 2026-05-27 sweep.
+Every change is gated default-off or operator-explicit — Phase A
+capture-attention auto-firing stays default-off pending the re-soak
+gate (see "Re-soak prereq" below).
+
+**Salience tier**
+- **Phase 2 promotion signals** (#178): new `documents.correction_count`
+  + `documents.contradiction_win_count` columns + `Store.salience_report`
+  + `mnemon salience-report` CLI. Bumps on operator `correction_of=`
+  gestures and NLI contradiction-win events respectively.
+- **Phase 3 observability** (#179): new `documents.last_injected_at`
+  column; `Store.list_standing` bumps it on every injection event;
+  `mnemon standing list` renders aging table with ⚠ stale marker
+  for members not injected in ≥90d.
+- **Vault-derived auto-exemplars** in `scripts/build_standing_set.py`
+  (#168): `--exemplar-source {hybrid, vault, hand-tuned}`. Default
+  hybrid; samples high-confidence preference/decision/antipattern
+  as positives and recent handoffs as negatives.
+- **LLM-judge opt-in** (#175): `--judge anthropic`, requires
+  `ANTHROPIC_API_KEY` + `pip install anthropic`. 4-dim rubric.
+  Default `--judge embedding` unchanged.
+- **`memory_promote` coherence check** (#173): post-promote NLI
+  bidirectional classification against existing standing-tier
+  members; conflicts surface as a warning (not blocking — NLI
+  false-neg on numeric updates is a known limitation).
+
+**Capture attention**
+- **Phase B access-count feedback loop** (#177):
+  `documents.access_count` now increments on every `memory_search`
+  hit; new `Store.attention_report` ranks by access × recency;
+  `mnemon attention-report` CLI.
+- **Phase C operator-reviewed consolidation** (#183):
+  `Store.find_clusters` + `mnemon consolidate [--apply <idx>]` with
+  y/N confirmation gate. Operator-review only per plan invariant.
+- **Retroactive contradiction sweep** (#180):
+  `contradiction.sweep_contradictions` + `mnemon sweep-contradictions
+  [--max-pairs N] [--dry-run]`. Closes the save-time miss gap.
+
+**`memory_save` / explicit supersession**
+- **`correction_of` is now a structural relation** (#171). When set,
+  `Store.save` inserts `'supersedes'` (new → target) + bumps the
+  target's `correction_count`. Raises `ValueError` on missing target.
+  `memory_save` MCP tool exposes the parameter.
+
+**`mnemon` CLI**
+- **`status` / `search` / `save` honor remote mode** (#176). When
+  `MNEMON_REMOTE_URL` is set, routes through `call_tool_sync` to
+  the remote vault. Closes the 2026-05-21 Layer-3 silent-fallback gap.
+- **`attention-status --strict`** (#167) exits 1 when boost-rate >
+  ceiling — for periodic health-check wiring.
+
+**Operator tooling**
+- **`scripts/mnemon_ops.sh`** (#172): `cleanup-test-apps`,
+  `recover-token`, `restart-machine`, `vault-stats`,
+  `changelog-extract`.
+- **`scripts/` smoke-test CI** (#170): pytest parametrized over
+  `scripts/*.py --help`.
+
+**Release engineering**
+- **TestPyPI integration** (#181): `mnemon upgrade web --testpypi`
+  + `promote_stable.sh testpublish` subcommand. Enables true
+  pre-publish validation of candidate code rather than the
+  latest-published proxy.
+- **`promote_stable.sh` harness expansion** (#182):
+  `MNEMON_VENV_BIN` env-var override; trap destroy retries + stderr
+  capture; step-2 `remote_url` isolation regression test.
+- **Drop `_fly_dump_vault` inline-Python script** (#169) —
+  `mnemon sync push` is now the canonical primitive.
+
+**Polish + fixes**
+- `context_surfacing` balances dangling `**` mid-bold truncation
+  (#167).
+- `scripts/calibrate_capture_threshold.py --use-fixture` falls back
+  to `.example.json` on fresh clones (#167).
+- NLI cache resolution docs in Dockerfile + nli.py (#167).
+- `cli.py` coverage 62% → 85% (#174).
+- README cross-client recall guidance (#163).
+
+### Re-soak prereq
+
+`CAPTURE_ATTENTION_ENABLED` stays default-off in this rc. Operator-
+side workflow to start the Phase A re-soak:
+
+1. Publish rc6 to PyPI (`twine upload`).
+2. `mnemon upgrade web --app-name mnemon-memory --mnemon-version 0.7.0rc6`.
+3. Verify `mnemon doctor` 7/7 green.
+4. `flyctl ssh console -a mnemon-memory -C 'mnemon attention-status'`
+   — confirm `Flag enabled: False`, baseline boost-rate.
+5. `flyctl secrets set MNEMON_CAPTURE_ATTENTION_ENABLED=true` —
+   starts the re-soak clock.
+6. Soak ≥1 week; pass condition `boost_rate ≤ 0.25` per the ROADMAP
+   gate.
+
+Suite 875 → 996 across the sweep (+121 tests).
+
 ## [0.7.0rc5] - 2026-05-27
 
 ### Salience tier — Phase 1 default-on
