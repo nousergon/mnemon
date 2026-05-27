@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -133,56 +132,13 @@ def _reconfigure_clients_local(detected: list[str]) -> list[str]:
     return reconfigured
 
 
-_FLY_DUMP_SCRIPT = """
-import sqlite3, os, subprocess, sys
-
-SRC = '/data/default.sqlite'
-SNAP = '/tmp/_mnemon_snapshot.sqlite'
-
-# Clean prior snapshot, if any.
-try:
-    os.remove(SNAP)
-except FileNotFoundError:
-    pass
-
-# Online-backup API produces an atomic snapshot regardless of WAL
-# state — see _fly_dump_vault docstring for the rationale.
-src = sqlite3.connect(SRC, timeout=10)
-dst = sqlite3.connect(SNAP)
-src.backup(dst)
-src.close()
-dst.close()
-
-bucket = os.environ['MNEMON_S3_BUCKET']
-prefix = os.environ.get('MNEMON_S3_PREFIX', 'mnemon/vaults')
-name = os.environ.get('MNEMON_VAULT_NAME', 'default')
-
-# Upload sqlite snapshot.
-subprocess.run(
-    ['aws', 's3', 'cp', SNAP, f's3://{bucket}/{prefix}/{name}.sqlite',
-     '--only-show-errors'],
-    check=True,
-)
-
-# Upload vector store too if present (best-effort — embeddings
-# regenerate on demand, but skipping the cp would leave the local
-# vault with stale vectors post-downgrade).
-vec_path = f'/data/{name}.vec.npz'
-if os.path.exists(vec_path):
-    subprocess.run(
-        ['aws', 's3', 'cp', vec_path, f's3://{bucket}/{prefix}/{name}.vec.npz',
-         '--only-show-errors'],
-        check=False,
-    )
-
-# Cleanup snapshot.
-try:
-    os.remove(SNAP)
-except FileNotFoundError:
-    pass
-
-print('fly dump: snapshot uploaded')
-"""
+# `mnemon sync push` (canonical primitive, sync.push() at sync.py:110)
+# now does the SQLite-backup-API snapshot + S3 upload + best-effort
+# vec.npz upload that this script used to inline. Simplified
+# 2026-05-27 once Fly was reliably on a mnemon version with the
+# backup-API push (rc4+; see ROADMAP "sync.push uses SQLite's
+# online-backup API" SHIPPED 2026-05-21).
+_FLY_DUMP_CMD = "mnemon sync push"
 
 
 def _fly_dump_vault(app_name: str) -> None:
@@ -216,9 +172,14 @@ def _fly_dump_vault(app_name: str) -> None:
     got '3'" — PR #139 added the SSH'd sync push, PR #140 added an
     in-push checkpoint that doesn't work cross-process, PR #141
     added an inline checkpoint that *also* doesn't work cross-process.
-    This PR uses the backup API which actually works.
+    PR #142 added the backup API which actually works.
+
+    Simplification 2026-05-27: now invokes ``mnemon sync push`` on the
+    Fly machine rather than inlining a ~40-line Python script that
+    duplicates what sync.push() already does. The installed mnemon
+    on Fly is the source of truth for the snapshot primitive; this
+    function just routes the call.
     """
-    remote_cmd = f"python -c {shlex.quote(_FLY_DUMP_SCRIPT)}"
     subprocess.run(
         [
             "flyctl",
@@ -227,7 +188,7 @@ def _fly_dump_vault(app_name: str) -> None:
             "--app",
             app_name,
             "-C",
-            remote_cmd,
+            _FLY_DUMP_CMD,
         ],
         check=True,
     )
