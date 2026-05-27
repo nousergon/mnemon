@@ -145,3 +145,145 @@ class TestSampleVaultExemplars:
         pos, neg = bss._sample_vault_exemplars(conn, n=10)
         assert pos == []
         assert neg == []
+
+
+class TestParseJudgeResponse:
+    """The judge parses Haiku's JSON response. Robust against preamble
+    text, missing keys, or invalid JSON — never raises, returns {}
+    on failure so caller can default missing keys."""
+
+    def test_pure_json_object(self, bss):
+        text = '{"generality": 4, "durability": 5, "imperative_shape": 3, "cross_domain": 4, "rationale": "Multi-year preference"}'
+        parsed = bss._parse_judge_response(text)
+        assert parsed["generality"] == 4
+        assert parsed["durability"] == 5
+        assert parsed["rationale"] == "Multi-year preference"
+
+    def test_json_with_preamble(self, bss):
+        text = (
+            "Here is my assessment:\n\n"
+            '{"generality": 5, "durability": 5, "imperative_shape": 5, '
+            '"cross_domain": 5, "rationale": "perfect rule"}'
+        )
+        parsed = bss._parse_judge_response(text)
+        assert parsed["generality"] == 5
+        assert parsed["rationale"] == "perfect rule"
+
+    def test_invalid_json_returns_empty(self, bss):
+        text = "This is not JSON at all { not-valid"
+        assert bss._parse_judge_response(text) == {}
+
+    def test_no_braces_returns_empty(self, bss):
+        text = "no object here, just prose"
+        assert bss._parse_judge_response(text) == {}
+
+    def test_nested_json_returns_outermost(self, bss):
+        # Nested object inside a value — the bracket counter handles it.
+        text = '{"a": {"b": 1}, "c": 2}'
+        parsed = bss._parse_judge_response(text)
+        assert parsed == {"a": {"b": 1}, "c": 2}
+
+
+class TestScoreViaAnthropicJudge:
+    """Tests for the LLM-judge backend (opt-in --judge anthropic).
+    All Anthropic API calls are mocked — no real API key needed."""
+
+    def test_missing_api_key_raises_runtime_error(self, bss, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        import pytest as _p
+        with _p.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+            bss._score_via_anthropic_judge([{"id": 1, "title": "T", "content": "C", "content_type": "preference"}])
+
+    def test_missing_sdk_raises_runtime_error(self, bss, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+        # Simulate `anthropic` SDK absence by injecting None into sys.modules
+        # AND patching the import mechanism.
+        import sys as _sys
+        sentinel = object()
+        # Save + clear
+        prior = _sys.modules.get("anthropic", sentinel)
+        _sys.modules["anthropic"] = None  # makes `import anthropic` raise ImportError
+        try:
+            import pytest as _p
+            with _p.raises(RuntimeError, match="pip install anthropic"):
+                bss._score_via_anthropic_judge([{"id": 1, "title": "T", "content": "C", "content_type": "preference"}])
+        finally:
+            if prior is sentinel:
+                del _sys.modules["anthropic"]
+            else:
+                _sys.modules["anthropic"] = prior
+
+    def _inject_fake_anthropic(self, monkeypatch, mock_client):
+        """Inject a fake ``anthropic`` module into sys.modules so the
+        script's lazy ``import anthropic`` resolves to our stub. The
+        SDK isn't a hard dependency of mnemon-memory (operator-side
+        opt-in), so tests can't rely on it being installed."""
+        import sys as _sys
+        import types as _types
+
+        fake_module = _types.ModuleType("anthropic")
+        # The script does `anthropic.Anthropic(api_key=...)`. Make the
+        # class a no-arg factory that ignores kwargs and returns the
+        # mock client.
+        fake_module.Anthropic = lambda *a, **kw: mock_client
+        monkeypatch.setitem(_sys.modules, "anthropic", fake_module)
+
+    def test_happy_path_scores_each_doc(self, bss, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+        from unittest.mock import MagicMock
+
+        # Mock the Anthropic client end-to-end. Each messages.create
+        # returns a fixed rubric — score = mean(4,4,4,4)/5 = 0.8
+        mock_block = MagicMock()
+        mock_block.type = "text"
+        mock_block.text = (
+            '{"generality": 4, "durability": 4, "imperative_shape": 4, '
+            '"cross_domain": 4, "rationale": "solid"}'
+        )
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+        self._inject_fake_anthropic(monkeypatch, mock_client)
+
+        scores = bss._score_via_anthropic_judge([
+            {"id": 1, "title": "A", "content": "first", "content_type": "preference"},
+            {"id": 2, "title": "B", "content": "second", "content_type": "decision"},
+        ])
+
+        assert scores[1] == pytest.approx(0.8)
+        assert scores[2] == pytest.approx(0.8)
+        assert mock_client.messages.create.call_count == 2
+
+    def test_classify_failure_falls_back_to_zero(self, bss, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+        from unittest.mock import MagicMock
+
+        mock_client = MagicMock()
+        mock_client.messages.create.side_effect = RuntimeError("rate limit")
+        self._inject_fake_anthropic(monkeypatch, mock_client)
+
+        scores = bss._score_via_anthropic_judge([
+            {"id": 1, "title": "A", "content": "x", "content_type": "preference"},
+        ])
+        assert scores[1] == 0.0  # fallback, doesn't crash the run
+
+    def test_missing_dims_default_to_neutral(self, bss, monkeypatch):
+        """When the rubric JSON is missing a dimension, the caller
+        defaults it to 3 (neutral). Score = (5 + 1 + 3 + 3) / 4 / 5 = 0.6"""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+        from unittest.mock import MagicMock
+
+        mock_block = MagicMock()
+        mock_block.type = "text"
+        mock_block.text = '{"generality": 5, "durability": 1}'
+        mock_response = MagicMock()
+        mock_response.content = [mock_block]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+        self._inject_fake_anthropic(monkeypatch, mock_client)
+
+        scores = bss._score_via_anthropic_judge([
+            {"id": 1, "title": "T", "content": "C", "content_type": "preference"},
+        ])
+        assert scores[1] == pytest.approx(0.6)
