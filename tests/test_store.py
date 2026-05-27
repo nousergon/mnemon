@@ -342,6 +342,95 @@ class TestCorrectionOf:
         mock_apply.assert_not_called()
 
 
+class TestStandingTierAging:
+    """Salience tier Phase 3 observability — standing_tier_aging()
+    surfaces per-member age + last-injected + signal columns for the
+    operator to spot stale standing-tier members. list_standing()
+    bumps last_injected_at as the canonical injection-event surface."""
+
+    def test_list_standing_bumps_last_injected_at(self, store):
+        doc_id = store.save(title="Standing rule", content="some constraint")
+        store.promote_to_standing(doc_id)
+        # Pre-list_standing: last_injected_at is NULL.
+        row = store.db.execute(
+            "SELECT last_injected_at FROM documents WHERE id = ?", (doc_id,),
+        ).fetchone()
+        assert row["last_injected_at"] is None
+        # Call list_standing — bumps last_injected_at.
+        docs = store.list_standing()
+        assert len(docs) == 1
+        row = store.db.execute(
+            "SELECT last_injected_at FROM documents WHERE id = ?", (doc_id,),
+        ).fetchone()
+        assert row["last_injected_at"] is not None
+
+    def test_aging_renders_never_for_uninjected(self, store):
+        doc_id = store.save(title="Just promoted", content="never queried")
+        store.promote_to_standing(doc_id)
+        aging = store.standing_tier_aging()
+        assert len(aging) == 1
+        assert aging[0]["last_injected_at"] is None
+        assert aging[0]["days_since_injected"] is None
+
+    def test_aging_renders_days_since_injection(self, store):
+        import datetime as _dt
+        doc_id = store.save(title="Active rule", content="frequently injected")
+        store.promote_to_standing(doc_id)
+        # Backdate last_injected_at by 5 days
+        store.db.execute(
+            "UPDATE documents SET last_injected_at = ? WHERE id = ?",
+            ((_dt.datetime.now() - _dt.timedelta(days=5)).isoformat(sep=" "), doc_id),
+        )
+        store.db.commit()
+        aging = store.standing_tier_aging()
+        assert aging[0]["days_since_injected"] is not None
+        assert 4.5 <= aging[0]["days_since_injected"] <= 5.5
+
+    def test_aging_does_not_bump_last_injected(self, store):
+        """standing_tier_aging is observation, not injection — must NOT
+        bump last_injected_at. Otherwise calling `standing list` would
+        defeat the purpose (every call would refresh the timestamp)."""
+        doc_id = store.save(title="X", content="content")
+        store.promote_to_standing(doc_id)
+        # Seed an old timestamp
+        store.db.execute(
+            "UPDATE documents SET last_injected_at = '2026-01-01 00:00:00' "
+            "WHERE id = ?", (doc_id,),
+        )
+        store.db.commit()
+        store.standing_tier_aging()
+        store.standing_tier_aging()
+        row = store.db.execute(
+            "SELECT last_injected_at FROM documents WHERE id = ?", (doc_id,),
+        ).fetchone()
+        assert row["last_injected_at"] == "2026-01-01 00:00:00"
+
+    def test_aging_includes_phase_2_signals(self, store):
+        doc_id = store.save(title="Signal-rich", content="rule")
+        store.promote_to_standing(doc_id)
+        store.db.execute(
+            "UPDATE documents SET contradiction_win_count = 5, "
+            "correction_count = 2 WHERE id = ?", (doc_id,),
+        )
+        store.db.commit()
+        aging = store.standing_tier_aging()
+        assert aging[0]["contradiction_win_count"] == 5
+        assert aging[0]["correction_count"] == 2
+
+    def test_aging_excludes_situational_and_invalidated(self, store):
+        a = store.save(title="Standing", content="rule a")
+        store.promote_to_standing(a)
+        store.save(title="Situational", content="rule b")  # not promoted
+        c = store.save(title="Forgotten standing", content="rule c")
+        store.promote_to_standing(c)
+        store.forget(c)
+        aging = store.standing_tier_aging()
+        ids = [x["id"] for x in aging]
+        assert a in ids
+        assert c not in ids
+        assert len(ids) == 1
+
+
 class TestSalienceReport:
     """Salience tier Phase 2 promotion signals — correction_count +
     contradiction_win_count event-counter wiring + salience_report

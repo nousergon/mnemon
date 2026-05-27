@@ -683,34 +683,49 @@ class TestStandingCli:
 
     @patch("mnemon.store.Store")
     def test_list_populated(self, MockStore, capsys):
-        from mnemon.store import Document
+        # Phase 3 surface: standing_tier_aging is the data source now.
         mock_store = MockStore.return_value
         mock_store.standing_tier_status.return_value = {
             "count": 2, "cap": 15, "hard_ceiling": 20,
         }
-        d1 = Document(
-            id=1, collection="default", path=None, title="Rule 1",
-            hash="h1", content_type="preference", memory_type="semantic",
-            confidence=0.85, quality_score=0.0, access_count=0, pinned=0,
-            source_client=None, invalidated_at=None, invalidated_by=None,
-            created_at="2026-05-01", updated_at="2026-05-01",
-            content="some constraint content",
-        )
-        d2 = Document(
-            id=2, collection="default", path=None, title="Rule 2",
-            hash="h2", content_type="decision", memory_type="semantic",
-            confidence=0.9, quality_score=0.0, access_count=0, pinned=0,
-            source_client=None, invalidated_at=None, invalidated_by=None,
-            created_at="2026-05-02", updated_at="2026-05-02",
-            content="another constraint",
-        )
-        mock_store.list_standing.return_value = [d1, d2]
+        mock_store.standing_tier_aging.return_value = [
+            {"id": 1, "title": "Rule 1", "content_type": "preference",
+             "confidence": 0.85, "age_days": 10.0,
+             "contradiction_win_count": 0, "correction_count": 0,
+             "last_injected_at": "2026-05-26 00:00:00",
+             "days_since_injected": 1.0},
+            {"id": 2, "title": "Rule 2", "content_type": "decision",
+             "confidence": 0.9, "age_days": 100.0,
+             "contradiction_win_count": 3, "correction_count": 1,
+             "last_injected_at": None, "days_since_injected": None},
+        ]
         with patch("sys.argv", ["mnemon", "standing", "list"]):
             main()
         out = capsys.readouterr().out
         assert "Standing tier: 2/15" in out
         assert "Rule 1" in out
         assert "Rule 2" in out
+        assert "never" in out  # second row has no injection yet
+
+    @patch("mnemon.store.Store")
+    def test_list_marks_stale_standing_members(self, MockStore, capsys):
+        # ⚠ marker when days_since_injected ≥ 90.
+        mock_store = MockStore.return_value
+        mock_store.standing_tier_status.return_value = {
+            "count": 1, "cap": 15, "hard_ceiling": 20,
+        }
+        mock_store.standing_tier_aging.return_value = [
+            {"id": 5, "title": "Stale rule", "content_type": "preference",
+             "confidence": 0.7, "age_days": 200.0,
+             "contradiction_win_count": 0, "correction_count": 0,
+             "last_injected_at": "2026-01-01 00:00:00",
+             "days_since_injected": 120.0},
+        ]
+        with patch("sys.argv", ["mnemon", "standing", "list"]):
+            main()
+        out = capsys.readouterr().out
+        assert "⚠ stale" in out
+        assert "Stale rule" in out
 
     @patch("mnemon.store.Store")
     def test_list_empty(self, MockStore, capsys):
@@ -718,7 +733,7 @@ class TestStandingCli:
         mock_store.standing_tier_status.return_value = {
             "count": 0, "cap": 15, "hard_ceiling": 20,
         }
-        mock_store.list_standing.return_value = []
+        mock_store.standing_tier_aging.return_value = []
         with patch("sys.argv", ["mnemon", "standing", "list"]):
             main()
         out = capsys.readouterr().out

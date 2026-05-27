@@ -256,6 +256,31 @@ class Store:
         self._migrate_recurrence_count()
         self._migrate_tier()
         self._migrate_promotion_signals()
+        self._migrate_last_injected_at()
+
+    def _migrate_last_injected_at(self) -> None:
+        """Additive migration: ``documents.last_injected_at`` records
+        the last time a standing-tier memory was injected into a
+        recall context (via ``list_standing``).
+
+        Salience tier Phase 3 (added 2026-05-27) — surfaces "this
+        memory hasn't fired in N days, still load-bearing?" for
+        operator review. Doesn't auto-demote (would re-open the
+        noise-floor problem); just observability.
+
+        Stays NULL for non-standing docs and for standing docs that
+        haven't yet been injected through ``list_standing``. The
+        operator-facing CLI renders "never" for NULL.
+        """
+        cols = {
+            r["name"]
+            for r in self.db.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "last_injected_at" not in cols:
+            self.db.execute(
+                "ALTER TABLE documents ADD COLUMN last_injected_at TEXT"
+            )
+            self.db.commit()
 
     def _migrate_promotion_signals(self) -> None:
         """Additive migration: ``documents.correction_count`` and
@@ -1134,6 +1159,13 @@ class Store:
         Consumed by ``build_context`` (hook injection path) and
         ``mnemon standing list`` (operator CLI). Includes content body
         so callers can render snippets without a second fetch.
+
+        Salience tier Phase 3 (2026-05-27): bumps ``last_injected_at``
+        on every returned row to track injection events for the
+        ``standing list`` aging surface. Operator can spot stale
+        standing-tier members ("this hasn't fired in 90 days, still
+        load-bearing?") for review. Single batched UPDATE — cost is one
+        round-trip regardless of standing-tier size.
         """
         rows = self.db.execute(
             """SELECT d.*, c.doc
@@ -1142,7 +1174,76 @@ class Store:
                WHERE d.tier = 'standing' AND d.invalidated_at IS NULL
                ORDER BY d.created_at DESC"""
         ).fetchall()
+        if rows:
+            ids = [r["id"] for r in rows]
+            placeholders = ",".join("?" * len(ids))
+            self.db.execute(
+                f"UPDATE documents SET last_injected_at = datetime('now') "
+                f"WHERE id IN ({placeholders})",
+                ids,
+            )
+            self.db.commit()
         return [_row_to_document(r) for r in rows]
+
+    def standing_tier_aging(self) -> list[dict[str, Any]]:
+        """Standing-tier aging surface for Phase 3 observability.
+
+        Returns one row per live standing-tier member with:
+          - ``id`` / ``title`` / ``content_type``
+          - ``age_days`` (since created_at)
+          - ``contradiction_win_count`` (Phase 2 signal, persists for
+            review even after demote — but this method returns only
+            currently-standing)
+          - ``last_injected_at`` (raw timestamp; None until first
+            list_standing call hits it)
+          - ``days_since_injected`` (None if never, else days since
+            last_injected_at)
+
+        DOES NOT bump last_injected_at — this is an OBSERVATION call,
+        not an injection event. ``list_standing`` is the injection
+        path and owns the bump.
+
+        Operator-facing — surfaces "promoted 90 days ago, never fired"
+        as a candidate for ``memory_demote`` (Phase 3 doesn't
+        auto-demote per the plan invariant)."""
+        import datetime as _dt
+        rows = self.db.execute(
+            """SELECT id, title, content_type, confidence,
+                      created_at, last_injected_at,
+                      contradiction_win_count, correction_count
+               FROM documents
+               WHERE tier = 'standing' AND invalidated_at IS NULL
+               ORDER BY created_at DESC"""
+        ).fetchall()
+        now = _dt.datetime.now()
+
+        def _days_since(ts: str | None) -> float | None:
+            if not ts:
+                return None
+            try:
+                t = _dt.datetime.fromisoformat(str(ts).replace("Z", ""))
+            except (ValueError, TypeError):
+                return None
+            return max((now - t).total_seconds() / 86400.0, 0.0)
+
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            age_days = _days_since(r["created_at"]) or 0.0
+            since_inj = _days_since(r["last_injected_at"])
+            out.append({
+                "id": r["id"],
+                "title": r["title"],
+                "content_type": r["content_type"],
+                "confidence": r["confidence"],
+                "age_days": round(age_days, 1),
+                "contradiction_win_count": r["contradiction_win_count"],
+                "correction_count": r["correction_count"],
+                "last_injected_at": r["last_injected_at"],
+                "days_since_injected": (
+                    round(since_inj, 1) if since_inj is not None else None
+                ),
+            })
+        return out
 
     def salience_report(
         self, limit: int = 20,

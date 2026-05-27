@@ -496,20 +496,45 @@ def _handle_standing(subcommand: str, rest: list[str]) -> None:
     store = Store()
     try:
         if subcommand == "list":
-            docs = store.list_standing()
+            # Phase 3 observability: standing_tier_aging() returns the
+            # per-member age + last-injected + signal columns without
+            # bumping last_injected_at (that's list_standing's job).
+            aging = store.standing_tier_aging()
             status = store.standing_tier_status()
             print(f"Standing tier: {status['count']}/{status['cap']} "
                   f"(hard ceiling {status['hard_ceiling']})")
-            if not docs:
+            if not aging:
                 print("  (empty — promote memories via `mnemon standing promote <id>`)")
                 return
             print()
-            for d in docs:
-                snippet = (d.content or "")[:120].replace("\n", " ")
-                ellipsis = "..." if len(d.content or "") > 120 else ""
-                print(f"  #{d.id:>5}  [{d.content_type}]  {d.title}")
-                print(f"         {snippet}{ellipsis}")
-                print()
+            print(f"  {'id':>5}  {'age':>6}  {'last inj':>9}  "
+                  f"{'wins':>4}  {'corr':>4}  type           title")
+            stale_threshold_days = 90.0
+            for a in aging:
+                ct = (a["content_type"] or "")[:12]
+                title = (a["title"] or "")[:60]
+                if a["days_since_injected"] is None:
+                    last_inj = "never"
+                else:
+                    last_inj = f"{a['days_since_injected']:.0f}d ago"
+                stale_marker = ""
+                if (
+                    a["days_since_injected"] is not None
+                    and a["days_since_injected"] >= stale_threshold_days
+                ):
+                    stale_marker = "  ⚠ stale"
+                print(
+                    f"  #{a['id']:>4}  {a['age_days']:>5.0f}d  "
+                    f"{last_inj:>9}  "
+                    f"{a['contradiction_win_count']:>4}  "
+                    f"{a['correction_count']:>4}  "
+                    f"{ct:<13}  {title}{stale_marker}"
+                )
+            print(
+                f"\n  Stale threshold: {stale_threshold_days:.0f}d since last injection. "
+                "Phase 3 doesn't auto-demote — review and run "
+                "`mnemon standing demote <id>` if no longer load-bearing."
+            )
 
         elif subcommand == "promote":
             if not rest:
