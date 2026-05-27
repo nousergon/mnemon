@@ -198,6 +198,33 @@ A self-hosted mnemon Fly app with `auto_stop_machines = "stop"` (the default in 
 
 The server persists every issued MCP session ID to `<vault_dir>/mcp_sessions.sqlite` (7-day TTL). When a request bearing a known-but-not-in-memory session ID arrives at a fresh process — typical after a cold-stop or redeploy — the session is transparently resumed: a new transport is spawned with the same ID, and the underlying `ServerSession` is born already-initialized so tool calls succeed without a re-handshake. The MCP client sees no break in continuity. This is the safety net under the warm-keeper, not a replacement for it.
 
+## Claude Desktop and other MCP clients
+
+The Claude Code hook above gives **unconditional pre-LLM retrieval** — every prompt triggers a `memory_search` *before* the model sees the question, and the results are injected into context. **No other MCP client supports this flow today**, including Claude Desktop, claude.ai web, the Claude mobile app, Cursor, and Gemini CLI.
+
+Why: the hook works because Claude Code exposes a `UserPromptSubmit` lifecycle event that runs a subprocess between the user pressing Enter and the model being invoked. Desktop and the other clients only expose the standard MCP surfaces — **tools** (model-decided), **prompts** (user-invoked via slash menu), and **resources** (client-pulled). None of these fire automatically on every prompt, so there is no architectural place for an MCP server to insert "always-on" recall. Aggressively rewriting the `memory_search` tool description to coerce the model into calling it first is rejected by design — it pollutes the tool surface for every other consumer and is still model-decided.
+
+### Closest practical workaround
+
+Same snippet for every non-Code client — paste it into whichever custom-instructions / rules / memory surface that client exposes:
+
+> Before responding to any of my prompts, call the `memory_search` tool from the mnemon MCP server using relevant terms from my question. Use the returned memories to inform your response. If `memory_search` returns nothing useful, proceed without it.
+
+| Client | Need custom instructions? | Where to paste |
+|---|---|---|
+| **Claude Code** | No — the `UserPromptSubmit` hook handles it unconditionally. | — |
+| **Claude Desktop** | Yes | Settings → Profile → "What personal preferences should Claude consider in responses?" |
+| **claude.ai (web)** | Yes | Same Profile field as Desktop — it's shared across your Anthropic account. Per-Project instructions also work and override the Profile within that Project. |
+| **Claude mobile app** | Yes | Inherits from the same Profile field — set it once on Desktop or claude.ai and mobile picks it up. |
+| **Cursor** | Yes | Settings → Rules → **User Rules** (global) or a `.cursor/rules/*.mdc` file in the project (workspace-scoped). |
+| **Gemini CLI** | Yes | `~/.gemini/GEMINI.md` (global) or a project-rooted `GEMINI.md`. |
+
+In every non-Code client the call is still model-decided — it will skip on short prompts, follow-ups, or when distracted. Not a substitute for a real lifecycle hook.
+
+### When the true fix lands
+
+Anthropic would need to add a pre-prompt lifecycle hook to Claude Desktop — the Desktop-side equivalent of Claude Code's `UserPromptSubmit`. Once that surface exists, mnemon's existing `context_surfacing` hook can be wired to it directly. Until then, Claude Code is the only client with guaranteed pre-LLM injection; everywhere else, retrieval is model-decided.
+
 ## Uninstall
 
 Remove mnemon state from this machine. Nothing user-owned in the cloud is touched.
