@@ -342,6 +342,164 @@ class TestCorrectionOf:
         mock_apply.assert_not_called()
 
 
+class TestFindClusters:
+    """Phase C — vector-similarity cluster discovery for operator-
+    reviewed consolidation. Embedding-only, no LLM dep."""
+
+    def _force_search_vector(self, store, monkeypatch, pair_score):
+        """Substitute store.search_vector with a deterministic stub.
+
+        ``pair_score`` is a single float treated as the cosine score
+        for every cross-doc pair returned by the stub. Models a uniform
+        cluster: A↔B with the same similarity in both directions. For
+        per-pair scoring use a list of (id, score) tuples passed via
+        the monkeypatch directly."""
+        from mnemon.store import SearchResult
+
+        all_doc_ids = [
+            r["id"] for r in store.db.execute(
+                "SELECT id FROM documents WHERE invalidated_at IS NULL"
+            ).fetchall()
+        ]
+
+        def _stub(emb, k):
+            results = []
+            for doc_id in all_doc_ids:
+                doc = store.get(doc_id)
+                if doc:
+                    results.append(SearchResult(
+                        doc_id=doc.id, title=doc.title, content=doc.content,
+                        content_type=doc.content_type,
+                        memory_type=doc.memory_type, confidence=doc.confidence,
+                        created_at=doc.created_at, score=pair_score,
+                        source="vector",
+                    ))
+            return results
+        monkeypatch.setattr(store, "search_vector", _stub)
+
+    def test_empty_vault_returns_empty(self, store):
+        assert store.find_clusters() == []
+
+    def test_single_doc_returns_empty(self, store):
+        store.save(title="Solo", content="alone")
+        assert store.find_clusters() == []
+
+    def test_finds_two_doc_cluster_above_threshold(self, store, monkeypatch):
+        a = store.save(title="A", content="content one")
+        b = store.save(title="B", content="content two")
+        import numpy as np
+        monkeypatch.setattr(
+            "mnemon.embedder.embed",
+            lambda text: np.zeros(384, dtype=np.float32),
+        )
+        self._force_search_vector(store, monkeypatch, 0.95)
+        clusters = store.find_clusters(similarity_threshold=0.85)
+        assert len(clusters) == 1
+        ids = {m["id"] for m in clusters[0]}
+        assert ids == {a, b}
+
+    def test_threshold_filters_out_low_similarity(self, store, monkeypatch):
+        a = store.save(title="A", content="content one")
+        b = store.save(title="B", content="content two")
+        import numpy as np
+        monkeypatch.setattr(
+            "mnemon.embedder.embed",
+            lambda text: np.zeros(384, dtype=np.float32),
+        )
+        self._force_search_vector(store, monkeypatch, 0.50)
+        assert store.find_clusters(similarity_threshold=0.85) == []
+
+    def test_clusters_dedup_by_member_set(self, store, monkeypatch):
+        a = store.save(title="A", content="content one")
+        b = store.save(title="B", content="content two")
+        import numpy as np
+        monkeypatch.setattr(
+            "mnemon.embedder.embed",
+            lambda text: np.zeros(384, dtype=np.float32),
+        )
+        self._force_search_vector(store, monkeypatch, 0.95)
+        clusters = store.find_clusters()
+        assert len(clusters) == 1
+
+    def test_canonical_is_highest_recurrence(self, store, monkeypatch):
+        a = store.save(title="A low", content="content one")
+        b = store.save(title="B high", content="content two")
+        store.db.execute(
+            "UPDATE documents SET recurrence_count = 5 WHERE id = ?", (b,),
+        )
+        store.db.execute(
+            "UPDATE documents SET recurrence_count = 1 WHERE id = ?", (a,),
+        )
+        store.db.commit()
+        import numpy as np
+        monkeypatch.setattr(
+            "mnemon.embedder.embed",
+            lambda text: np.zeros(384, dtype=np.float32),
+        )
+        self._force_search_vector(store, monkeypatch, 0.95)
+        clusters = store.find_clusters()
+        assert clusters[0][0]["id"] == b
+
+    def test_recent_days_window_excludes_old(self, store, monkeypatch):
+        import datetime as _dt
+        a = store.save(title="Recent A", content="content one")
+        b = store.save(title="Ancient B", content="content two")
+        store.db.execute(
+            "UPDATE documents SET created_at = ? WHERE id = ?",
+            ((_dt.datetime.now() - _dt.timedelta(days=90)).isoformat(sep=" "), b),
+        )
+        store.db.commit()
+        import numpy as np
+        monkeypatch.setattr(
+            "mnemon.embedder.embed",
+            lambda text: np.zeros(384, dtype=np.float32),
+        )
+        self._force_search_vector(store, monkeypatch, 0.95)
+        # 30-day window excludes b → only a survives, not enough for a cluster
+        clusters = store.find_clusters(recent_days=30)
+        assert clusters == []
+
+
+class TestConsolidateCluster:
+    """Phase C — apply step of operator-reviewed consolidation. Keeps
+    the canonical (first id), supersedes the rest via 'supersedes'
+    relation + forget."""
+
+    def test_empty_cluster_is_noop(self, store):
+        result = store.consolidate_cluster([])
+        assert result["canonical_id"] is None
+        assert result["superseded_ids"] == []
+
+    def test_single_member_cluster_is_noop(self, store):
+        a = store.save(title="A", content="alone")
+        result = store.consolidate_cluster([a])
+        assert result["canonical_id"] is None
+
+    def test_supersedes_non_canonical_and_forgets_them(self, store):
+        a = store.save(title="A", content="canonical version")
+        b = store.save(title="B", content="dup version 1")
+        c = store.save(title="C", content="dup version 2")
+        result = store.consolidate_cluster([a, b, c])
+        assert result["canonical_id"] == a
+        assert set(result["superseded_ids"]) == {b, c}
+        assert store.get(a) is not None
+        assert store.get(b) is None
+        assert store.get(c) is None
+        rels = store.db.execute(
+            "SELECT target_id FROM relations "
+            "WHERE source_id = ? AND relation_type = 'supersedes'",
+            (a,),
+        ).fetchall()
+        targets = {r["target_id"] for r in rels}
+        assert b in targets
+        assert c in targets
+
+    def test_missing_canonical_returns_error(self, store):
+        result = store.consolidate_cluster([99999, 1])
+        assert result["canonical_id"] is None
+        assert any("not found" in e for e in result["errors"])
+
+
 class TestStandingTierAging:
     """Salience tier Phase 3 observability — standing_tier_aging()
     surfaces per-member age + last-injected + signal columns for the

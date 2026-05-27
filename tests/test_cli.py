@@ -982,6 +982,113 @@ class TestCliRemoteMode:
         mock_call.assert_called_once()
 
 
+class TestConsolidate:
+    """Phase C — operator-reviewed cluster consolidation CLI."""
+
+    @patch("mnemon.store.Store")
+    def test_list_renders_clusters(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.find_clusters.return_value = [
+            [
+                {"id": 1, "title": "Canonical A", "content_type": "preference",
+                 "confidence": 0.85, "access_count": 0,
+                 "recurrence_count": 3, "created_at": "2026-05-25"},
+                {"id": 2, "title": "Dup B", "content_type": "preference",
+                 "confidence": 0.85, "access_count": 0,
+                 "recurrence_count": 0, "created_at": "2026-05-26"},
+            ],
+        ]
+        with patch("sys.argv", ["mnemon", "consolidate"]):
+            main()
+        out = capsys.readouterr().out
+        assert "1 near-duplicate cluster" in out
+        assert "★ canonical" in out
+        assert "→ supersede" in out
+        assert "Canonical A" in out
+        assert "Dup B" in out
+
+    @patch("mnemon.store.Store")
+    def test_list_empty_shows_help(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.find_clusters.return_value = []
+        with patch("sys.argv", ["mnemon", "consolidate"]):
+            main()
+        out = capsys.readouterr().out
+        assert "No near-duplicate clusters" in out
+        assert "--recent-days" in out
+
+    @patch("builtins.input", return_value="y")
+    @patch("mnemon.store.Store")
+    def test_apply_with_confirmation_invokes_consolidate(
+        self, MockStore, mock_input, capsys
+    ):
+        mock_store = MockStore.return_value
+        mock_store.find_clusters.return_value = [
+            [
+                {"id": 10, "title": "Canon", "content_type": "preference",
+                 "confidence": 0.8, "access_count": 0,
+                 "recurrence_count": 5, "created_at": "2026-05-25"},
+                {"id": 11, "title": "Dup", "content_type": "preference",
+                 "confidence": 0.8, "access_count": 0,
+                 "recurrence_count": 0, "created_at": "2026-05-26"},
+            ],
+        ]
+        mock_store.consolidate_cluster.return_value = {
+            "canonical_id": 10, "superseded_ids": [11], "errors": [],
+        }
+        with patch("sys.argv", ["mnemon", "consolidate", "--apply", "0"]):
+            main()
+        mock_store.consolidate_cluster.assert_called_once_with([10, 11])
+        out = capsys.readouterr().out
+        assert "canonical=#10" in out
+        assert "superseded=[11]" in out
+
+    @patch("builtins.input", return_value="n")
+    @patch("mnemon.store.Store")
+    def test_apply_with_declined_confirmation_does_nothing(
+        self, MockStore, mock_input, capsys
+    ):
+        mock_store = MockStore.return_value
+        mock_store.find_clusters.return_value = [
+            [
+                {"id": 1, "title": "A", "content_type": "note",
+                 "confidence": 0.8, "access_count": 0,
+                 "recurrence_count": 0, "created_at": "2026-05-25"},
+                {"id": 2, "title": "B", "content_type": "note",
+                 "confidence": 0.8, "access_count": 0,
+                 "recurrence_count": 0, "created_at": "2026-05-26"},
+            ],
+        ]
+        with patch("sys.argv", ["mnemon", "consolidate", "--apply", "0"]):
+            main()
+        mock_store.consolidate_cluster.assert_not_called()
+        assert "Aborted" in capsys.readouterr().out
+
+    @patch("mnemon.store.Store")
+    def test_apply_out_of_range_with_clusters_exits_2(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.find_clusters.return_value = [
+            [{"id": 1, "title": "A", "content_type": "note", "confidence": 0.8,
+              "access_count": 0, "recurrence_count": 0,
+              "created_at": "2026-05-25"},
+             {"id": 2, "title": "B", "content_type": "note", "confidence": 0.8,
+              "access_count": 0, "recurrence_count": 0,
+              "created_at": "2026-05-26"}],
+        ]
+        with patch("sys.argv", ["mnemon", "consolidate", "--apply", "99"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+        assert "out of range" in capsys.readouterr().err
+
+    @patch("mnemon.store.Store")
+    def test_non_integer_apply_exits_2(self, MockStore, capsys):
+        with patch("sys.argv", ["mnemon", "consolidate", "--apply", "abc"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+
+
 class TestSalienceReport:
     """Coverage for `mnemon salience-report` — Salience tier Phase 2
     promotion-signal candidate ranking surface."""
