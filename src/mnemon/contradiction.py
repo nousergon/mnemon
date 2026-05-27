@@ -231,6 +231,199 @@ def check_contradictions(
     }
 
 
+# ── Retroactive sweep ────────────────────────────────────────────────────────
+
+
+def sweep_contradictions(
+    store: "Store",
+    *,
+    max_pairs: int = 50,
+    dry_run: bool = False,
+) -> dict:
+    """Retroactive contradiction sweep over the live vault.
+
+    ``check_contradictions`` only fires at save-time, so memory pairs
+    that landed before the classifier was wired in — or that slipped
+    past the at-save vector window because they arrived in different
+    sessions — never get classified. This sweep closes the gap by
+    walking the vault, finding pairs above
+    ``CONTRADICTION_OVERLAP_THRESHOLD``, and running the same NLI
+    classifier + decay/relation side effects as the save-time path.
+
+    Bounded by ``max_pairs`` (default 50) per invocation so a periodic
+    runner doesn't churn through the entire vault every tick. The
+    sweep is **non-destructive** — only adjusts confidence (decay) +
+    adds relations + bumps contradiction_win_count on winners. Mirrors
+    the `apply_confidence_decay` operational shape so it can be wired
+    into the same periodic cadence (see ``persistent_sessions``-style
+    background task).
+
+    Skips pairs that already carry a 'same'/'update'/'contradiction'
+    relation — those have been classified at some point and re-running
+    NLI on them produces no new signal.
+
+    Returns::
+
+        {
+          "pairs_examined": int,
+          "pairs_classified": int,   # NLI was actually invoked
+          "pairs_skipped": int,      # already had a classification relation
+          "decayed": int,            # update + contradiction outcomes
+          "relations_added": int,    # related + supersedes + contradicts
+          "nli_unavailable": bool,
+          "dry_run": bool,
+        }
+    """
+    summary = {
+        "pairs_examined": 0, "pairs_classified": 0, "pairs_skipped": 0,
+        "decayed": 0, "relations_added": 0,
+        "nli_unavailable": False, "dry_run": dry_run,
+    }
+
+    if max_pairs <= 0:
+        return summary
+
+    try:
+        from .nli import classify_pair_bidirectional, NLIUnavailableError
+    except ImportError:
+        summary["nli_unavailable"] = True
+        return summary
+
+    rows = store.db.execute(
+        """SELECT d.id, d.title, c.doc AS content, d.hash
+           FROM documents d
+           JOIN content c ON d.hash = c.hash
+           WHERE d.invalidated_at IS NULL
+           ORDER BY d.id"""
+    ).fetchall()
+    if len(rows) < 2:
+        return summary
+
+    docs_by_id = {r["id"]: r for r in rows}
+
+    # Pre-compute the set of (a, b) pairs that already carry a
+    # classification relation — symmetric, so check both directions.
+    classified_pairs: set[tuple[int, int]] = set()
+    for r in store.db.execute(
+        "SELECT source_id, target_id FROM relations "
+        "WHERE relation_type IN ('same', 'related', 'update', "
+        "'supersedes', 'contradicts')"
+    ).fetchall():
+        a, b = sorted([r["source_id"], r["target_id"]])
+        classified_pairs.add((a, b))
+
+    try:
+        from .embedder import embed
+    except ImportError:
+        summary["nli_unavailable"] = True
+        return summary
+
+    examined = 0
+    for doc_id, row in docs_by_id.items():
+        if summary["pairs_classified"] >= max_pairs:
+            break
+        try:
+            query_emb = embed(
+                f"title: {row['title']} | text: {row['content']}"
+            )
+            neighbors = store.search_vector(query_emb, 5)
+        except Exception as exc:
+            logger.warning(
+                "sweep_contradictions: embed/search failed for #%d (%s); "
+                "skipping that doc", doc_id, exc,
+            )
+            continue
+
+        for cand in neighbors:
+            if cand.doc_id == doc_id:
+                continue
+            if cand.score < CONTRADICTION_OVERLAP_THRESHOLD:
+                continue
+            pair = tuple(sorted([doc_id, cand.doc_id]))
+            if pair in classified_pairs:
+                summary["pairs_skipped"] += 1
+                continue
+            examined += 1
+            summary["pairs_examined"] = examined
+
+            cand_row = docs_by_id.get(cand.doc_id)
+            if cand_row is None:
+                continue
+            try:
+                result = classify_pair_bidirectional(
+                    f"title: {cand_row['title']} | text: {cand_row['content']}",
+                    f"title: {row['title']} | text: {row['content']}",
+                )
+            except NLIUnavailableError:
+                summary["nli_unavailable"] = True
+                return summary
+            except Exception as exc:
+                logger.warning(
+                    "sweep_contradictions: classify failed for pair "
+                    "(#%d, #%d): %s", doc_id, cand.doc_id, exc,
+                )
+                continue
+
+            summary["pairs_classified"] += 1
+            classified_pairs.add(pair)  # avoid re-classifying within this run
+
+            label = result.mnemon_label
+            if dry_run:
+                continue
+
+            # The "winner" / "loser" framing mirrors check_contradictions:
+            # the new save was the winner against the existing
+            # candidate. In a retroactive sweep there's no "new" doc —
+            # the higher-id doc (more recent) is treated as the winner
+            # by convention, since later memories typically reflect
+            # corrected understanding.
+            winner, loser = (doc_id, cand.doc_id) if doc_id > cand.doc_id else (cand.doc_id, doc_id)
+            loser_doc = store.get(loser)
+            if loser_doc is None:
+                continue
+
+            if label == "update":
+                new_conf = max(CONFIDENCE_FLOOR, loser_doc.confidence - UPDATE_DECAY)
+                store.db.execute(
+                    "UPDATE documents SET confidence = ?, "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    (new_conf, loser),
+                )
+                store.db.execute(
+                    "UPDATE documents SET contradiction_win_count = "
+                    "contradiction_win_count + 1 WHERE id = ?",
+                    (winner,),
+                )
+                store.add_relation(winner, loser, "supersedes", 0.8)
+                summary["decayed"] += 1
+                summary["relations_added"] += 1
+            elif label == "contradiction":
+                new_conf = max(CONFIDENCE_FLOOR, loser_doc.confidence - CONTRADICTION_DECAY)
+                store.db.execute(
+                    "UPDATE documents SET confidence = ?, "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    (new_conf, loser),
+                )
+                store.db.execute(
+                    "UPDATE documents SET contradiction_win_count = "
+                    "contradiction_win_count + 1 WHERE id = ?",
+                    (winner,),
+                )
+                store.add_relation(winner, loser, "contradicts", 0.9)
+                summary["decayed"] += 1
+                summary["relations_added"] += 1
+            elif label == "same":
+                store.add_relation(winner, loser, "related", 1.0)
+                summary["relations_added"] += 1
+            # 'unrelated' = no action
+            store.db.commit()
+
+            if summary["pairs_classified"] >= max_pairs:
+                break
+
+    return summary
+
+
 # ── Confidence Decay ────────────────────────────────────────────────────────
 
 

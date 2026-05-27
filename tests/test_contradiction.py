@@ -17,6 +17,7 @@ from mnemon.contradiction import (
     UPDATE_DECAY,
     check_contradictions,
     apply_confidence_decay,
+    sweep_contradictions,
 )
 from mnemon.nli import BidirectionalResult, NLIResult, NLIUnavailableError
 
@@ -400,3 +401,145 @@ class TestConfidenceDecay:
         doc2 = store.get(id2)
         # High-access memory should retain more confidence than low-access at same age
         assert doc2.confidence > doc1.confidence
+
+
+class TestSweepContradictions:
+    """Retroactive sweep — closes the gap for pairs that bypassed
+    save-time check_contradictions. Mirrors the same NLI classifier +
+    decay/relation side effects but bounded by --max-pairs."""
+
+    def test_empty_vault_returns_zero(self, store):
+        result = sweep_contradictions(store)
+        assert result["pairs_examined"] == 0
+        assert result["pairs_classified"] == 0
+        assert result["decayed"] == 0
+        assert result["relations_added"] == 0
+
+    def test_single_doc_vault_returns_zero(self, store):
+        store.save(title="Only one", content="lonely memory")
+        result = sweep_contradictions(store)
+        assert result["pairs_classified"] == 0
+
+    def test_classifies_overlapping_pair_and_decays_loser(self, store):
+        id_a = store.save(title="Old framing", content="old phrasing")
+        id_b = store.save(title="New framing", content="new phrasing")
+        # Force search_vector to return id_a as a candidate for id_b
+        # and vice versa, both above OVERLAP_THRESHOLD.
+        results_for_a = [SearchResult(
+            doc_id=id_b, title="New framing", content="new phrasing",
+            content_type="note", memory_type="semantic", confidence=0.8,
+            created_at="2026-01-01", score=0.95, source="vector",
+        )]
+        results_for_b = [SearchResult(
+            doc_id=id_a, title="Old framing", content="old phrasing",
+            content_type="note", memory_type="semantic", confidence=0.8,
+            created_at="2026-01-01", score=0.95, source="vector",
+        )]
+        loser_conf_before = store.get(id_a).confidence
+
+        def _search_side_effect(emb, k):
+            # Cheap: same neighbor list both directions for the test
+            return results_for_a
+        with patch.object(store, "search_vector", side_effect=_search_side_effect), \
+             patch("mnemon.embedder.embed", return_value=_mock_embedding()), \
+             patch("mnemon.nli.classify_pair_bidirectional",
+                   return_value=_bidir("update")):
+            result = sweep_contradictions(store, max_pairs=10)
+
+        assert result["pairs_classified"] >= 1
+        assert result["decayed"] >= 1
+        # id_b is the higher id → winner per the sweep's convention.
+        winner_after = store.db.execute(
+            "SELECT contradiction_win_count FROM documents WHERE id = ?",
+            (id_b,),
+        ).fetchone()
+        assert winner_after["contradiction_win_count"] >= 1
+        loser_doc = store.get(id_a)
+        assert loser_doc.confidence < loser_conf_before
+
+    def test_skips_already_classified_pairs(self, store):
+        id_a = store.save(title="A", content="first")
+        id_b = store.save(title="B", content="second")
+        # Pre-seed a 'related' relation so the pair is already classified
+        store.add_relation(id_a, id_b, "related", 1.0)
+        neighbors = [SearchResult(
+            doc_id=id_b, title="B", content="second",
+            content_type="note", memory_type="semantic", confidence=0.8,
+            created_at="2026-01-01", score=0.95, source="vector",
+        )]
+        with patch.object(store, "search_vector", return_value=neighbors), \
+             patch("mnemon.embedder.embed", return_value=_mock_embedding()), \
+             patch("mnemon.nli.classify_pair_bidirectional",
+                   return_value=_bidir("contradiction")) as mock_nli:
+            result = sweep_contradictions(store, max_pairs=10)
+
+        # No classification should have been attempted — the pre-existing
+        # 'related' relation means the pair has been classified.
+        mock_nli.assert_not_called()
+        assert result["pairs_skipped"] >= 1
+        assert result["pairs_classified"] == 0
+
+    def test_dry_run_classifies_but_does_not_mutate(self, store):
+        id_a = store.save(title="A", content="first")
+        id_b = store.save(title="B", content="second")
+        loser_conf = store.get(id_a).confidence
+        neighbors = [SearchResult(
+            doc_id=id_b, title="B", content="second",
+            content_type="note", memory_type="semantic", confidence=0.8,
+            created_at="2026-01-01", score=0.95, source="vector",
+        )]
+        with patch.object(store, "search_vector", return_value=neighbors), \
+             patch("mnemon.embedder.embed", return_value=_mock_embedding()), \
+             patch("mnemon.nli.classify_pair_bidirectional",
+                   return_value=_bidir("contradiction")):
+            result = sweep_contradictions(store, max_pairs=10, dry_run=True)
+
+        assert result["pairs_classified"] >= 1
+        # No mutation — confidence unchanged, no relations added.
+        assert store.get(id_a).confidence == loser_conf
+        rels = store.db.execute(
+            "SELECT COUNT(*) AS c FROM relations "
+            "WHERE relation_type IN ('contradicts', 'supersedes', 'related')"
+        ).fetchone()["c"]
+        assert rels == 0
+
+    def test_max_pairs_caps_work(self, store):
+        # 4 docs → 12 directed pair-classifications possible, but we cap at 2.
+        for i in range(4):
+            store.save(title=f"M{i}", content=f"content {i}")
+        # Each doc's "neighbors" includes the others above threshold
+        all_docs = store.timeline(10)
+        def _neighbors(emb, k):
+            return [
+                SearchResult(
+                    doc_id=d.id, title=d.title, content="",
+                    content_type="note", memory_type="semantic",
+                    confidence=0.8, created_at="2026-01-01",
+                    score=0.95, source="vector",
+                ) for d in all_docs
+            ]
+        with patch.object(store, "search_vector", side_effect=_neighbors), \
+             patch("mnemon.embedder.embed", return_value=_mock_embedding()), \
+             patch("mnemon.nli.classify_pair_bidirectional",
+                   return_value=_bidir("unrelated")):
+            result = sweep_contradictions(store, max_pairs=2)
+
+        assert result["pairs_classified"] <= 2
+
+    def test_nli_unavailable_aborts_early(self, store):
+        store.save(title="A", content="first")
+        store.save(title="B", content="second")
+        neighbors = [SearchResult(
+            doc_id=2, title="B", content="second",
+            content_type="note", memory_type="semantic", confidence=0.8,
+            created_at="2026-01-01", score=0.95, source="vector",
+        )]
+        with patch.object(store, "search_vector", return_value=neighbors), \
+             patch("mnemon.embedder.embed", return_value=_mock_embedding()), \
+             patch("mnemon.nli.classify_pair_bidirectional",
+                   side_effect=NLIUnavailableError("model missing")):
+            result = sweep_contradictions(store, max_pairs=10)
+
+        assert result["nli_unavailable"] is True
+        # No decays since we aborted before applying side effects.
+        assert result["decayed"] == 0
