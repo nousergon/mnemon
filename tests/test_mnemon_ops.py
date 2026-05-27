@@ -100,14 +100,16 @@ class TestChangelogExtract:
 
     def _run_in_synthetic_repo(self, tmp_path, *args, env_extra=None):
         """Run the script with REPO_ROOT pointing at a synthetic tmp dir
-        but MNEMON_VENV_BIN pointing at the real venv (the script needs
-        a working python). Returns the CompletedProcess."""
+        but MNEMON_VENV_BIN pointing at the test interpreter's bin dir
+        — works both locally (.venv/bin) and in CI (GHA-provisioned
+        interpreter dir without a .venv). Returns the CompletedProcess."""
         import os
+        import sys as _sys
         script_dir = tmp_path / "scripts"
         script_dir.mkdir(exist_ok=True)
         (script_dir / "mnemon_ops.sh").write_bytes(SCRIPT.read_bytes())
         env = {**os.environ}
-        env["MNEMON_VENV_BIN"] = str(REPO_ROOT / ".venv" / "bin")
+        env["MNEMON_VENV_BIN"] = str(Path(_sys.executable).parent)
         if env_extra:
             env.update(env_extra)
         return subprocess.run(
