@@ -189,6 +189,30 @@ HARD_CEILING = 20  # plan invariant: never exceed 20
 # Operators can swap the strategy via --exemplar-source.
 VAULT_EXEMPLAR_DEFAULT_COUNT = 15
 VAULT_POSITIVE_CONFIDENCE_FLOOR = 0.80
+
+# LLM-judge constants (added 2026-05-27 per ROADMAP P2 follow-up).
+# Opt-in via --judge anthropic + ANTHROPIC_API_KEY env var. Default
+# remains the embedding scorer (zero new deps, public-release-friendly).
+JUDGE_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+JUDGE_RUBRIC_DIMENSIONS = ("generality", "durability", "imperative_shape", "cross_domain")
+JUDGE_RUBRIC_PROMPT = """\
+You are scoring a memory's fit for a "standing context" tier — a capped
+set of facts that condition reasoning on EVERY future prompt, regardless
+of query similarity. Members must be durable constraints, not ephemeral
+status.
+
+Score the memory on FOUR dimensions, each 1 (very low) to 5 (very high):
+  - generality: how widely does this rule apply? (specific event = 1,
+    cross-cutting principle = 5)
+  - durability: how long does this remain true? (will change in days = 1,
+    multi-year invariant = 5)
+  - imperative_shape: how rule-like vs context-like? (status update = 1,
+    explicit norm = 5)
+  - cross_domain: does this condition reasoning across unrelated query
+    types? (single-domain = 1, conditions advice everywhere = 5)
+
+Return a JSON object with each dimension as a key + a one-sentence
+rationale field. Be terse and consistent."""
 # Durable non-decaying SEMANTIC types (decision / preference / antipattern
 # per HALF_LIVES). Excludes observation/research/project/note: those
 # decay and represent context, not constraints.
@@ -295,6 +319,115 @@ def _sample_vault_exemplars(
         return title or snippet
 
     return [_fmt(r) for r in pos_rows], [_fmt(r) for r in neg_rows]
+
+
+def _score_via_anthropic_judge(docs: list[dict]) -> dict[int, float]:
+    """Score each memory's 'constraint-ness' via Anthropic Haiku rubric.
+
+    Returns {doc_id: score_in_0_to_1} — rubric mean over the 4
+    JUDGE_RUBRIC_DIMENSIONS normalized to [0.2, 1.0] (raw range
+    1-5 / 5 = 0.2-1.0).
+
+    Per-memory rationale is printed to stderr for audit; the existing
+    scoring pipeline downstream only consumes the scalar score, so the
+    rationale is observability not a return value.
+
+    Activation requirements:
+      - ``ANTHROPIC_API_KEY`` env var must be set.
+      - ``anthropic`` SDK must be importable (operator-side install:
+        ``pip install anthropic``).
+
+    Raises ``RuntimeError`` with operator-facing instructions if either
+    requirement is missing — fail loud per the no-silent-fail rule.
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "--judge anthropic requires ANTHROPIC_API_KEY env var. "
+            "Set it or use --judge embedding (default)."
+        )
+    try:
+        import anthropic
+    except ImportError as e:
+        raise RuntimeError(
+            "--judge anthropic requires the `anthropic` SDK. "
+            "Install via `pip install anthropic`, or use --judge embedding."
+        ) from e
+
+    client = anthropic.Anthropic(api_key=api_key)
+    scores: dict[int, float] = {}
+
+    print(
+        f"# LLM-judge scoring {len(docs)} memories via {JUDGE_ANTHROPIC_MODEL} ...",
+        file=sys.stderr,
+    )
+    for d in docs:
+        prompt = (
+            f"{JUDGE_RUBRIC_PROMPT}\n\n"
+            f"Memory title: {d['title'] or '(no title)'}\n"
+            f"Content type: {d['content_type']}\n"
+            f"Content: {(d['content'] or '')[:1500]}"
+        )
+        try:
+            msg = client.messages.create(
+                model=JUDGE_ANTHROPIC_MODEL,
+                max_tokens=300,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = "".join(
+                block.text for block in msg.content
+                if getattr(block, "type", None) == "text"
+            )
+            parsed = _parse_judge_response(text)
+            dim_values = [parsed.get(k, 3) for k in JUDGE_RUBRIC_DIMENSIONS]
+            mean_raw = sum(dim_values) / len(dim_values)
+            scores[d["id"]] = mean_raw / 5.0  # normalize 1-5 → 0.2-1.0
+            rationale = parsed.get("rationale", "")
+            print(
+                f"  #{d['id']:>5}  score={scores[d['id']]:.2f}  "
+                f"({'+'.join(str(v) for v in dim_values)})  {rationale}",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            # Best-effort — a single failed call shouldn't abort the
+            # whole run. Default to 0.0 (no constraint signal) so the
+            # other behavioral signals (correction, contradiction,
+            # breadth) still rank the memory.
+            print(
+                f"  #{d['id']:>5}  ERROR ({type(exc).__name__}: {exc}); "
+                f"falling back to 0.0",
+                file=sys.stderr,
+            )
+            scores[d["id"]] = 0.0
+
+    return scores
+
+
+def _parse_judge_response(text: str) -> dict:
+    """Extract the rubric JSON object from a Haiku response.
+
+    Haiku reliably returns valid JSON when the system prompt requests it,
+    but the response may include preamble text. Locate the first ``{``
+    through the matching ``}`` via bracket-counting and json.loads that
+    slice. Returns ``{}`` on parse failure — caller defaults all dims
+    to 3 (neutral) when keys are missing.
+    """
+    import json as _json
+    start = text.find("{")
+    if start == -1:
+        return {}
+    depth = 0
+    for i, ch in enumerate(text[start:], start=start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return _json.loads(text[start:i + 1])
+                except _json.JSONDecodeError:
+                    return {}
+    return {}
 
 
 def _correction_score(title: str, content: str, content_type: str, confidence: float) -> float:
@@ -438,6 +571,14 @@ def main() -> int:
                     help=f"how many vault exemplars to sample per class (positive + negative) "
                          f"when --exemplar-source ∈ {{hybrid, vault}} (default: "
                          f"{VAULT_EXEMPLAR_DEFAULT_COUNT})")
+    ap.add_argument("--judge", choices=("embedding", "anthropic"),
+                    default="embedding",
+                    help="constraint-score backend: 'embedding' (default, no deps — "
+                         "max cosine vs exemplars) or 'anthropic' (opt-in higher-fidelity "
+                         "Haiku rubric scoring; requires ANTHROPIC_API_KEY env var + "
+                         "`pip install anthropic`). LLM-judge replaces the embedding "
+                         "constraint signal only; correction/contradiction/breadth/time "
+                         "signals remain.")
     args = ap.parse_args()
 
     if args.top > HARD_CEILING:
@@ -554,16 +695,29 @@ def main() -> int:
         file=sys.stderr,
     )
 
-    # Embedding-based signals
+    # Embedding-based signals (time-penalty always uses embedding —
+    # the negative class isn't a fit for rubric scoring; "is this
+    # ephemeral?" is what the time exemplars measure structurally).
     print(f"# Embedding exemplars + memories ...", file=sys.stderr)
     from mnemon.embedder import embed_batch
 
-    constraint_emb = np.vstack(embed_batch(constraint_texts))
     time_emb = np.vstack(embed_batch(time_texts))
-
     embedded_ids, memory_vecs = _load_vectors_for_docs(vecstore_path, docs)
-    constraint_raw = dict(zip(embedded_ids, _cosine_max(memory_vecs, constraint_emb).tolist()))
     time_raw = dict(zip(embedded_ids, _cosine_max(memory_vecs, time_emb).tolist()))
+
+    # Constraint signal: --judge picks embedding (default) or anthropic.
+    # Falls back to embedding scoring if LLM-judge errors out at activation.
+    if args.judge == "anthropic":
+        try:
+            constraint_raw = _score_via_anthropic_judge(docs)
+        except RuntimeError as exc:
+            print(f"# ERROR: {exc}", file=sys.stderr)
+            return 2
+    else:
+        constraint_emb = np.vstack(embed_batch(constraint_texts))
+        constraint_raw = dict(
+            zip(embedded_ids, _cosine_max(memory_vecs, constraint_emb).tolist())
+        )
 
     # Behavioral + breadth signals (cheap, all docs)
     correction = {
