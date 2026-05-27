@@ -948,6 +948,54 @@ class TestCliRemoteMode:
         mock_call.assert_called_once()
 
 
+class TestSalienceReport:
+    """Coverage for `mnemon salience-report` — Salience tier Phase 2
+    promotion-signal candidate ranking surface."""
+
+    @patch("mnemon.store.Store")
+    def test_renders_rows(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.salience_report.return_value = [
+            {"id": 7, "title": "load-bearing rule",
+             "content_type": "preference", "confidence": 0.85,
+             "correction_count": 3, "contradiction_win_count": 2,
+             "score": 5, "created_at": "2026-05-01"},
+        ]
+        with patch("sys.argv", ["mnemon", "salience-report"]):
+            main()
+        out = capsys.readouterr().out
+        assert "Salience report" in out
+        assert "#   7" in out
+        assert "load-bearing rule" in out
+        mock_store.salience_report.assert_called_once_with(limit=20)
+
+    @patch("mnemon.store.Store")
+    def test_empty_message(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.salience_report.return_value = []
+        with patch("sys.argv", ["mnemon", "salience-report"]):
+            main()
+        out = capsys.readouterr().out
+        assert "no candidates" in out
+
+    @patch("mnemon.store.Store")
+    def test_limit_flag(self, MockStore, capsys):
+        mock_store = MockStore.return_value
+        mock_store.salience_report.return_value = []
+        with patch("sys.argv",
+                   ["mnemon", "salience-report", "--limit", "5"]):
+            main()
+        mock_store.salience_report.assert_called_once_with(limit=5)
+
+    @patch("mnemon.store.Store")
+    def test_non_integer_limit_exits_2(self, MockStore, capsys):
+        with patch("sys.argv",
+                   ["mnemon", "salience-report", "--limit", "abc"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 2
+
+
 class TestAttentionReport:
     """Coverage for the new `mnemon attention-report` subcommand —
     Capture-attention Phase B operator surface."""

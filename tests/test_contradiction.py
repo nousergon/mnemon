@@ -117,6 +117,60 @@ class TestCheckContradictions:
         expected = max(CONFIDENCE_FLOOR, original_confidence - CONTRADICTION_DECAY)
         assert abs(doc1_after.confidence - expected) < 1e-6
 
+    def test_update_bumps_winner_contradiction_win_count(self, store):
+        """Salience Phase 2: the new doc (winner side) gets its
+        contradiction_win_count bumped on an `update` outcome."""
+        id1 = store.save(title="Old framing", content="prior phrasing")
+        id2 = store.save(title="New framing", content="stronger phrasing")
+
+        mock_results = [
+            SearchResult(
+                doc_id=id1, title="Old framing", content="prior phrasing",
+                content_type="note", memory_type="semantic", confidence=0.8,
+                created_at="2026-01-01", score=0.85, source="vector",
+            )
+        ]
+        with patch.object(store, "search_vector", return_value=mock_results), \
+             patch("mnemon.embedder.embed", return_value=_mock_embedding()), \
+             patch("mnemon.nli.classify_pair_bidirectional",
+                   return_value=_bidir("update")):
+            check_contradictions(store, "New framing", "stronger phrasing", id2)
+
+        row = store.db.execute(
+            "SELECT contradiction_win_count FROM documents WHERE id = ?",
+            (id2,),
+        ).fetchone()
+        assert row["contradiction_win_count"] == 1
+        # Loser side stays at 0.
+        row_loser = store.db.execute(
+            "SELECT contradiction_win_count FROM documents WHERE id = ?",
+            (id1,),
+        ).fetchone()
+        assert row_loser["contradiction_win_count"] == 0
+
+    def test_contradiction_bumps_winner_contradiction_win_count(self, store):
+        id1 = store.save(title="A", content="prior")
+        id2 = store.save(title="B", content="contradicts prior")
+
+        mock_results = [
+            SearchResult(
+                doc_id=id1, title="A", content="prior",
+                content_type="note", memory_type="semantic", confidence=0.8,
+                created_at="2026-01-01", score=0.9, source="vector",
+            )
+        ]
+        with patch.object(store, "search_vector", return_value=mock_results), \
+             patch("mnemon.embedder.embed", return_value=_mock_embedding()), \
+             patch("mnemon.nli.classify_pair_bidirectional",
+                   return_value=_bidir("contradiction")):
+            check_contradictions(store, "B", "contradicts prior", id2)
+
+        row = store.db.execute(
+            "SELECT contradiction_win_count FROM documents WHERE id = ?",
+            (id2,),
+        ).fetchone()
+        assert row["contradiction_win_count"] == 1
+
     def test_same_classification_adds_relation(self, store):
         id1 = store.save(title="Deploy step", content="Deploy via Lambda")
         id2 = store.save(title="Deploy step copy", content="We deploy using Lambda")

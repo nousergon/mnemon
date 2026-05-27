@@ -255,6 +255,43 @@ class Store:
         self._migrate_source_key()
         self._migrate_recurrence_count()
         self._migrate_tier()
+        self._migrate_promotion_signals()
+
+    def _migrate_promotion_signals(self) -> None:
+        """Additive migration: ``documents.correction_count`` and
+        ``documents.contradiction_win_count`` count operator-explicit
+        corrections + contradiction-classifier wins respectively.
+        Salience tier Phase 2 (added 2026-05-27) —
+        private/mnemon-salience-tier-plan-260521.md.
+
+        - ``correction_count``: incremented on the TARGET of a
+          ``Store.save(correction_of=<id>)`` call. High value means
+          this memory keeps getting corrected — load-bearing signal
+          for the standing-tier promotion candidate score.
+        - ``contradiction_win_count``: incremented on the WINNING
+          side (the new doc) when ``contradiction.check_contradictions``
+          classifies a pair as ``update`` or ``contradiction``. High
+          value means this memory regularly demotes others —
+          structurally load-bearing.
+
+        Pre-existing rows get a count of 0. Schema is additive +
+        harmless if salience-report is never invoked.
+        """
+        cols = {
+            r["name"]
+            for r in self.db.execute("PRAGMA table_info(documents)").fetchall()
+        }
+        if "correction_count" not in cols:
+            self.db.execute(
+                "ALTER TABLE documents ADD COLUMN "
+                "correction_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "contradiction_win_count" not in cols:
+            self.db.execute(
+                "ALTER TABLE documents ADD COLUMN "
+                "contradiction_win_count INTEGER NOT NULL DEFAULT 0"
+            )
+        self.db.commit()
 
     def _migrate_tier(self) -> None:
         """Additive migration: ``documents.tier`` distinguishes
@@ -497,12 +534,22 @@ class Store:
         # is the operator-explicit cross-id gesture (different memory
         # entirely, but THIS one corrects the prior). The 'supersedes'
         # relation makes the chain queryable + auditable downstream.
+        #
+        # Salience Phase 2 (2026-05-27): also bumps the TARGET's
+        # correction_count so the operator-explicit correction signal
+        # accumulates per memory. High correction_count = "this fact
+        # keeps getting corrected" = load-bearing promotion candidate.
         if correction_of is not None:
             self.db.execute(
                 "INSERT OR REPLACE INTO relations "
                 "(source_id, target_id, relation_type, weight) "
                 "VALUES (?, ?, 'supersedes', 1.0)",
                 (doc_id, correction_of),
+            )
+            self.db.execute(
+                "UPDATE documents SET correction_count = correction_count + 1 "
+                "WHERE id = ?",
+                (correction_of,),
             )
         self.db.commit()
 
@@ -1096,6 +1143,61 @@ class Store:
                ORDER BY d.created_at DESC"""
         ).fetchall()
         return [_row_to_document(r) for r in rows]
+
+    def salience_report(
+        self, limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        """Rank live situational memories by Phase 2 promotion-signal
+        score = ``correction_count + contradiction_win_count``.
+
+        Operator surfaces the candidates that have been corrected or
+        won contradictions most often — those are the load-bearing
+        facts the standing-tier should consider promoting. Excludes
+        memories already on the standing tier (no point recommending
+        promotion of something already promoted) and any hook-sourced
+        memory (Layer 4 + STANDING_TIER_BLOCKED_SOURCE_CLIENTS apply
+        at the recommendation surface too).
+
+        Returns ``[]`` when no candidates meet the
+        ``correction_count > 0 OR contradiction_win_count > 0``
+        filter — surface stays empty rather than spamming creation-time
+        zeros.
+        """
+        rows = self.db.execute(
+            """SELECT id, title, content_type, confidence,
+                      correction_count, contradiction_win_count,
+                      source_client, created_at
+               FROM documents
+               WHERE invalidated_at IS NULL
+                 AND tier = 'situational'
+                 AND (correction_count > 0 OR contradiction_win_count > 0)
+               ORDER BY (correction_count + contradiction_win_count) DESC,
+                        correction_count DESC,
+                        contradiction_win_count DESC,
+                        id DESC
+               LIMIT ?""",
+            (limit * 4,),
+        ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        for r in rows:
+            if r["source_client"] in STANDING_TIER_BLOCKED_SOURCE_CLIENTS:
+                # Hook-sourced can't be promoted to standing tier anyway —
+                # don't recommend them.
+                continue
+            results.append({
+                "id": r["id"],
+                "title": r["title"],
+                "content_type": r["content_type"],
+                "confidence": r["confidence"],
+                "correction_count": r["correction_count"],
+                "contradiction_win_count": r["contradiction_win_count"],
+                "score": r["correction_count"] + r["contradiction_win_count"],
+                "created_at": r["created_at"],
+            })
+            if len(results) >= limit:
+                break
+        return results
 
     def attention_report(
         self, limit: int = 20, min_access_count: int = 2,
