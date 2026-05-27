@@ -390,6 +390,61 @@ PY
     [ -n "$result" ] || { echo "    extraction returned empty" >&2; return 1; }
 }
 
+test_step2_removes_remote_url_before_seed() {
+    # Surfaced 2026-05-21 (Layer-3 attempt). `mnemon save` honors
+    # ~/.mnemon/remote_url even from inside layer3, so seed saves
+    # routed to PROD instead of the local test vault. The fix in
+    # cmd_layer3 moves the file aside before running the three saves.
+    # Regression-lock the rm + unset by grepping the script source.
+    local script_path
+    script_path="$REPO_ROOT/scripts/promote_stable.sh"
+
+    grep -q 'unset MNEMON_REMOTE_URL' "$script_path" \
+        || { echo "    script missing 'unset MNEMON_REMOTE_URL'" >&2; return 1; }
+    grep -qF 'rm -f "$HOME/.mnemon/remote_url"' "$script_path" \
+        || { echo "    script missing 'rm -f \$HOME/.mnemon/remote_url'" >&2; return 1; }
+
+    # Ordering: the unset/rm must precede the Step 2 banner.
+    local unset_line rm_line step2_line
+    unset_line="$(grep -n 'unset MNEMON_REMOTE_URL' "$script_path" | head -1 | cut -d: -f1)"
+    rm_line="$(grep -nF 'rm -f "$HOME/.mnemon/remote_url"' "$script_path" | head -1 | cut -d: -f1)"
+    step2_line="$(grep -n 'echo_step "Step 2 — seed local test vault"' "$script_path" | head -1 | cut -d: -f1)"
+    [ -n "$step2_line" ] || { echo "    no 'echo_step Step 2' line in script" >&2; return 1; }
+    [ "$unset_line" -lt "$step2_line" ] && [ "$rm_line" -lt "$step2_line" ] \
+        || { echo "    unset/rm must precede Step 2 (got unset=$unset_line rm=$rm_line step2=$step2_line)" >&2; return 1; }
+}
+
+test_mnemon_venv_bin_env_var_is_honored() {
+    # Sub-item 1 of C25: MNEMON_VENV_BIN must be overridable so CI /
+    # non-.venv operators can run the script. The script's bootstrap
+    # uses ${MNEMON_VENV_BIN:-...} to default to .venv/bin only when
+    # the env var is unset. Regression-lock the parameter expansion
+    # pattern.
+    local script_path
+    script_path="$REPO_ROOT/scripts/promote_stable.sh"
+    grep -qE 'MNEMON_VENV_BIN="\$\{MNEMON_VENV_BIN:-\$REPO_ROOT/\.venv/bin\}"' "$script_path" \
+        || { echo "    MNEMON_VENV_BIN not using \${VAR:-default} pattern" >&2; return 1; }
+}
+
+test_cleanup_destroy_retries_on_failure() {
+    # Sub-item 4 of C25: trap destroy now retries once on failure +
+    # captures stderr. Grep the script source for the retry pattern.
+    local script_path
+    script_path="$REPO_ROOT/scripts/promote_stable.sh"
+    local body
+    body="$(awk '/^_layer3_cleanup\(\)/,/^}/' "$script_path")"
+
+    # Must capture stderr to a file (not >/dev/null).
+    grep -q '2>"\$_destroy_log"' <<<"$body" \
+        || { echo "    cleanup must capture flyctl destroy stderr" >&2; return 1; }
+    # Must retry on failure ('attempt 1 failed' marker).
+    grep -q 'attempt 1 failed' <<<"$body" \
+        || { echo "    cleanup must announce retry on first failure" >&2; return 1; }
+    # On persistent failure, must surface the captured stderr to operator.
+    grep -q 'FAILED twice' <<<"$body" \
+        || { echo "    cleanup must surface persistent-failure path" >&2; return 1; }
+}
+
 test_step2_seed_contents_are_unique() {
     # mnemon's store.save() does content-hash dedup (rc15+). The original
     # runbook passed the same content to all three Step-2 saves, which
@@ -442,6 +497,9 @@ run_test test_awk_handles_zero_count
 run_test test_awk_returns_empty_when_field_missing
 run_test test_sourcing_does_not_dispatch
 run_test test_step2_seed_contents_are_unique
+run_test test_step2_removes_remote_url_before_seed
+run_test test_mnemon_venv_bin_env_var_is_honored
+run_test test_cleanup_destroy_retries_on_failure
 run_test test_remote_helper_exists_and_is_invokable
 run_test test_layer3_uses_remote_helper_not_mnemon_status
 run_test test_helper_exposes_exercise_all_tools_subcommand
