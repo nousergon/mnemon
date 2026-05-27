@@ -66,8 +66,12 @@ confirm() {
 TARGET_VERSION="$(awk -F'"' '/^__version__ = /{print $2; exit}' src/mnemon/__init__.py)"
 [ -n "$TARGET_VERSION" ] || die "could not read __version__ from src/mnemon/__init__.py"
 
-MNEMON_VENV_BIN="$REPO_ROOT/.venv/bin"
-[ -x "$MNEMON_VENV_BIN/mnemon" ] || die "mnemon CLI not found at $MNEMON_VENV_BIN/mnemon — activate / install editable venv first"
+# Operator-overridable so CI / non-.venv setups can point at the
+# interpreter dir GitHub Actions actually provisioned (no virtualenv
+# created in default ci.yml). Same pattern as scripts/mnemon_ops.sh +
+# tests/test_mnemon_ops.py — sys.executable's parent works everywhere.
+MNEMON_VENV_BIN="${MNEMON_VENV_BIN:-$REPO_ROOT/.venv/bin}"
+[ -x "$MNEMON_VENV_BIN/mnemon" ] || die "mnemon CLI not found at $MNEMON_VENV_BIN/mnemon — activate / install editable venv first (or override MNEMON_VENV_BIN)"
 [ -x "$MNEMON_VENV_BIN/twine" ] || die "twine not found at $MNEMON_VENV_BIN/twine — pip install -e .[dev]"
 [ -x "$MNEMON_VENV_BIN/python" ] || die "venv python not found at $MNEMON_VENV_BIN/python"
 
@@ -187,9 +191,44 @@ _layer3_cleanup() {
 
     # 1. Destroy any lingering test Fly app first — frees the namespace + stops
     #    cost accumulation before doing anything else.
+    #
+    # Surfaced 2026-05-21 (during Layer-3 attempt-4): a previous trap
+    # invocation reported `destroying lingering test app ...` but the
+    # destroy didn't actually succeed (app survived 44 minutes in
+    # suspended state, blocked the next layer3 invocation's
+    # "dangling apps" preflight). The original silent `>/dev/null 2>&1`
+    # masked the cause — could be a machine still draining, a transient
+    # API error, or auth expiry.
+    #
+    # Fix: capture stderr to a temp log, retry once after a brief
+    # sleep, and on persistent failure surface the captured error so
+    # the operator knows what to recover by hand. Cleanup-side
+    # failures stay tolerated (don't override `rc`), but their cause
+    # is now visible.
     if [ -n "${TEST_APP_NAME:-}" ] && flyctl apps list 2>/dev/null | grep -q "$TEST_APP_NAME"; then
         echo_warn "cleanup: destroying lingering test app $TEST_APP_NAME"
-        flyctl apps destroy "$TEST_APP_NAME" -y >/dev/null 2>&1 || echo_warn "cleanup: flyctl destroy failed for $TEST_APP_NAME"
+        local _destroy_log
+        _destroy_log="$(mktemp -t mnemon-layer3-destroy-XXXXXX.log)"
+        if flyctl apps destroy "$TEST_APP_NAME" -y >/dev/null 2>"$_destroy_log"; then
+            rm -f "$_destroy_log"
+        else
+            # First attempt failed — pause briefly + retry. Most common
+            # causes (machine still draining, transient flyctl 5xx)
+            # resolve in a few seconds.
+            echo_warn "cleanup: flyctl destroy attempt 1 failed, retrying in 5s"
+            sleep 5
+            if flyctl apps destroy "$TEST_APP_NAME" -y >/dev/null 2>"$_destroy_log"; then
+                echo_ok "cleanup: destroy succeeded on retry"
+                rm -f "$_destroy_log"
+            else
+                echo_err "cleanup: flyctl destroy FAILED twice for $TEST_APP_NAME"
+                echo_err "cleanup: captured stderr — recover by hand:"
+                sed 's/^/    /' "$_destroy_log" >&2
+                echo_err "cleanup: \`flyctl apps destroy $TEST_APP_NAME -y\` is the manual recovery"
+                # Don't unlink the log — operator may want it for support.
+                echo_warn "cleanup: stderr log retained at $_destroy_log"
+            fi
+        fi
     fi
     if [ -n "${MNEMON_S3_PREFIX:-}" ]; then
         aws s3 rm "s3://${MNEMON_S3_BUCKET:-mnemon-memory}/$MNEMON_S3_PREFIX/" --recursive >/dev/null 2>&1 || echo_warn "cleanup: s3 rm failed for prefix $MNEMON_S3_PREFIX"
