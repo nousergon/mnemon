@@ -1,16 +1,40 @@
 """CLI entry point for mnemon.
 
-Setup commands configure clients to use a remote vault. Local vault
-commands (status, search, save, forget, sync) operate on the local
-``~/.mnemon/default.sqlite`` and are intended for development or
-server-side administration — they do not interact with a remote vault.
+Setup commands configure clients to use a remote vault. Read/write
+commands (``status``, ``search``, ``save``) auto-route to the live
+remote vault when ``MNEMON_REMOTE_URL`` is set (env var or
+``~/.mnemon/remote_url`` file). Otherwise they hit the local
+``~/.mnemon/default.sqlite``. Local-only commands (``sync``,
+``rebuild``, ``forget``, ``standing``, ``attention-status``,
+``doctor``) intentionally stay on the local path — they're either
+server-administration (rebuild/sync) or operator-explicit gestures
+on the local vault.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 
 from . import __version__
+
+
+def _remote_mode_active() -> bool:
+    """True iff a remote vault is configured.
+
+    Mirrors ``hooks._remote_client.get_remote_url`` resolution order:
+    env var first, then ``~/.mnemon/remote_url`` file. Doesn't validate
+    the URL — that's the caller's job at first network use.
+    """
+    if os.environ.get("MNEMON_REMOTE_URL", "").strip():
+        return True
+    from .hooks._remote_client import REMOTE_URL_FILE
+    if REMOTE_URL_FILE.exists():
+        try:
+            return bool(REMOTE_URL_FILE.read_text().strip())
+        except OSError:
+            return False
+    return False
 
 
 def main() -> None:
@@ -45,41 +69,47 @@ def main() -> None:
             sys.exit(1)
 
     elif command == "status":
-        from .store import Store
-        store = Store()
-        stats = store.status()
-        standing = store.standing_tier_status()
-        print(f"Vault: {stats['vault_path']}")
-        print(f"Total memories: {stats['total_documents']}")
-        print(f"Vectors: {stats['total_vectors']}")
-        print(f"Pinned: {stats['pinned']}")
-        print(f"Standing tier: {standing['count']}/{standing['cap']} "
-              f"(hard ceiling {standing['hard_ceiling']})")
-        print(f"Invalidated: {stats['invalidated']}")
-        print("\nBy type:")
-        for t in stats["by_type"]:
-            print(f"  {t['content_type']}: {t['count']}")
-        store.close()
+        if _remote_mode_active():
+            _status_remote()
+        else:
+            from .store import Store
+            store = Store()
+            stats = store.status()
+            standing = store.standing_tier_status()
+            print(f"Vault: {stats['vault_path']}")
+            print(f"Total memories: {stats['total_documents']}")
+            print(f"Vectors: {stats['total_vectors']}")
+            print(f"Pinned: {stats['pinned']}")
+            print(f"Standing tier: {standing['count']}/{standing['cap']} "
+                  f"(hard ceiling {standing['hard_ceiling']})")
+            print(f"Invalidated: {stats['invalidated']}")
+            print("\nBy type:")
+            for t in stats["by_type"]:
+                print(f"  {t['content_type']}: {t['count']}")
+            store.close()
 
     elif command == "search":
         query = " ".join(args[1:])
         if not query:
             print("Usage: mnemon search <query>", file=sys.stderr)
             sys.exit(1)
-        from .search import search
-        from .store import Store
-        store = Store()
-        results = search(store, query, limit=10)
-        if not results:
-            print("No memories found.")
+        if _remote_mode_active():
+            _search_remote(query)
         else:
-            for r in results:
-                snippet = r.content[:200]
-                ellipsis = "..." if len(r.content) > 200 else ""
-                print(f"[{r.content_type}] {r.title} (score: {r.composite_score:.3f})")
-                print(f"  {snippet}{ellipsis}")
-                print()
-        store.close()
+            from .search import search
+            from .store import Store
+            store = Store()
+            results = search(store, query, limit=10)
+            if not results:
+                print("No memories found.")
+            else:
+                for r in results:
+                    snippet = r.content[:200]
+                    ellipsis = "..." if len(r.content) > 200 else ""
+                    print(f"[{r.content_type}] {r.title} (score: {r.composite_score:.3f})")
+                    print(f"  {snippet}{ellipsis}")
+                    print()
+            store.close()
 
     elif command == "save":
         if len(args) < 3:
@@ -87,28 +117,31 @@ def main() -> None:
             sys.exit(1)
         title = args[1]
         content = " ".join(args[2:])
-        from .store import Store
-        store = Store()
-        doc_id = store.save(title=title, content=content, source_client="cli")
-        print(f'Saved memory #{doc_id}: "{title}"')
-        try:
-            from .embedder import embed_document
-            doc = store.get(doc_id)
-            if doc:
-                embed_document(store, doc.hash, title, content)
-        except Exception as exc:  # noqa: BLE001
-            # Loud on the CLI — an interactive save that skipped embedding
-            # means vector search won't find this memory. Exit non-zero so
-            # scripts catch it; `mnemon rebuild` is the recovery path.
-            print(
-                f"Warning: embedding failed ({type(exc).__name__}: {exc}). "
-                f"Memory saved to vault but will not surface in vector "
-                f"search until `mnemon rebuild` runs.",
-                file=sys.stderr,
-            )
+        if _remote_mode_active():
+            _save_remote(title, content)
+        else:
+            from .store import Store
+            store = Store()
+            doc_id = store.save(title=title, content=content, source_client="cli")
+            print(f'Saved memory #{doc_id}: "{title}"')
+            try:
+                from .embedder import embed_document
+                doc = store.get(doc_id)
+                if doc:
+                    embed_document(store, doc.hash, title, content)
+            except Exception as exc:  # noqa: BLE001
+                # Loud on the CLI — an interactive save that skipped embedding
+                # means vector search won't find this memory. Exit non-zero so
+                # scripts catch it; `mnemon rebuild` is the recovery path.
+                print(
+                    f"Warning: embedding failed ({type(exc).__name__}: {exc}). "
+                    f"Memory saved to vault but will not surface in vector "
+                    f"search until `mnemon rebuild` runs.",
+                    file=sys.stderr,
+                )
+                store.close()
+                sys.exit(2)
             store.close()
-            sys.exit(2)
-        store.close()
 
     elif command == "rebuild":
         # Re-embed every non-invalidated document. Surfaces per-doc
@@ -324,6 +357,84 @@ def main() -> None:
         print(f"Unknown command: {command}", file=sys.stderr)
         _print_usage()
         sys.exit(1)
+
+
+def _status_remote() -> None:
+    """``mnemon status`` against the configured remote vault.
+
+    Reads ``memory_status`` + ``memory_list_standing`` to produce the
+    same shape the local-mode path prints. Closes the 2026-05-21 gap
+    where the CLI silently fell back to a fresh empty SQLite instead
+    of reflecting the live remote.
+    """
+    import json as _json
+    from .hooks._remote_client import call_tool_sync, RemoteClientConfigError
+
+    try:
+        raw, _ = call_tool_sync("memory_status", {}, timeout=8.0)
+        stats = _json.loads(raw)
+        std_raw, _ = call_tool_sync("memory_list_standing", {}, timeout=5.0)
+        standing_docs = _json.loads(std_raw)
+    except (RemoteClientConfigError, Exception) as exc:
+        print(f"remote status failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Vault (remote): {stats.get('vault_path', '<remote>')}")
+    print(f"Total memories: {stats.get('total_documents', 0)}")
+    print(f"Vectors: {stats.get('total_vectors', 0)}")
+    print(f"Pinned: {stats.get('pinned', 0)}")
+    print(f"Standing tier: {len(standing_docs) if isinstance(standing_docs, list) else 0}")
+    print(f"Invalidated: {stats.get('invalidated', 0)}")
+    print("\nBy type:")
+    for t in stats.get("by_type", []):
+        print(f"  {t['content_type']}: {t['count']}")
+
+
+def _search_remote(query: str) -> None:
+    """``mnemon search <query>`` against the configured remote vault."""
+    import json as _json
+    from .hooks._remote_client import call_tool_sync, RemoteClientConfigError
+
+    try:
+        raw, _ = call_tool_sync(
+            "memory_search", {"query": query, "limit": 10}, timeout=8.0,
+        )
+        results = _json.loads(raw)
+    except (RemoteClientConfigError, Exception) as exc:
+        print(f"remote search failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not results:
+        print("No memories found.")
+        return
+    for r in results:
+        content = r.get("content", "")
+        snippet = content[:200]
+        ellipsis = "..." if len(content) > 200 else ""
+        print(f"[{r.get('content_type', 'note')}] {r.get('title', '')} "
+              f"(score: {r.get('composite_score', 0):.3f})")
+        print(f"  {snippet}{ellipsis}")
+        print()
+
+
+def _save_remote(title: str, content: str) -> None:
+    """``mnemon save <title> <content>`` against the configured remote
+    vault. Tags ``source_client='cli'`` so the save is treated as an
+    explicit user gesture (no HOOK_SOURCE_CONFIDENCE_CEILING cap)."""
+    from .hooks._remote_client import call_tool_sync, RemoteClientConfigError
+
+    try:
+        raw, _ = call_tool_sync(
+            "memory_save",
+            {"title": title, "content": content, "source_client": "cli"},
+            timeout=10.0,
+        )
+    except (RemoteClientConfigError, Exception) as exc:
+        print(f"remote save failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    # Server returns a human-facing confirmation line like
+    # `Saved memory #N: "Title" [note]` — pass through.
+    print(raw)
 
 
 def _handle_standing(subcommand: str, rest: list[str]) -> None:
