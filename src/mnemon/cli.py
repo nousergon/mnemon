@@ -334,6 +334,26 @@ def main() -> None:
             print(f"downgrade failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    elif command == "salience-report":
+        # Salience tier Phase 2 — promotion-signal candidate ranking.
+        # Surfaces the situational-tier memories with the highest
+        # correction_count + contradiction_win_count so the operator
+        # can review and promote the genuinely load-bearing ones.
+        from .store import Store
+        limit = 20
+        for i, a in enumerate(args[1:], start=1):
+            if a == "--limit" and i + 1 < len(args):
+                try:
+                    limit = int(args[i + 1])
+                except ValueError:
+                    print("Error: --limit must be an integer", file=sys.stderr)
+                    sys.exit(2)
+        store = Store()
+        try:
+            _print_salience_report(store, limit=limit)
+        finally:
+            store.close()
+
     elif command == "attention-report":
         # Capture attention Phase B — access-count consolidation feedback.
         # Ranks live memories by access_count × recency so the operator
@@ -545,6 +565,34 @@ def _handle_standing(subcommand: str, rest: list[str]) -> None:
             sys.exit(2)
     finally:
         store.close()
+
+
+def _print_salience_report(store, *, limit: int) -> None:
+    """Render the Salience Phase 2 promotion-signal report. Each row
+    shows correction_count + contradiction_win_count + combined score
+    so the operator can decide which memories deserve standing-tier
+    promotion (via `mnemon standing promote <id>`)."""
+    rows = store.salience_report(limit=limit)
+    print(f"Salience report — top {limit} situational memories by promotion signal\n")
+    if not rows:
+        print("  (no candidates — correction_count + contradiction_win_count "
+              "are 0 across the situational tier; mechanism is observe-only "
+              "until an operator gesture or NLI win fires)")
+        return
+    print(f"  {'id':>5}  {'score':>5}  {'corr':>4}  {'wins':>4}  "
+          f"{'conf':>4}  type           title")
+    for r in rows:
+        ct = (r["content_type"] or "")[:12]
+        title = (r["title"] or "")[:60]
+        print(
+            f"  #{r['id']:>4}  {r['score']:>5}  "
+            f"{r['correction_count']:>4}  {r['contradiction_win_count']:>4}  "
+            f"{r['confidence']:>.2f}  {ct:<13}  {title}"
+        )
+    print(
+        "\n  Promote a candidate via `mnemon standing promote <id>` "
+        "(operator-approved per salience-tier plan invariant 6)."
+    )
 
 
 def _print_attention_report(store, *, limit: int, min_access_count: int) -> None:
@@ -793,6 +841,9 @@ Local vault (development/server-side only):
   mnemon attention-report   Phase B consolidation feedback — rank live
                             memories by access_count × recency
                             [--limit N] [--min-access N]
+  mnemon salience-report    Phase 2 promotion-signal candidates — rank
+                            situational memories by correction_count +
+                            contradiction_win_count [--limit N]
 
 Salience tier (standing-context recall):
   mnemon standing list      Show all standing-tier memories + count vs cap

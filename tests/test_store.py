@@ -342,6 +342,91 @@ class TestCorrectionOf:
         mock_apply.assert_not_called()
 
 
+class TestSalienceReport:
+    """Salience tier Phase 2 promotion signals — correction_count +
+    contradiction_win_count event-counter wiring + salience_report
+    ranking surface."""
+
+    def test_correction_of_increments_target_correction_count(self, store):
+        """The Phase 2 promotion signal: when a new memory corrects an
+        existing one (`correction_of=<id>`), the TARGET's
+        correction_count bumps."""
+        prior = store.save(title="Old", content="old payload")
+        store.save(title="New", content="new payload", correction_of=prior)
+        row = store.db.execute(
+            "SELECT correction_count FROM documents WHERE id = ?", (prior,),
+        ).fetchone()
+        assert row["correction_count"] == 1
+
+    def test_repeated_corrections_accumulate(self, store):
+        prior = store.save(title="Drift-prone", content="initial content")
+        for i in range(4):
+            store.save(
+                title=f"Correction {i}",
+                content=f"refined content version {i}",
+                correction_of=prior,
+            )
+        row = store.db.execute(
+            "SELECT correction_count FROM documents WHERE id = ?", (prior,),
+        ).fetchone()
+        assert row["correction_count"] == 4
+
+    def test_salience_report_ranks_by_combined_score(self, store):
+        # Three memories with different signal levels
+        high = store.save(title="High signal", content="much-corrected fact")
+        mid = store.save(title="Mid signal", content="some-corrected fact")
+        low = store.save(title="Low signal", content="rarely touched fact")
+        store.db.execute(
+            "UPDATE documents SET correction_count = 5, "
+            "contradiction_win_count = 3 WHERE id = ?", (high,),
+        )
+        store.db.execute(
+            "UPDATE documents SET correction_count = 0, "
+            "contradiction_win_count = 2 WHERE id = ?", (mid,),
+        )
+        store.db.execute(
+            "UPDATE documents SET correction_count = 0, "
+            "contradiction_win_count = 0 WHERE id = ?", (low,),
+        )
+        store.db.commit()
+        rows = store.salience_report(limit=10)
+        ids = [r["id"] for r in rows]
+        # high outranks mid; low is filtered out (zero signal).
+        assert ids == [high, mid]
+        assert rows[0]["score"] == 8
+        assert rows[1]["score"] == 2
+
+    def test_salience_report_excludes_standing_tier(self, store):
+        already_standing = store.save(title="Standing", content="promoted")
+        store.db.execute(
+            "UPDATE documents SET tier = 'standing', correction_count = 10 "
+            "WHERE id = ?", (already_standing,),
+        )
+        store.db.commit()
+        rows = store.salience_report(limit=10)
+        assert all(r["id"] != already_standing for r in rows)
+
+    def test_salience_report_excludes_hook_sourced(self, store):
+        # Layer 4 composition — hook-sourced can't be promoted anyway,
+        # so don't recommend them.
+        hook = store.save(
+            title="Hook fragment", content="captured by extractor",
+            source_client="claude-code-hook",
+        )
+        store.db.execute(
+            "UPDATE documents SET correction_count = 5 WHERE id = ?",
+            (hook,),
+        )
+        store.db.commit()
+        rows = store.salience_report(limit=10)
+        assert all(r["id"] != hook for r in rows)
+
+    def test_salience_report_empty_when_no_signal(self, store):
+        store.save(title="A", content="never corrected")
+        store.save(title="B", content="never contradicted")
+        assert store.salience_report(limit=10) == []
+
+
 class TestAttentionReport:
     """Capture-attention Phase B: access_count × recency rank for
     consolidation candidates. The column already accumulates on

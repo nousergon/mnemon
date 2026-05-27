@@ -189,6 +189,15 @@ def check_contradictions(
                     "UPDATE documents SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
                     (new_confidence, candidate.doc_id),
                 )
+                # Salience Phase 2: the new doc "won" — bump its
+                # contradiction_win_count so the promotion-signal
+                # scorer can identify structurally load-bearing memories
+                # (those that regularly demote others).
+                store.db.execute(
+                    "UPDATE documents SET contradiction_win_count = "
+                    "contradiction_win_count + 1 WHERE id = ?",
+                    (new_doc_id,),
+                )
                 store.db.commit()
                 store.add_relation(new_doc_id, candidate.doc_id, "supersedes", 0.8)
                 decayed += 1
@@ -200,6 +209,12 @@ def check_contradictions(
                 store.db.execute(
                     "UPDATE documents SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
                     (new_confidence, candidate.doc_id),
+                )
+                # Salience Phase 2: see `update` branch above.
+                store.db.execute(
+                    "UPDATE documents SET contradiction_win_count = "
+                    "contradiction_win_count + 1 WHERE id = ?",
+                    (new_doc_id,),
                 )
                 store.db.commit()
                 store.add_relation(new_doc_id, candidate.doc_id, "contradicts", 0.9)
