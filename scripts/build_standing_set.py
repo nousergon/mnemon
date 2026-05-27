@@ -172,6 +172,32 @@ W_TIME_PENALTY = 1.5
 DEFAULT_TOP_N = 10
 HARD_CEILING = 20  # plan invariant: never exceed 20
 
+# Vault-derived exemplars (added 2026-05-27 per ROADMAP P1).
+#
+# The hand-tuned CONSTRAINT_EXEMPLARS / TIME_BOUNDED_EXEMPLARS lists
+# encode the maintainer's prior beliefs about what "constraint shape"
+# and "time-bounded shape" look like. Real prototype-network design
+# samples the user's own vault for exemplars — high-confidence
+# preference/feedback memories represent durable constraints; recent
+# session-handoff memories represent ephemeral status updates.
+# Adapts per-user without hand-tuning maintenance.
+#
+# Defense-in-depth: by default we EXTEND the hand-tuned lists with
+# vault-derived exemplars rather than replacing — hand-tuned encode
+# general institutional patterns the vault may not yet contain; vault-
+# derived encode user-specific patterns the hand-tuned lists miss.
+# Operators can swap the strategy via --exemplar-source.
+VAULT_EXEMPLAR_DEFAULT_COUNT = 15
+VAULT_POSITIVE_CONFIDENCE_FLOOR = 0.80
+# Durable non-decaying SEMANTIC types (decision / preference / antipattern
+# per HALF_LIVES). Excludes observation/research/project/note: those
+# decay and represent context, not constraints.
+VAULT_POSITIVE_TYPES = ("decision", "preference", "antipattern")
+# Handoffs are session summaries — explicitly time-bounded (30d half-life,
+# 0.60 default confidence). The session_extractor hook produces these
+# automatically, so they're the natural negative anchor distribution.
+VAULT_NEGATIVE_TYPES = ("handoff",)
+
 # Minimum content length for standing-tier consideration. A 2-word
 # memory like "halt the run" or "propagate" technically scores via
 # breadth (FTS-matches many queries) but carries no actual constraint
@@ -206,6 +232,69 @@ def _normalize(scores: dict[int, float]) -> dict[int, float]:
     if hi == lo:
         return {k: 0.0 for k in scores}
     return {k: (v - lo) / (hi - lo) for k, v in scores.items()}
+
+
+def _sample_vault_exemplars(
+    conn: sqlite3.Connection, n: int = VAULT_EXEMPLAR_DEFAULT_COUNT,
+) -> tuple[list[str], list[str]]:
+    """Sample positive + negative exemplar texts from the vault itself.
+
+    Positive exemplars: highest-confidence ``preference`` / ``decision`` /
+    ``antipattern`` memories (≥ ``VAULT_POSITIVE_CONFIDENCE_FLOOR``).
+    These types are non-decaying SEMANTIC (per ``HALF_LIVES`` in
+    ``config.py``) — durable by content-type design. Pulled by
+    confidence DESC so the most-load-bearing user-authored constraints
+    anchor the positive class.
+
+    Negative exemplars: most recent ``handoff`` memories. These are
+    session summaries — explicitly time-bounded by both confidence
+    default (0.60) and half-life (30d). The session_extractor hook
+    produces them automatically, so they form a stable negative
+    distribution per vault.
+
+    Returns ``([positive_texts], [negative_texts])``. Each text is
+    ``"{title}: {content[:200]}"`` — title + snippet gives the
+    embedder enough signal to anchor the class without dominating.
+    Returns empty lists when the vault lacks material; caller decides
+    whether to fall back to the hand-tuned lists.
+    """
+    pos_types = ",".join(["?"] * len(VAULT_POSITIVE_TYPES))
+    pos_rows = conn.execute(
+        f"""
+        SELECT d.title, c.doc AS content
+        FROM documents d
+        JOIN content c ON d.hash = c.hash
+        WHERE d.invalidated_at IS NULL
+          AND d.content_type IN ({pos_types})
+          AND d.confidence >= ?
+        ORDER BY d.confidence DESC, d.id DESC
+        LIMIT ?
+        """,
+        (*VAULT_POSITIVE_TYPES, VAULT_POSITIVE_CONFIDENCE_FLOOR, n),
+    ).fetchall()
+
+    neg_types = ",".join(["?"] * len(VAULT_NEGATIVE_TYPES))
+    neg_rows = conn.execute(
+        f"""
+        SELECT d.title, c.doc AS content
+        FROM documents d
+        JOIN content c ON d.hash = c.hash
+        WHERE d.invalidated_at IS NULL
+          AND d.content_type IN ({neg_types})
+        ORDER BY d.created_at DESC
+        LIMIT ?
+        """,
+        (*VAULT_NEGATIVE_TYPES, n),
+    ).fetchall()
+
+    def _fmt(row) -> str:
+        title = (row["title"] or "").strip()
+        snippet = (row["content"] or "")[:200].strip()
+        if title and snippet:
+            return f"{title}: {snippet}"
+        return title or snippet
+
+    return [_fmt(r) for r in pos_rows], [_fmt(r) for r in neg_rows]
 
 
 def _correction_score(title: str, content: str, content_type: str, confidence: float) -> float:
@@ -339,6 +428,16 @@ def main() -> int:
                          f"(default: {DEFAULT_MIN_CONTENT_LENGTH}; set to 0 to disable). "
                          f"Filters out tiny noise memories like 'halt the run' / 'propagate' that "
                          f"FTS-match many queries but carry no actual constraint.")
+    ap.add_argument("--exemplar-source", choices=("hybrid", "vault", "hand-tuned"),
+                    default="hybrid",
+                    help="exemplar selection strategy: 'hybrid' (default) extends the "
+                         "hand-tuned lists with vault-sampled exemplars (defense-in-depth); "
+                         "'vault' uses only vault-sampled (falls back to hand-tuned on empty "
+                         "vault); 'hand-tuned' uses only the static lists (regression baseline).")
+    ap.add_argument("--vault-exemplar-count", type=int, default=VAULT_EXEMPLAR_DEFAULT_COUNT,
+                    help=f"how many vault exemplars to sample per class (positive + negative) "
+                         f"when --exemplar-source ∈ {{hybrid, vault}} (default: "
+                         f"{VAULT_EXEMPLAR_DEFAULT_COUNT})")
     args = ap.parse_args()
 
     if args.top > HARD_CEILING:
@@ -417,12 +516,50 @@ def main() -> int:
         file=sys.stderr,
     )
 
+    # Resolve exemplar lists per --exemplar-source.
+    # vault-derived exemplars adapt per-user without hand-tuning maintenance;
+    # hand-tuned encode general institutional patterns; hybrid (default)
+    # gives defense-in-depth via both. See ROADMAP P1 vault-derived
+    # auto-exemplars, 2026-05-27.
+    constraint_texts = list(CONSTRAINT_EXEMPLARS)
+    time_texts = list(TIME_BOUNDED_EXEMPLARS)
+    if args.exemplar_source in ("hybrid", "vault"):
+        vault_pos, vault_neg = _sample_vault_exemplars(
+            conn, n=args.vault_exemplar_count,
+        )
+        if args.exemplar_source == "vault":
+            if vault_pos:
+                constraint_texts = vault_pos
+            else:
+                print(
+                    "# WARN: --exemplar-source=vault but vault has no eligible "
+                    "positive exemplars; falling back to hand-tuned list",
+                    file=sys.stderr,
+                )
+            if vault_neg:
+                time_texts = vault_neg
+            else:
+                print(
+                    "# WARN: --exemplar-source=vault but vault has no eligible "
+                    "negative exemplars; falling back to hand-tuned list",
+                    file=sys.stderr,
+                )
+        else:  # hybrid — extend, don't replace
+            constraint_texts = list(CONSTRAINT_EXEMPLARS) + vault_pos
+            time_texts = list(TIME_BOUNDED_EXEMPLARS) + vault_neg
+    print(
+        f"# Exemplars: {len(constraint_texts)} constraint + "
+        f"{len(time_texts)} time-bounded "
+        f"(source: {args.exemplar_source})",
+        file=sys.stderr,
+    )
+
     # Embedding-based signals
     print(f"# Embedding exemplars + memories ...", file=sys.stderr)
     from mnemon.embedder import embed_batch
 
-    constraint_emb = np.vstack(embed_batch(CONSTRAINT_EXEMPLARS))
-    time_emb = np.vstack(embed_batch(TIME_BOUNDED_EXEMPLARS))
+    constraint_emb = np.vstack(embed_batch(constraint_texts))
+    time_emb = np.vstack(embed_batch(time_texts))
 
     embedded_ids, memory_vecs = _load_vectors_for_docs(vecstore_path, docs)
     constraint_raw = dict(zip(embedded_ids, _cosine_max(memory_vecs, constraint_emb).tolist()))
