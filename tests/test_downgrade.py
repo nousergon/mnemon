@@ -376,45 +376,23 @@ class TestFlyDumpVaultBeforePull:
             downgrade_local(skip_doctor=True)
         mock_dump.assert_not_called()
 
-    def test_fly_dump_runs_ssh_console_with_backup_api(self, tmp_path):
+    def test_fly_dump_runs_ssh_console_with_mnemon_sync_push(self, tmp_path):
         # Direct test that _fly_dump_vault issues the expected flyctl
-        # command. Must use SQLite's online backup API (not PRAGMA
-        # wal_checkpoint, which returns busy=0/checkpointed=0 when
-        # another process holds the WAL — exactly the long-running
-        # serve-remote scenario on Fly). Regression for the
-        # 2026-05-21 backup-vs-checkpoint correctness bug.
+        # command. Simplified 2026-05-27: the inlined ~40-line Python
+        # snapshot script collapsed to `mnemon sync push` once the
+        # backup-API push was canonical on Fly (mnemon-memory==0.6.0+
+        # ships sync.push using Connection.backup() per PR #142).
+        # The installed mnemon on the Fly machine is the source of
+        # truth for the snapshot primitive; this function just routes.
         from mnemon import downgrade as dgmod
         with patch("mnemon.downgrade.subprocess.run") as mock_run:
             dgmod._fly_dump_vault("mnemon-test-abc")
         mock_run.assert_called_once()
         call_args = mock_run.call_args.args[0]
-        # Outer shape: flyctl ssh console --app NAME -C <remote_cmd>
+        # Outer shape: flyctl ssh console --app NAME -C "mnemon sync push"
         assert call_args[0] == "flyctl"
         assert call_args[1:5] == ["ssh", "console", "--app", "mnemon-test-abc"]
         assert call_args[5] == "-C"
-        remote_cmd = call_args[6]
-        # Must be `python -c <quoted-script>`.
-        assert remote_cmd.startswith("python -c "), (
-            f"expected `python -c ...`, got: {remote_cmd[:80]}"
-        )
-        # The inlined script must use the backup API (not PRAGMA
-        # wal_checkpoint — that didn't work cross-process).
-        assert "src.backup(dst)" in remote_cmd, (
-            f"missing sqlite3 backup API call in: {remote_cmd}"
-        )
-        # Must aws s3 cp the snapshot up.
-        assert "aws" in remote_cmd and "s3" in remote_cmd and "cp" in remote_cmd, (
-            f"missing aws s3 cp in: {remote_cmd}"
-        )
-        # Should NOT use mnemon CLI sync push (version-skew —
-        # rc18 doesn't have the checkpoint, and we're now doing
-        # the upload directly in Python anyway).
-        assert "mnemon sync push" not in remote_cmd, (
-            f"should not delegate to mnemon CLI sync push: {remote_cmd}"
-        )
-        # Should NOT use PRAGMA wal_checkpoint as the primary mechanism
-        # — backup API is what actually works cross-process. (We allow
-        # the script to mention sqlite3 generally.)
-        assert "PRAGMA wal_checkpoint" not in remote_cmd, (
-            f"should not rely on PRAGMA wal_checkpoint (cross-process broken): {remote_cmd}"
+        assert call_args[6] == "mnemon sync push", (
+            f"expected `mnemon sync push`, got: {call_args[6]!r}"
         )
