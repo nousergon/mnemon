@@ -1,12 +1,31 @@
 """Tests for CLI command dispatcher."""
 
 import sys
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 from mnemon import __version__
 from mnemon.cli import main, _print_usage
+
+
+@pytest.fixture(autouse=True)
+def _isolate_remote_mode(monkeypatch, tmp_path_factory):
+    """Force remote-mode OFF by default for every test.
+
+    Without this, operator machines with ``~/.mnemon/remote_url`` populated
+    (the typical web-mode install) route the local-path tests through
+    ``call_tool_sync`` and hit the live Fly vault instead of the mocked
+    Store. Tests that exercise the remote path explicitly override via
+    setenv("MNEMON_REMOTE_URL", ...) or by writing the REMOTE_URL_FILE
+    patched in their own fixture.
+    """
+    monkeypatch.delenv("MNEMON_REMOTE_URL", raising=False)
+    bogus = tmp_path_factory.mktemp("no_remote") / "remote_url"
+    monkeypatch.setattr(
+        "mnemon.hooks._remote_client.REMOTE_URL_FILE", bogus,
+    )
 
 
 class TestVersionAndHelp:
@@ -799,6 +818,134 @@ class TestStandingCli:
         assert exc.value.code == 2
         err = capsys.readouterr().err
         assert "Unknown subcommand" in err
+
+
+class TestCliRemoteMode:
+    """Closes ROADMAP follow-up: status/search/save now honor remote
+    mode. The 2026-05-21 Layer-3 test surfaced the gap where these
+    commands silently fell back to a fresh empty SQLite instead of
+    routing through call_tool_sync against the live Fly vault.
+
+    Activation: MNEMON_REMOTE_URL env var OR ~/.mnemon/remote_url file.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate(self, monkeypatch, tmp_path):
+        # Default: no remote configured. Per-test sets the env var or
+        # creates the remote_url file fixture.
+        monkeypatch.delenv("MNEMON_REMOTE_URL", raising=False)
+        monkeypatch.setattr(
+            "mnemon.hooks._remote_client.REMOTE_URL_FILE",
+            tmp_path / "remote_url",
+        )
+
+    def test_status_falls_back_to_local_when_no_remote_set(self):
+        """When neither env var nor remote_url file present, status
+        uses the local Store path — preserves pre-existing local-only
+        operator workflow."""
+        with patch("mnemon.cli._status_remote") as mock_remote:
+            with patch("mnemon.store.Store") as MockStore:
+                MockStore.return_value.status.return_value = {
+                    "vault_path": "/tmp/local.sqlite",
+                    "total_documents": 0, "total_vectors": 0,
+                    "pinned": 0, "invalidated": 0, "by_type": [],
+                }
+                MockStore.return_value.standing_tier_status.return_value = {
+                    "count": 0, "cap": 15, "hard_ceiling": 20,
+                }
+                with patch("sys.argv", ["mnemon", "status"]):
+                    main()
+        mock_remote.assert_not_called()
+
+    def test_status_routes_remote_when_env_var_set(self, monkeypatch, capsys):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://test.fly.dev/mcp")
+        import json as _j
+        status_payload = _j.dumps({
+            "vault_path": "<remote>",
+            "total_documents": 100, "total_vectors": 95,
+            "pinned": 5, "invalidated": 2,
+            "by_type": [{"content_type": "preference", "count": 50}],
+        })
+        standing_payload = _j.dumps([{"id": 1}, {"id": 2}, {"id": 3}])
+        with patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            side_effect=[(status_payload, 0.1), (standing_payload, 0.05)],
+        ) as mock_call:
+            with patch("sys.argv", ["mnemon", "status"]):
+                main()
+        out = capsys.readouterr().out
+        assert "Vault (remote)" in out
+        assert "Total memories: 100" in out
+        assert "Standing tier: 3" in out
+        assert "preference: 50" in out
+        assert mock_call.call_count == 2
+
+    def test_search_routes_remote_when_env_var_set(self, monkeypatch, capsys):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://test.fly.dev/mcp")
+        import json as _j
+        payload = _j.dumps([{
+            "doc_id": 42, "title": "Hit", "content": "Matched content here",
+            "content_type": "preference", "composite_score": 0.91,
+        }])
+        with patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=(payload, 0.1),
+        ) as mock_call:
+            with patch("sys.argv", ["mnemon", "search", "matched"]):
+                main()
+        out = capsys.readouterr().out
+        assert "Hit" in out
+        assert "score: 0.910" in out
+        mock_call.assert_called_once()
+        args = mock_call.call_args
+        assert args[0][0] == "memory_search"
+        assert args[0][1]["query"] == "matched"
+
+    def test_save_routes_remote_when_env_var_set(self, monkeypatch, capsys):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://test.fly.dev/mcp")
+        with patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=('Saved memory #99: "Title" [note]', 0.1),
+        ) as mock_call:
+            with patch("sys.argv", ["mnemon", "save", "Title", "the", "content"]):
+                main()
+        out = capsys.readouterr().out
+        assert "Saved memory #99" in out
+        mock_call.assert_called_once()
+        args = mock_call.call_args
+        assert args[0][0] == "memory_save"
+        assert args[0][1]["title"] == "Title"
+        assert args[0][1]["content"] == "the content"
+        assert args[0][1]["source_client"] == "cli"
+
+    def test_search_remote_error_exits_1(self, monkeypatch, capsys):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://test.fly.dev/mcp")
+        with patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            side_effect=RuntimeError("network down"),
+        ):
+            with patch("sys.argv", ["mnemon", "search", "q"]):
+                with pytest.raises(SystemExit) as exc:
+                    main()
+        assert exc.value.code == 1
+        assert "remote search failed" in capsys.readouterr().err
+
+    def test_remote_url_file_activates_remote_mode(self, monkeypatch, tmp_path):
+        """The file path (~/.mnemon/remote_url) is the canonical
+        operator-installed path; env var is the override. Both must
+        activate remote mode."""
+        url_file = tmp_path / "remote_url"
+        url_file.write_text("https://from-file.fly.dev/mcp")
+        monkeypatch.setattr(
+            "mnemon.hooks._remote_client.REMOTE_URL_FILE", url_file,
+        )
+        with patch(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            return_value=("[]", 0.05),
+        ) as mock_call:
+            with patch("sys.argv", ["mnemon", "search", "q"]):
+                main()
+        mock_call.assert_called_once()
 
 
 class TestAttentionStatusPrint:
