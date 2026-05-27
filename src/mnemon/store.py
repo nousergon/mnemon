@@ -29,6 +29,7 @@ from .config import (
     MEMORY_TYPE_MAP,
     DEFAULT_CONFIDENCE,
     PIN_BOOST,
+    RECENCY_HALF_LIFE_DAYS,
     STANDING_TIER_BLOCKED_SOURCE_CLIENTS,
     STANDING_TIER_DEFAULT_CAP,
     STANDING_TIER_HARD_CEILING,
@@ -1095,6 +1096,63 @@ class Store:
                ORDER BY d.created_at DESC"""
         ).fetchall()
         return [_row_to_document(r) for r in rows]
+
+    def attention_report(
+        self, limit: int = 20, min_access_count: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Rank live memories by ``access_count × recency`` for the
+        capture-attention Phase B consolidation feedback loop.
+
+        Recency factor: e^(-age_days / RECENCY_HALF_LIFE_DAYS) so a
+        memory accessed 30 days ago counts roughly half as much as one
+        accessed today, mirroring the search composite-score recency
+        decay. High-access fragments are the load-bearing facts the
+        standing tier should consider promoting (composes with the
+        Salience Phase 2 promotion-signals work — both surface the
+        same "this memory is actually being used a lot" signal).
+
+        ``min_access_count`` filters out the tail (every memory has at
+        least one access from creation-time get). Default 2 keeps the
+        report relevant.
+        """
+        rows = self.db.execute(
+            """SELECT d.id, d.title, d.content_type, d.confidence,
+                      d.access_count, d.created_at, d.tier
+               FROM documents d
+               WHERE d.invalidated_at IS NULL
+                 AND d.access_count >= ?
+               ORDER BY d.access_count DESC
+               LIMIT ?""",
+            (min_access_count, limit * 4),  # over-fetch for recency rerank
+        ).fetchall()
+
+        import datetime as _dt
+        import math as _math
+        now = _dt.datetime.now()
+        scored: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                created = _dt.datetime.fromisoformat(
+                    str(r["created_at"]).replace("Z", "")
+                )
+                age_days = max((now - created).total_seconds() / 86400.0, 0.0)
+            except (ValueError, TypeError):
+                age_days = 0.0
+            recency = _math.exp(-age_days / RECENCY_HALF_LIFE_DAYS)
+            score = r["access_count"] * recency
+            scored.append({
+                "id": r["id"],
+                "title": r["title"],
+                "content_type": r["content_type"],
+                "confidence": r["confidence"],
+                "access_count": r["access_count"],
+                "age_days": round(age_days, 1),
+                "recency": round(recency, 3),
+                "score": round(score, 2),
+                "tier": r["tier"],
+            })
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:limit]
 
     def standing_tier_status(self) -> dict[str, Any]:
         """Stats for ``mnemon status`` + dashboards: current count vs cap."""

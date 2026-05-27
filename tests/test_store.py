@@ -342,6 +342,66 @@ class TestCorrectionOf:
         mock_apply.assert_not_called()
 
 
+class TestAttentionReport:
+    """Capture-attention Phase B: access_count × recency rank for
+    consolidation candidates. The column already accumulates on
+    Store.get + Store.save dedup; this test set covers the report
+    surface that turns it into operator-actionable signal."""
+
+    def test_filters_by_min_access_count(self, store):
+        a = store.save(title="A", content="frequent")
+        b = store.save(title="B", content="rarely accessed")
+        # Bump a's access_count via repeated get()s
+        for _ in range(5):
+            store.get(a)
+        rows = store.attention_report(limit=10, min_access_count=2)
+        ids = [r["id"] for r in rows]
+        assert a in ids
+        assert b not in ids
+
+    def test_recency_weights_score(self, store):
+        import datetime as _dt
+        new = store.save(title="New", content="recent")
+        old = store.save(title="Old", content="ancient")
+        store.db.execute(
+            "UPDATE documents SET created_at = ?, access_count = 10 "
+            "WHERE id = ?",
+            ((_dt.datetime.now() - _dt.timedelta(days=60)).isoformat(sep=" "), old),
+        )
+        store.db.execute(
+            "UPDATE documents SET access_count = 10 WHERE id = ?", (new,),
+        )
+        store.db.commit()
+        rows = store.attention_report(limit=10, min_access_count=2)
+        scores = {r["id"]: r["score"] for r in rows}
+        # New should outscore old at same access_count (recency decay)
+        assert scores[new] > scores[old]
+
+    def test_limit_caps_output(self, store):
+        for i in range(15):
+            doc_id = store.save(title=f"M{i}", content=f"content {i}")
+            store.db.execute(
+                "UPDATE documents SET access_count = 5 WHERE id = ?", (doc_id,),
+            )
+        store.db.commit()
+        rows = store.attention_report(limit=5, min_access_count=2)
+        assert len(rows) == 5
+
+    def test_excludes_invalidated(self, store):
+        a = store.save(title="A", content="live")
+        b = store.save(title="B", content="forgotten")
+        store.db.execute(
+            "UPDATE documents SET access_count = 10 WHERE id IN (?, ?)",
+            (a, b),
+        )
+        store.db.commit()
+        store.forget(b)
+        rows = store.attention_report(limit=10, min_access_count=2)
+        ids = [r["id"] for r in rows]
+        assert a in ids
+        assert b not in ids
+
+
 class TestStatus:
     def test_status_counts(self, store):
         store.save(title="A", content="a", content_type="note")

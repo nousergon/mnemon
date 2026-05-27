@@ -334,6 +334,34 @@ def main() -> None:
             print(f"downgrade failed: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    elif command == "attention-report":
+        # Capture attention Phase B — access-count consolidation feedback.
+        # Ranks live memories by access_count × recency so the operator
+        # can see which fragments are load-bearing — those are exactly
+        # the candidates for standing-tier promotion (composes with
+        # Salience Phase 2).
+        from .store import Store
+        limit = 20
+        min_count = 2
+        for i, a in enumerate(args[1:], start=1):
+            if a == "--limit" and i + 1 < len(args):
+                try:
+                    limit = int(args[i + 1])
+                except ValueError:
+                    print(f"Error: --limit must be an integer", file=sys.stderr)
+                    sys.exit(2)
+            elif a == "--min-access" and i + 1 < len(args):
+                try:
+                    min_count = int(args[i + 1])
+                except ValueError:
+                    print(f"Error: --min-access must be an integer", file=sys.stderr)
+                    sys.exit(2)
+        store = Store()
+        try:
+            _print_attention_report(store, limit=limit, min_access_count=min_count)
+        finally:
+            store.close()
+
     elif command == "attention-status":
         # Capture attention Phase A observability — soak monitor.
         # private/mnemon-capture-attention-plan-260522.md
@@ -517,6 +545,32 @@ def _handle_standing(subcommand: str, rest: list[str]) -> None:
             sys.exit(2)
     finally:
         store.close()
+
+
+def _print_attention_report(store, *, limit: int, min_access_count: int) -> None:
+    """Print a ranked list of high-access memories — capture-attention
+    Phase B consolidation feedback. Each row shows the memory's
+    access_count, age, recency factor, and combined score so the
+    operator can spot durable load-bearing memories that would benefit
+    from standing-tier promotion."""
+    rows = store.attention_report(limit=limit, min_access_count=min_access_count)
+    print(f"Attention report — top {limit} live memories by access × recency")
+    print(f"  (filtered access_count ≥ {min_access_count})\n")
+    if not rows:
+        print("  (no memories meet the filter — increase access by using "
+              "memory_search / memory_get, or lower --min-access)")
+        return
+    print(f"  {'id':>5}  {'score':>6}  {'×acc':>5}  {'age':>6}  "
+          f"{'rec':>5}  tier         type           title")
+    for r in rows:
+        tier_label = (r["tier"] or "situational")[:12]
+        ct = (r["content_type"] or "")[:12]
+        title = (r["title"] or "")[:60]
+        print(
+            f"  #{r['id']:>4}  {r['score']:>6.2f}  "
+            f"{r['access_count']:>4}×  {r['age_days']:>5.1f}d  "
+            f"{r['recency']:>5.2f}  {tier_label:<12}  {ct:<13}  {title}"
+        )
 
 
 def _print_attention_status(store) -> tuple[float, float]:
@@ -736,6 +790,9 @@ Local vault (development/server-side only):
                             recent 'restates' relations
                             [--strict: exit 1 if boost-rate > ceiling,
                             for periodic health-check wiring]
+  mnemon attention-report   Phase B consolidation feedback — rank live
+                            memories by access_count × recency
+                            [--limit N] [--min-access N]
 
 Salience tier (standing-context recall):
   mnemon standing list      Show all standing-tier memories + count vs cap

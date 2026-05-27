@@ -221,3 +221,33 @@ class TestSearch:
         results = search(store, "Python", use_vector=False)
         assert len(results) >= 1
         assert results[0].vector_similarity is None
+
+    def test_search_increments_access_count_for_surfaced_results(self, store):
+        """Capture-attention Phase B: surfaced search results bump
+        access_count so the attention-report can identify the
+        load-bearing fragments."""
+        doc_id = store.save(title="Python", content="Python is great")
+        # Reset access_count to 0 (Store.save left it implicit; we want
+        # to assert only the search-side increment).
+        store.db.execute(
+            "UPDATE documents SET access_count = 0 WHERE id = ?", (doc_id,),
+        )
+        store.db.commit()
+        search(store, "Python", use_vector=False)
+        row = store.db.execute(
+            "SELECT access_count FROM documents WHERE id = ?", (doc_id,),
+        ).fetchone()
+        assert row["access_count"] == 1
+        # Second hit on the same query bumps it again.
+        search(store, "Python", use_vector=False)
+        row = store.db.execute(
+            "SELECT access_count FROM documents WHERE id = ?", (doc_id,),
+        ).fetchone()
+        assert row["access_count"] == 2
+
+    def test_search_no_results_does_not_error_on_access_increment(self, store):
+        """Empty-result path must not attempt the IN () update — that's
+        a malformed SQL statement. Regression for the branch."""
+        results = search(store, "nonexistent xyz term", use_vector=False)
+        assert results == []
+        # Just reaching here without an OperationalError is the assertion.
