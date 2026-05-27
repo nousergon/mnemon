@@ -12,6 +12,7 @@ from mnemon.server import (
     memory_forget,
     memory_get,
     memory_pin,
+    memory_promote,
     memory_rebuild,
     memory_related,
     memory_save,
@@ -316,6 +317,106 @@ class TestMemoryForget:
         MockStore.return_value.forget.return_value = False
         result = memory_forget(999)
         assert result == "Memory #999 not found or already forgotten."
+
+
+# ── memory_promote (coherence check) ─────────────────────────────────────────
+
+
+class TestMemoryPromoteCoherenceCheck:
+    """Regression for 2026-05-22 P1 ROADMAP follow-up. After a successful
+    memory_promote, NLI bidirectional classification runs between the
+    new member and existing standing-tier members. Contradictions /
+    updates surface as a warning in the return message (operator-
+    facing observability, NOT a hard reject — NLI has known
+    false-negatives on factual-value-updated-over-time patterns)."""
+
+    def _setup_store(self, MockStore, *, other_members):
+        """Wire a MagicMock store with the rows the coherence helper
+        queries: ``store.get(new_id)`` and ``store.db.execute(...)``
+        returning ``other_members``."""
+        mock_store = MockStore.return_value
+        mock_store.promote_to_standing.return_value = True
+        mock_store.standing_tier_status.return_value = {
+            "count": len(other_members) + 1, "cap": 15,
+        }
+        # The promoted memory itself
+        mock_doc = MagicMock()
+        mock_doc.title = "new standing memory"
+        mock_doc.content = "new authoritative content"
+        mock_store.get.return_value = mock_doc
+        # `store.db.execute(...).fetchall()` returns row dicts
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = other_members
+        mock_store.db.execute.return_value = mock_cursor
+        return mock_store
+
+    @patch("mnemon.server.Store")
+    def test_no_other_members_no_warning(self, MockStore):
+        self._setup_store(MockStore, other_members=[])
+        result = memory_promote(1)
+        assert "Promoted memory #1" in result
+        assert "Coherence check" not in result
+        assert "⚠" not in result
+
+    @patch("mnemon.server.Store")
+    def test_contradiction_surfaces_warning(self, MockStore):
+        # 1 existing standing member returns 'contradiction' from NLI
+        self._setup_store(MockStore, other_members=[
+            {"id": 42, "title": "prior member",
+             "content": "old assertion that conflicts"},
+        ])
+        with patch("mnemon.nli.classify_pair_bidirectional") as mock_nli:
+            mock_result = MagicMock()
+            mock_result.mnemon_label = "contradiction"
+            mock_nli.return_value = mock_result
+            result = memory_promote(1)
+        assert "Promoted memory #1" in result
+        assert "⚠ Coherence check" in result
+        assert "contradiction: #42" in result
+        assert "prior member" in result
+
+    @patch("mnemon.server.Store")
+    def test_update_label_also_surfaces(self, MockStore):
+        # 'update' is a softer conflict (one supersedes the other) —
+        # still surfaced so the operator can decide whether to demote
+        # the older one.
+        self._setup_store(MockStore, other_members=[
+            {"id": 7, "title": "older framing", "content": "outdated phrasing"},
+        ])
+        with patch("mnemon.nli.classify_pair_bidirectional") as mock_nli:
+            mock_result = MagicMock()
+            mock_result.mnemon_label = "update"
+            mock_nli.return_value = mock_result
+            result = memory_promote(1)
+        assert "update: #7" in result
+
+    @patch("mnemon.server.Store")
+    def test_same_label_does_not_surface(self, MockStore):
+        # `same` and `unrelated` are not conflicts — promote silently.
+        self._setup_store(MockStore, other_members=[
+            {"id": 99, "title": "related memory", "content": "..."},
+        ])
+        with patch("mnemon.nli.classify_pair_bidirectional") as mock_nli:
+            mock_result = MagicMock()
+            mock_result.mnemon_label = "same"
+            mock_nli.return_value = mock_result
+            result = memory_promote(1)
+        assert "⚠" not in result
+        assert "#99" not in result
+
+    @patch("mnemon.server.Store")
+    def test_nli_unavailable_skips_check_does_not_fail(self, MockStore):
+        # NLIUnavailableError → return empty warning, promote succeeds.
+        # Coherence check is observability, not load-bearing.
+        from mnemon.nli import NLIUnavailableError
+        self._setup_store(MockStore, other_members=[
+            {"id": 1, "title": "x", "content": "y"},
+        ])
+        with patch("mnemon.nli.classify_pair_bidirectional",
+                   side_effect=NLIUnavailableError("model missing")):
+            result = memory_promote(1)
+        assert "Promoted memory #1" in result
+        assert "⚠" not in result
 
 
 # ── memory_status ────────────────────────────────────────────────────────────
