@@ -233,6 +233,17 @@ def memory_promote(id: int) -> str:
 
     Hook-sourced memories (auto-mirror, session_extractor) cannot be
     promoted — operator-explicit gesture only (Layer 4 composition).
+
+    Coherence check (added 2026-05-27): after a successful promote,
+    runs NLI bidirectional classification between the new member and
+    each existing standing-tier member. If any pair classifies as
+    ``contradiction`` or ``update``, the warning is surfaced in the
+    return message — the operator can audit + demote either side.
+    Warning-only, not blocking, per the 2026-05-22 audit which found
+    that hard-rejecting on naive NLI hits would false-negative
+    "value updated over time" patterns. Composes with
+    [[mnemon-salience-tier-plan-260521]] invariant 6 (promotion is
+    operator-approved, not auto).
     """
     from .store import (
         StandingTierCapReached,
@@ -243,17 +254,86 @@ def memory_promote(id: int) -> str:
     try:
         ok = store.promote_to_standing(id)
         status = store.standing_tier_status()
-        return (
+        if not ok:
+            return f"Memory #{id} could not be promoted."
+
+        base_msg = (
             f"Promoted memory #{id} to standing tier "
             f"({status['count']}/{status['cap']})."
-            if ok else f"Memory #{id} could not be promoted."
         )
+        warning = _coherence_warning_for_promote(store, id)
+        return base_msg if not warning else f"{base_msg}\n\n{warning}"
     except StandingTierCapReached as e:
         return f"Cap reached: {e}"
     except StandingTierProvenanceRejected as e:
         return f"Provenance rejected: {e}"
     except StandingTierError as e:
         return f"Error: {e}"
+
+
+def _coherence_warning_for_promote(store, new_id: int) -> str:
+    """Run NLI bidirectional classification between the just-promoted
+    memory and the rest of the standing tier; return a warning block
+    naming any contradiction/update pairs, or empty string if clean.
+
+    Best-effort — NLI load failure or any classify error returns ""
+    (warning is observability, not a load-bearing primitive). Logged
+    to stderr for the operator who wants to know.
+
+    Skips comparison against the just-promoted doc itself.
+    """
+    try:
+        from .nli import classify_pair_bidirectional, NLIUnavailableError
+    except ImportError:
+        return ""
+
+    new_doc = store.get(new_id)
+    if not new_doc:
+        return ""
+
+    # Other live standing-tier members
+    rows = store.db.execute(
+        "SELECT d.id, d.title, c.doc AS content FROM documents d "
+        "JOIN content c ON d.hash = c.hash "
+        "WHERE d.tier = 'standing' AND d.invalidated_at IS NULL "
+        "AND d.id != ?",
+        (new_id,),
+    ).fetchall()
+    if not rows:
+        return ""
+
+    new_text = f"{new_doc.title or ''}: {new_doc.content or ''}"
+    conflicts: list[tuple[int, str, str]] = []  # (id, title, label)
+    for r in rows:
+        other_text = f"{r['title'] or ''}: {r['content'] or ''}"
+        try:
+            result = classify_pair_bidirectional(other_text, new_text)
+        except NLIUnavailableError:
+            logger.warning("memory_promote coherence: NLI unavailable, skipping check")
+            return ""
+        except Exception as exc:
+            logger.warning(
+                "memory_promote coherence: classify failed for #%d (%s); "
+                "skipping that pair", r["id"], exc,
+            )
+            continue
+        if result.mnemon_label in ("contradiction", "update"):
+            conflicts.append((r["id"], r["title"] or "", result.mnemon_label))
+
+    if not conflicts:
+        return ""
+
+    lines = [
+        "⚠ Coherence check surfaced potential conflicts within standing tier:",
+    ]
+    for cid, title, label in conflicts:
+        lines.append(f"  - {label}: #{cid} \"{title[:60]}\"")
+    lines.append(
+        "  Review the pair — `memory_get` each, then either keep both "
+        "(false positive — NLI has a known false-negative on factual "
+        "value updates) or `memory_demote` one to resolve."
+    )
+    return "\n".join(lines)
 
 
 @mcp.tool()
