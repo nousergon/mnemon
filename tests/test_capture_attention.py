@@ -338,6 +338,87 @@ class TestHookCeiling:
                 f"doc {doc_id} confidence {row['confidence']} exceeded hook ceiling"
 
 
+class TestHookSourcedSaveSkipped:
+    """Regression for 2026-05-27 Phase A soak failure (boost-rate 0.714
+    vs 0.25 ceiling). Hook-sourced saves are best-effort transcripts of
+    chat sessions — the same provenance set that's blocked from
+    standing-tier promotion. They must NOT drive capture-attention,
+    otherwise session-handoff fragments inflate confidence on
+    near-neighbors (e.g. "Session: pr merged, continue" patterns
+    self-boosting via the session_extractor hook)."""
+
+    def test_hook_sourced_save_does_not_trigger_capture_attention(
+        self, store, attention_on
+    ):
+        """Two user-authored priors at distinct dates would normally
+        trigger. Saving a hook-sourced new doc with the same embedding
+        must NOT create 'restates' relations or increment
+        recurrence_count — the gate fires upstream."""
+        with patch("mnemon.embedder.embed", _fake_embed_constant):
+            id1 = store.save(title="A", content="content one")
+            _index_with(store, id1, "content one", _fake_embed_constant)
+            _set_created_at(store, id1, days_ago=5)
+
+            id2 = store.save(title="B", content="content two")
+            _index_with(store, id2, "content two", _fake_embed_constant)
+            _set_created_at(store, id2, days_ago=3)
+
+            # Hook-sourced save — should be filtered out at the gate.
+            id3 = store.save(
+                title="Session: something extracted",
+                content="content three",
+                source_client="claude-code-hook",
+            )
+
+        # No 'restates' relations from id3 → priors.
+        rels = store.db.execute(
+            "SELECT * FROM relations WHERE source_id = ?", (id3,)
+        ).fetchall()
+        assert len(rels) == 0, "hook-sourced save must not emit restates"
+
+        # Neither prior had its recurrence_count incremented.
+        counts = store.db.execute(
+            "SELECT SUM(recurrence_count) AS s FROM documents "
+            "WHERE id IN (?, ?)",
+            (id1, id2),
+        ).fetchone()
+        assert counts["s"] == 0, (
+            "hook-sourced save must not boost a canonical's recurrence_count"
+        )
+
+    def test_user_save_still_triggers_against_hook_sourced_neighbors(
+        self, store, attention_on
+    ):
+        """Defense isn't symmetric: an OPERATOR save with hook-sourced
+        neighbors still fires (operator-authored signal is the intent).
+        This guards against an over-aggressive future tightening that
+        would also exclude hook-source neighbors and lose the
+        consolidation signal entirely."""
+        with patch("mnemon.embedder.embed", _fake_embed_constant):
+            id1 = store.save(
+                title="Session A", content="content one",
+                source_client="claude-code-hook",
+            )
+            _index_with(store, id1, "content one", _fake_embed_constant)
+            _set_created_at(store, id1, days_ago=5)
+
+            id2 = store.save(
+                title="Session B", content="content two",
+                source_client="claude-code-hook",
+            )
+            _index_with(store, id2, "content two", _fake_embed_constant)
+            _set_created_at(store, id2, days_ago=3)
+
+            # User save → should trigger; hook-source ceiling caps the
+            # boost on the canonical, but the trigger itself fires.
+            id3 = store.save(title="User assertion", content="content three")
+
+        rels = store.db.execute(
+            "SELECT * FROM relations WHERE source_id = ?", (id3,)
+        ).fetchall()
+        assert len(rels) == 2, "user save must trigger against hook-source neighbors"
+
+
 class TestUserUncapped:
     def test_user_canonical_can_exceed_hook_ceiling(self, store, attention_on):
         """User-authored canonical (source_client=None) can be boosted

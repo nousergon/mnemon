@@ -12,8 +12,30 @@
   who want to opt out can still set `MNEMON_STANDING_TIER_ENABLED=0`.
   Note: capture-attention Phase A (`CAPTURE_ATTENTION_ENABLED`) stays
   default-off — its soak surfaced an over-firing defect (boost-rate
-  0.714 vs 0.25 ceiling) that requires a candidate-filter fix + a
-  re-calibration on live-traffic distribution before re-soak.
+  0.714 vs 0.25 ceiling); the candidate-filter half of that fix lands
+  in the section below; a live-traffic threshold re-calibration + fresh
+  ≥1 week re-soak gate the eventual default-on flip.
+
+### Capture-attention — hook-source provenance gate
+
+- **`Store.apply_capture_attention()` early-returns when the saving
+  doc's `source_client` is in `HOOK_SOURCE_CLIENTS`.** Mirrors the
+  existing Layer 4 demotion + `STANDING_TIER_BLOCKED_SOURCE_CLIENTS`
+  policy: the same provenance set that's capped at
+  `HOOK_SOURCE_CONFIDENCE_CEILING` at save and demoted by
+  `PROVENANCE_DEMOTION_FACTOR` at recall — and forbidden from
+  standing-tier promotion — also cannot drive capture-attention
+  boosts. Surfaced 2026-05-27 by the Phase A soak: boost-rate hit
+  232/325 = 0.714 vs the documented 0.25 ceiling, with canonicals
+  like "Session: pr merged, continue" — session_extractor hook output
+  self-boosting. The gate restores the mechanism to its intent
+  (consolidate operator-authored signal, not session noise).
+- **2 new regression tests** (`TestHookSourcedSaveSkipped`):
+  hook-sourced saves must not emit `'restates'` relations or
+  increment `recurrence_count` on neighbors; user-authored saves
+  with hook-sourced neighbors continue to fire (the defense is
+  one-sided on purpose — consolidating operator signal against
+  hook-source echoes is still valid).
 
 ## [0.7.0rc4] - 2026-05-24
 
