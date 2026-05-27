@@ -48,6 +48,28 @@ SEARCH_LIMIT = 8
 # content length.
 _SNIPPET_CHARS = 300
 
+
+def _balance_bold(snippet: str) -> str:
+    """Strip a dangling ``**`` if the snippet has an odd count.
+
+    The 300-char slice can land mid-``**bold**``, leaving an unclosed
+    marker. Downstream markdown renderers then emit ``</n>`` or similar
+    artifacts where the closing tag should be. Cheapest robust form:
+    when ``**`` count is odd, truncate the snippet at the last ``**``
+    so the rendered output ends cleanly without dangling emphasis.
+
+    Examples:
+      "foo **bar"      → "foo "
+      "foo **bar**"    → "foo **bar**"     (unchanged — balanced)
+      "foo **bar** baz **q" → "foo **bar** baz "
+    """
+    if snippet.count("**") % 2 == 0:
+        return snippet
+    last = snippet.rfind("**")
+    if last == -1:  # paranoia — odd count without finding ** is impossible
+        return snippet
+    return snippet[:last].rstrip()
+
 # Layer 1 (stored-injection defense) — spotlighting / data-marking.
 # Recalled memory content is untrusted input replayed into a privileged
 # context. Layers 0/2/4 reduce what reaches here and neutralize the
@@ -134,7 +156,7 @@ def _fetch_standing_via_mcp() -> str:
         content = str(d.get("content", ""))
         content_type = str(d.get("content_type", "note"))
         doc_id = d.get("doc_id", "?")
-        snippet = defang_control_markup(content[:_SNIPPET_CHARS])
+        snippet = _balance_bold(defang_control_markup(content[:_SNIPPET_CHARS]))
         ellipsis = "..." if len(content) > _SNIPPET_CHARS else ""
         lines.append(
             f"- [{content_type}] **{title}** (id={doc_id})\n"
@@ -219,7 +241,7 @@ def _fetch_standing_block(ids: list[int]) -> str:
         title = defang_control_markup(str(data.get("title", "")))
         content = str(data.get("content", ""))
         content_type = str(data.get("content_type", "note"))
-        snippet = defang_control_markup(content[:_SNIPPET_CHARS])
+        snippet = _balance_bold(defang_control_markup(content[:_SNIPPET_CHARS]))
         ellipsis = "..." if len(content) > _SNIPPET_CHARS else ""
         lines.append(
             f"- [{content_type}] **{title}** (id={doc_id})\n"
@@ -237,7 +259,7 @@ def _format_results(results: list[dict]) -> str:
     lines: list[str] = []
     for i, r in enumerate(results, 1):
         content = r.get("content", "")
-        snippet = defang_control_markup(content[:_SNIPPET_CHARS])
+        snippet = _balance_bold(defang_control_markup(content[:_SNIPPET_CHARS]))
         ellipsis = "..." if len(content) > _SNIPPET_CHARS else ""
         lines.append(
             f"{i}. [{r.get('content_type', 'note')}] "
