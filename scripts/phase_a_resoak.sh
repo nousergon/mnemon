@@ -7,12 +7,21 @@
 # filter to Fly + activate the re-soak + monitor + close.
 #
 # Subcommands:
+#   release-and-activate
+#               — ALL-IN-ONE: invoke promote_stable.sh publish (build →
+#                 twine upload → wait for PyPI → mnemon upgrade web →
+#                 doctor → tag → GH Release), then activate the Phase A
+#                 re-soak. The single-command operator path. Each
+#                 destructive step inside the chain has its own confirm
+#                 prompt so the gates remain.
 #   preflight   — read-only: confirm Fly version matches local
-#                 __version__ + hook-source filter is in the deployed
-#                 contradiction.py + secret is currently OFF.
+#                 __version__ + hook-source filter (rc5+) is live +
+#                 secret is currently OFF.
 #   activate    — confirm + `flyctl secrets set
 #                 MNEMON_CAPTURE_ATTENTION_ENABLED=true` + verify the
-#                 flip via `mnemon attention-status` on Fly.
+#                 flip via `mnemon attention-status` on Fly. Assumes
+#                 release already happened (use release-and-activate
+#                 to fold both).
 #   status      — print current Fly `mnemon attention-status` + soak
 #                 elapsed-days from the activation timestamp file.
 #   close       — read attention-status; if boost-rate ≤ ceiling +
@@ -23,19 +32,20 @@
 #                 MNEMON_CAPTURE_ATTENTION_ENABLED`. Use if the live
 #                 boost-rate spikes mid-soak.
 #
-# Operator workflow (assumes the rc has been merged + twine-uploaded +
-# `mnemon upgrade web` deployed against Fly):
+# Recommended operator workflow (single command):
 #
-#   scripts/phase_a_resoak.sh preflight   # confirm ready
-#   scripts/phase_a_resoak.sh activate    # start the soak clock
+#   scripts/phase_a_resoak.sh release-and-activate
 #   # ... wait ≥ MIN_SOAK_DAYS, periodically:
 #   scripts/phase_a_resoak.sh status
 #   # at soak end:
-#   scripts/phase_a_resoak.sh close       # surface pass/fail + next-step PR
+#   scripts/phase_a_resoak.sh close
 #
-# `twine upload` + `mnemon upgrade web` are NOT driven from here —
-# those are the operator's responsibility (credentials + the existing
-# promote_stable.sh / mnemon upgrade web entry points).
+# Decomposed workflow (when you want finer-grained control or already
+# released):
+#
+#   bash scripts/promote_stable.sh publish        # release chain only
+#   scripts/phase_a_resoak.sh preflight           # confirm ready
+#   scripts/phase_a_resoak.sh activate            # start the soak clock
 
 set -euo pipefail
 
@@ -293,6 +303,36 @@ print(f'{(now - started).total_seconds() / 86400:.1f}')
     fi
 }
 
+cmd_release_and_activate() {
+    # All-in-one: invoke promote_stable.sh publish (full release chain
+    # — build → twine upload → wait → mnemon upgrade web → doctor →
+    # tag → GH Release), then activate the Phase A re-soak. Folds the
+    # 5-command operator sequence into a single invocation. Each
+    # destructive step inside promote_stable.sh has its own confirm
+    # prompt (twine upload, etc.), so the operator gates remain.
+    #
+    # Use this when: you've merged the rc bump PR + want to ship the
+    # rc to Fly AND start the Phase A re-soak in one shot.
+    #
+    # If a step fails, the script aborts at the failure point and the
+    # operator can hand-resume from there. After fixing, re-invoke
+    # this subcommand — promote_stable.sh's preflight + the activate
+    # step are both idempotent.
+    echo_step "Release + activate Phase A re-soak — single-command path"
+    echo "  Phase 1: promote_stable.sh publish (build → twine → deploy → tag → release)"
+    echo "  Phase 2: phase_a_resoak.sh activate (preflight → flyctl secrets set → verify)"
+
+    confirm "Run the full release + activate chain for $LOCAL_VERSION?"
+
+    echo_step "Phase 1 of 2 — promote_stable.sh publish"
+    bash "$SCRIPT_DIR/promote_stable.sh" publish
+
+    echo_step "Phase 2 of 2 — phase_a_resoak.sh activate"
+    # cmd_activate already runs cmd_preflight as its first step, which
+    # validates Fly is at the just-deployed version.
+    cmd_activate
+}
+
 cmd_deactivate() {
     echo_step "Phase A re-soak DEACTIVATE — emergency off-switch"
 
@@ -319,11 +359,12 @@ main() {
     local sub="${1:-help}"
     shift || true
     case "$sub" in
-        preflight)   cmd_preflight ;;
-        activate)    cmd_activate ;;
-        status)      cmd_status ;;
-        close)       cmd_close ;;
-        deactivate)  cmd_deactivate ;;
+        preflight)             cmd_preflight ;;
+        activate)              cmd_activate ;;
+        release-and-activate)  cmd_release_and_activate ;;
+        status)                cmd_status ;;
+        close)                 cmd_close ;;
+        deactivate)            cmd_deactivate ;;
         help|-h|--help|"") usage ;;
         *)
             echo "unknown subcommand: $sub" >&2
