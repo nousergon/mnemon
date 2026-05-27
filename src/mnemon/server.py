@@ -152,6 +152,7 @@ def memory_save(
     collection: str = "default",
     source_client: str | None = None,
     source_key: str | None = None,
+    correction_of: int | None = None,
 ) -> str:
     """Save a new memory.
 
@@ -163,6 +164,13 @@ def memory_save(
     insert) instead of accumulating near-duplicates — used by the
     auto-mirror path, keyed to the local memory file's slug, so a
     memory edited several times in one session stays a single document.
+
+    ``correction_of`` is an explicit operator gesture that THIS memory
+    corrects/supersedes a prior one (by its document id). Inserts a
+    ``'supersedes'`` relation so the chain is auditable, and skips the
+    capture-attention auto-boost on the new save (the explicit gesture
+    is canonical signal — automated recurrence detection would be
+    redundant). Raises if the named id doesn't exist.
     """
     store = _get_store()
     doc_id = store.save(
@@ -172,6 +180,7 @@ def memory_save(
         collection=collection,
         source_client=source_client,
         source_key=source_key,
+        correction_of=correction_of,
     )
 
     # Embed asynchronously (non-blocking, failures are non-fatal — the

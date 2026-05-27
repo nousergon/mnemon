@@ -360,11 +360,19 @@ class Store:
         insert-only behaviour is preserved exactly.
 
         ``correction_of`` — when set — is an explicit operator gesture
-        that THIS memory corrects/supersedes a prior one (the Phase 2
-        promotion signal from the salience-tier plan). Reserved here
-        for forward compatibility; today its only effect is to SKIP
-        the capture-attention path (operator gesture beats automated
-        recurrence detection).
+        that THIS memory corrects/supersedes a prior one. Two effects:
+          1. Inserts a ``'supersedes'`` relation from the new doc to the
+             named prior, so the supersession chain is auditable.
+          2. Skips the capture-attention path (operator gesture beats
+             automated recurrence detection per the salience-tier plan
+             composition).
+
+        Raises ``ValueError`` if ``correction_of`` names a non-existent
+        document — fail loud per ``[[feedback_no_silent_fails]]``. We
+        DON'T require the target to be live (invalidated_at IS NULL):
+        an operator may legitimately mark a new memory as superseding
+        an already-forgotten one to record the chain. The relation is
+        the audit trail.
         """
         content_hash = _sha256(content)
         ct = ContentType(content_type)
@@ -372,6 +380,18 @@ class Store:
         conf = confidence if confidence is not None else DEFAULT_CONFIDENCE[ct]
         if source_client in HOOK_SOURCE_CLIENTS:
             conf = min(conf, HOOK_SOURCE_CONFIDENCE_CEILING)
+
+        # Validate correction_of target exists before we commit anything.
+        # Fail loud rather than insert a dangling relation downstream.
+        if correction_of is not None:
+            row = self.db.execute(
+                "SELECT 1 FROM documents WHERE id = ?", (correction_of,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"correction_of={correction_of} names a non-existent "
+                    "document"
+                )
 
         # Upsert content (idempotent)
         self.db.execute(
@@ -470,6 +490,19 @@ class Store:
             "INSERT INTO documents_fts (rowid, title, body) VALUES (?, ?, ?)",
             (doc_id, title, content),
         )
+
+        # Explicit supersession relation. The auto-mirror upsert-by-slug
+        # path above records its OWN supersession via invalidated_by; this
+        # is the operator-explicit cross-id gesture (different memory
+        # entirely, but THIS one corrects the prior). The 'supersedes'
+        # relation makes the chain queryable + auditable downstream.
+        if correction_of is not None:
+            self.db.execute(
+                "INSERT OR REPLACE INTO relations "
+                "(source_id, target_id, relation_type, weight) "
+                "VALUES (?, ?, 'supersedes', 1.0)",
+                (doc_id, correction_of),
+            )
         self.db.commit()
 
         # Capture attention Phase A — preserve+relate+boost. Gated on
