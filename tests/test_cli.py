@@ -77,11 +77,26 @@ class TestVersionAndHelp:
 
 
 class TestServe:
+    @patch("mnemon.cli._remote_mode_active", return_value=False)
     @patch("mnemon.server.run_stdio")
-    def test_serve_calls_run_stdio(self, mock_run):
+    def test_serve_local_mode_calls_run_stdio(self, mock_run, _mode):
+        """No remote configured → serve opens the local stdio server."""
         with patch("sys.argv", ["mnemon", "serve"]):
             main()
         mock_run.assert_called_once()
+
+    @patch("mnemon.cli._remote_mode_active", return_value=True)
+    @patch("mnemon.server_proxy.run_remote_proxy")
+    @patch("mnemon.server.run_stdio")
+    def test_serve_remote_mode_calls_proxy_not_local(
+        self, mock_local, mock_proxy, _mode,
+    ):
+        """Remote configured → serve runs the remote proxy, NEVER the
+        local store (the 2026-06-04 two-vaults fix)."""
+        with patch("sys.argv", ["mnemon", "serve"]):
+            main()
+        mock_proxy.assert_called_once()
+        mock_local.assert_not_called()
 
     @patch("mnemon.server_remote.run_remote")
     def test_serve_remote_calls_run_remote(self, mock_run):

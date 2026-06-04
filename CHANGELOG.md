@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.7.0rc7] - 2026-06-04
+
+### Fix: `mnemon serve` honors remote-vault mode (two-vaults bug)
+
+When a remote vault was configured (`MNEMON_REMOTE_URL` env or
+`~/.mnemon/remote_url` file), the CLI read/write commands (`status`,
+`search`, `save`) routed to the remote — but `mnemon serve` did not: it
+unconditionally opened the local SQLite store. A machine pointed at a
+cloud vault therefore exposed **two** connected MCP servers backed by
+**different** data, the local one a stale near-empty vault. Reads/writes
+through it silently diverged from the source of truth.
+
+- **New `mnemon.server_proxy`** — a stdio MCP server that mirrors the
+  exact tool surface of `mnemon.server` (every tool wrapped via
+  `functools.wraps`, so names/docstrings/schemas are identical and can't
+  drift) and forwards each call to the remote vault via
+  `hooks._remote_client.call_tool_sync`. The local store is never opened
+  in remote mode. Fail-loud: remote/network/auth errors propagate to the
+  MCP client rather than degrading to the local vault.
+- **`serve` dispatch** now checks `_remote_mode_active()` and runs the
+  proxy in remote mode, `run_stdio` (local) otherwise — mirroring the
+  existing read/write routing.
+- `tests/test_server_proxy.py` asserts tool name/schema/description
+  parity between the two servers + forwarding + fail-loud behavior.
+
 ## [0.7.0rc6] - 2026-05-27
 
 ### Phase 2 / 3 salience tier + Phase B / C capture-attention substrate

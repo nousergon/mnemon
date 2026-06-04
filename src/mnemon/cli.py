@@ -1,9 +1,11 @@
 """CLI entry point for mnemon.
 
 Setup commands configure clients to use a remote vault. Read/write
-commands (``status``, ``search``, ``save``) auto-route to the live
-remote vault when ``MNEMON_REMOTE_URL`` is set (env var or
-``~/.mnemon/remote_url`` file). Otherwise they hit the local
+commands (``status``, ``search``, ``save``) and the MCP server
+(``serve``) auto-route to the live remote vault when ``MNEMON_REMOTE_URL``
+is set (env var or ``~/.mnemon/remote_url`` file) — in remote mode
+``serve`` runs the stdio proxy in :mod:`mnemon.server_proxy`, never
+opening the local store. Otherwise they hit the local
 ``~/.mnemon/default.sqlite``. Local-only commands (``sync``,
 ``rebuild``, ``forget``, ``standing``, ``attention-status``,
 ``doctor``) intentionally stay on the local path — they're either
@@ -50,8 +52,17 @@ def main() -> None:
         return
 
     if command == "serve":
-        from .server import run_stdio
-        run_stdio()
+        # In remote mode the stdio MCP server must proxy to the remote
+        # vault, NOT open the local SQLite — otherwise a machine pointed
+        # at a cloud vault exposes a second, stale local vault over MCP
+        # (the 2026-06-04 two-vaults bug). Mirrors the read/write CLI
+        # routing above.
+        if _remote_mode_active():
+            from .server_proxy import run_remote_proxy
+            run_remote_proxy()
+        else:
+            from .server import run_stdio
+            run_stdio()
 
     elif command == "serve-remote":
         from .server_remote import run_remote
