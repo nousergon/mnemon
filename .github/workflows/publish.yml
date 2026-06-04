@@ -1,0 +1,81 @@
+name: Publish to PyPI
+
+# Publishes the current pyproject.toml version to PyPI via OIDC trusted
+# publishing on every push to main. Idempotent — `skip-existing: true`
+# makes re-runs against an already-uploaded version a no-op, so
+# docs-only / no-version-bump merges harmlessly trigger this workflow.
+#
+# A version bump in pyproject.toml (+ src/mnemon/__init__.py) auto-
+# publishes on merge; an unchanged version is skipped, not an error.
+# This replaces the manual `scripts/promote_stable.sh` publish step as
+# the default path and closes the "forgot to publish the rc" lapse
+# (e.g. rc7 sat on main while PyPI was still rc6). Mirrors the
+# alpha-engine-lib / morning-signal publish-on-main + skip-existing
+# pattern.
+#
+# Trigger is `push: branches: [main]` (the merge itself), not `push:
+# tags`, so it fires from a normal merge without a separate tag-push
+# coordination step. `scripts/promote_stable.sh` stays available for
+# manual/stable releases + recovery; workflow_dispatch covers a failed
+# first attempt or the one-time pending-trusted-publisher bootstrap.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Verify artifacts with twine check
+        run: twine check dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # OIDC trusted-publishing requires id-token: write at the job level.
+    # No PYPI_API_TOKEN secret is used — PyPI verifies the workflow
+    # identity (project + repo + workflow filename + environment).
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mnemon-memory/
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No-op when the version is already on PyPI. Lets every main
+          # merge attempt a publish without failing on no-version-bump
+          # merges (docs, CI, internal refactors).
+          skip-existing: true
