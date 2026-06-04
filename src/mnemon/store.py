@@ -176,8 +176,39 @@ def _row_to_document(row: sqlite3.Row) -> Document:
     )
 
 
+class LocalVaultInaccessibleError(RuntimeError):
+    """Raised when the default local vault is opened while a remote is configured.
+
+    Brian's principle: if a cloud vault exists, the local vault must be
+    *inaccessible* — a second reachable source of truth is a silent-divergence
+    trap (the 2026-06-04 two-vaults bug). ``serve`` already proxies to the
+    remote (PR #188); this closes the residual hole where every *other*
+    default-vault open (``rebuild`` / ``forget`` / ``standing`` / ``doctor`` /
+    ``sync`` / dashboard / api) would silently re-create + touch a local vault
+    in remote mode. Fail loud, never empty.
+    """
+
+
 class Store:
     def __init__(self, db_path: str | Path | None = None, vector_dim: int = 384):
+        # Chokepoint guard: opening the DEFAULT local vault while a remote is
+        # configured is forbidden (the local vault is out of commission in
+        # remote mode). An explicit ``db_path`` (tests, migrations) and the
+        # remote server (not in remote mode) are unaffected; the override env
+        # is the escape hatch for genuine local maintenance.
+        if db_path is None and not os.environ.get("MNEMON_ALLOW_LOCAL_STORE"):
+            from .hooks._remote_client import remote_mode_active
+
+            if remote_mode_active():
+                raise LocalVaultInaccessibleError(
+                    "A remote mnemon vault is configured (MNEMON_REMOTE_URL / "
+                    "~/.mnemon/remote_url); the local vault is out of commission "
+                    "to prevent a second, divergent source of truth. Use the "
+                    "remote (the memory_* MCP tools, or `mnemon status/search/"
+                    "save` which route remote). For genuine local-vault "
+                    "maintenance set MNEMON_ALLOW_LOCAL_STORE=1."
+                )
+
         path = Path(db_path) if db_path else vault_path()
         path.parent.mkdir(parents=True, exist_ok=True)
 

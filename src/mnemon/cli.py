@@ -6,11 +6,14 @@ commands (``status``, ``search``, ``save``) and the MCP server
 is set (env var or ``~/.mnemon/remote_url`` file) — in remote mode
 ``serve`` runs the stdio proxy in :mod:`mnemon.server_proxy`, never
 opening the local store. Otherwise they hit the local
-``~/.mnemon/default.sqlite``. Local-only commands (``sync``,
+``~/.mnemon/default.sqlite``. Local-vault commands (``sync``,
 ``rebuild``, ``forget``, ``standing``, ``attention-status``,
-``doctor``) intentionally stay on the local path — they're either
-server-administration (rebuild/sync) or operator-explicit gestures
-on the local vault.
+``doctor``) operate on the local path — but in remote mode the
+``Store`` chokepoint refuses to open the default local vault and
+fails loud (``LocalVaultInaccessibleError``), so a cloud-pointed
+machine can never silently re-create + touch a second local vault.
+Run those with ``MNEMON_ALLOW_LOCAL_STORE=1`` for genuine local
+maintenance.
 """
 
 from __future__ import annotations
@@ -24,19 +27,13 @@ from . import __version__
 def _remote_mode_active() -> bool:
     """True iff a remote vault is configured.
 
-    Mirrors ``hooks._remote_client.get_remote_url`` resolution order:
-    env var first, then ``~/.mnemon/remote_url`` file. Doesn't validate
-    the URL — that's the caller's job at first network use.
+    Thin re-export of ``hooks._remote_client.remote_mode_active`` (the
+    shared chokepoint, also keyed on by the ``Store`` guard) — kept under
+    this name so existing callers/tests that patch ``cli._remote_mode_active``
+    are unaffected.
     """
-    if os.environ.get("MNEMON_REMOTE_URL", "").strip():
-        return True
-    from .hooks._remote_client import REMOTE_URL_FILE
-    if REMOTE_URL_FILE.exists():
-        try:
-            return bool(REMOTE_URL_FILE.read_text().strip())
-        except OSError:
-            return False
-    return False
+    from .hooks._remote_client import remote_mode_active
+    return remote_mode_active()
 
 
 def main() -> None:
