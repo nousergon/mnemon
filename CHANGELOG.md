@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.7.0rc8] - 2026-06-04
+
+### Fix: local vault is inaccessible in remote mode (two-vaults bug, residual)
+
+PR #188 (rc7) made `mnemon serve` proxy to the remote, but every *other*
+default-vault open — the local-vault CLI commands (`rebuild` / `forget` /
+`standing` / `doctor` / `sync`), the dashboard, and the api — still opened,
+and would **re-create**, a local `~/.mnemon/default.sqlite` when a remote
+vault is configured. That silently resurrects a second, divergent source of
+truth (the same two-vaults trap, now via a freshly-created empty vault).
+
+The `Store` constructor now refuses to open the **default** local vault in
+remote mode (`MNEMON_REMOTE_URL` / `~/.mnemon/remote_url`) and fails loud with
+`LocalVaultInaccessibleError`, instead of silently serving/creating a local
+vault. Exempt: an explicit `db_path` (tests, migrations), the `serve-remote`
+server (it *is* the vault), and `MNEMON_ALLOW_LOCAL_STORE=1` for genuine local
+maintenance. `remote_mode_active()` is lifted to `hooks._remote_client` as the
+shared chokepoint for both the CLI router and the Store guard.
+
+Closes the residual hole behind the principle: **if a cloud vault exists, the
+local vault must be inaccessible** — a second reachable source of truth is a
+silent-divergence trap.
+
 ## [0.7.0rc7] - 2026-06-04
 
 ### Fix: `mnemon serve` honors remote-vault mode (two-vaults bug)

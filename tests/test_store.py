@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mnemon.store import Store
+from mnemon.store import LocalVaultInaccessibleError, Store
 
 
 @pytest.fixture
@@ -856,3 +856,43 @@ class TestSweep:
         result = store.sweep(dry_run=True)
         # Note half-life is 60 days, fresh doc won't be a candidate
         assert result["archived"] == 0
+
+
+class TestRemoteModeGuard:
+    """In remote mode the default local vault is out of commission (two-vaults
+    bug fix). Opening it fails loud; explicit paths + override env are exempt."""
+
+    def test_default_vault_blocked_in_remote_mode(self, monkeypatch):
+        monkeypatch.setattr(
+            "mnemon.hooks._remote_client.remote_mode_active", lambda: True
+        )
+        monkeypatch.delenv("MNEMON_ALLOW_LOCAL_STORE", raising=False)
+        with pytest.raises(LocalVaultInaccessibleError):
+            Store()
+
+    def test_explicit_db_path_bypasses_guard(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "mnemon.hooks._remote_client.remote_mode_active", lambda: True
+        )
+        s = Store(db_path=str(tmp_path / "explicit.sqlite"))
+        assert s.db_path.endswith("explicit.sqlite")
+        s.close()
+
+    def test_override_env_bypasses_guard(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "mnemon.hooks._remote_client.remote_mode_active", lambda: True
+        )
+        monkeypatch.setenv("MNEMON_ALLOW_LOCAL_STORE", "1")
+        monkeypatch.setattr("mnemon.store.vault_path", lambda: tmp_path / "ov.sqlite")
+        s = Store()
+        assert s.db_path.endswith("ov.sqlite")
+        s.close()
+
+    def test_not_remote_mode_default_opens(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "mnemon.hooks._remote_client.remote_mode_active", lambda: False
+        )
+        monkeypatch.setattr("mnemon.store.vault_path", lambda: tmp_path / "local.sqlite")
+        s = Store()
+        assert s.db_path.endswith("local.sqlite")
+        s.close()

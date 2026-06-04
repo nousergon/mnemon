@@ -58,6 +58,14 @@ def run_remote() -> None:
     the embedder is ready, which means clients see a brief connection
     delay during cold start instead of an in-flight tool-call timeout.
     """
+    # This process IS the vault — it must serve its local Store regardless of
+    # any ambient remote config (a stray MNEMON_REMOTE_URL env, or an inherited
+    # ~/.mnemon/remote_url file when run on a machine that also acts as a
+    # client). The Store remote-mode guard targets *clients* opening a second
+    # local vault, not the authoritative server. setdefault so an explicit
+    # override still wins.
+    os.environ.setdefault("MNEMON_ALLOW_LOCAL_STORE", "1")
+
     from .server import mcp
 
     # Eager embedder init — non-fatal if it fails (lazy load will retry

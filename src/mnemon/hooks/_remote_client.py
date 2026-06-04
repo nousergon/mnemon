@@ -89,6 +89,24 @@ def get_remote_url() -> str:
     )
 
 
+def remote_mode_active() -> bool:
+    """True iff a remote vault is configured (non-raising probe).
+
+    Same resolution order as :func:`get_remote_url` (env → file) but
+    returns a bool instead of raising — the low-level chokepoint both the
+    CLI router and the Store guard key on so a machine pointed at a cloud
+    vault never silently opens the local one.
+    """
+    if os.environ.get("MNEMON_REMOTE_URL", "").strip():
+        return True
+    if REMOTE_URL_FILE.exists():
+        try:
+            return bool(REMOTE_URL_FILE.read_text().strip())
+        except OSError:
+            return False
+    return False
+
+
 def get_local_token() -> str:
     """Resolve the mnemon local bearer token.
 
