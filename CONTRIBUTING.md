@@ -12,13 +12,13 @@ pip install -e ".[dev]"
 pytest -m "not integration"
 ```
 
-You should see ~635 tests pass in under 15 seconds. The 4 integration tests are excluded from this run because they bind a local socket — run them separately with `pytest -m integration` if you're touching `serve-remote` or auth.
+You should see ~1010 tests pass in a few seconds. The 4 integration tests are excluded from this run because they bind a local socket — run them separately with `pytest -m integration` if you're touching `serve-remote` or auth.
 
 ## What to work on
 
 - **Roadmap / open scope:** see [`README.md`](README.md) for the user-facing pitch and the public roadmap; design discussions happen in [GitHub Issues](https://github.com/cipher813/mnemon/issues).
 - **Good first issues:** anything tagged [`good first issue`](https://github.com/cipher813/mnemon/labels/good%20first%20issue) — usually doc fixes, test coverage, or minor CLI polish.
-- **New features:** open an issue first to align on shape before writing code. mnemon's interface is intentionally narrow (13 MCP tools) and adding to it has compounding cost.
+- **New features:** open an issue first to align on shape before writing code. mnemon's interface is intentionally narrow (17 MCP tools) and adding to it has compounding cost.
 
 ## Style
 
