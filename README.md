@@ -143,6 +143,14 @@ mnemon status
 | `memory_pin` | Pin a memory to boost confidence and prevent archival |
 | `memory_forget` | Soft-delete a memory (marked as invalidated, not physically removed) |
 
+### Standing tier (salience)
+
+| Tool | Description |
+|------|-------------|
+| `memory_promote` | Promote a memory to the standing tier — always-on context, injected regardless of query |
+| `memory_demote` | Demote a standing memory back to situational (relevance-ranked) recall |
+| `memory_list_standing` | List the current standing-tier memories |
+
 ### Lifecycle
 
 | Tool | Description |
@@ -150,12 +158,13 @@ mnemon status
 | `memory_status` | Vault health stats — counts by type, vectors, pinned/invalidated |
 | `memory_sweep` | Archive stale memories past their half-life (dry-run by default) |
 | `memory_rebuild` | Re-embed all documents (use after upgrading embedding model) |
+| `memory_export_vectors` | Export stored embeddings (e.g. for analysis or visualization) |
 
 ### Intelligence
 
 | Tool | Description |
 |------|-------------|
-| `memory_check_contradictions` | Check a memory for conflicts using vector similarity + LLM classification |
+| `memory_check_contradictions` | Check a memory for conflicts using vector similarity + NLI classification (`cross-encoder/nli-deberta-v3-xsmall`) |
 | `profile_get` | Synthesized user profile from stored preferences and decisions |
 | `profile_update` | Manually add a fact to the user profile |
 
