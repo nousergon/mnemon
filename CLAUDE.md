@@ -44,7 +44,7 @@ src/mnemon/
   llm.py                # QMD-1.7B via llama-cpp-python (optional)
   contradiction.py      # Contradiction detection + confidence decay
   config.py             # Content types, half-lives, scoring constants
-  server.py             # MCP server (stdio) — 13 tools
+  server.py             # MCP server (stdio) — 17 tools
   server_remote.py      # Remote HTTP server (Streamable HTTP)
   sync.py               # S3 vault sync (push/pull via AWS CLI)
   setup.py              # Auto-configure Claude Code, Cursor, Gemini
