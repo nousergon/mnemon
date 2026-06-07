@@ -866,7 +866,9 @@ def upgrade_web(
     if as_passphrase:
         next_steps += [
             f"  • Add the connector in claude.ai / Claude Desktop / mobile: {remote_url}",
-            "    It opens a login page — sign in with the AS passphrase above",
+            "    Add with a name + this URL only — leave Client ID/Secret BLANK",
+            "    (the self-hosted AS registers clients automatically via DCR).",
+            "    On Connect it shows a login page — enter the AS passphrase there",
             f"    (saved to {AS_PASSPHRASE_FILE_DISPLAY}). This is the cross-device path.",
         ]
     else:
