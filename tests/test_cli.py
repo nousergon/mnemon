@@ -1259,3 +1259,95 @@ class TestAttentionStatusPrint:
         assert "Some canonical fact" in out
         assert "Last 10 'restates' relations" in out
         assert "#   99 → #   42" in out
+
+
+class TestVerifySharing:
+    """`mnemon verify-sharing` — write+read-back a sentinel against the
+    remote and print the cross-client confirmation recipe. Automates the
+    'is the vault actually shared?' check (CLI↔remote half) so the manual
+    step is just one search in Desktop."""
+
+    @patch("mnemon.cli._remote_mode_active", return_value=True)
+    def test_write_path_verifies_and_prints_recipe(self, _mode, capsys):
+        import json
+
+        saved = {}
+
+        def fake_call(tool, args, timeout=8.0):
+            if tool == "memory_save":
+                saved["title"] = args["title"]
+                return ("Saved memory #1.", 0.01)
+            if tool == "memory_search":
+                return (
+                    json.dumps([{"doc_id": 1, "title": saved.get("title", ""), "content": "x"}]),
+                    0.01,
+                )
+            return ("", 0.01)
+
+        with patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=fake_call):
+            with patch("sys.argv", ["mnemon", "verify-sharing"]):
+                main()
+
+        out = capsys.readouterr().out
+        assert "CLI↔remote verified" in out
+        assert "mnemon-sharing-check-" in out
+        assert "search your memory for mnemon-sharing-check-" in out
+        assert "verify-sharing --cleanup" in out
+
+    @patch("mnemon.cli._remote_mode_active", return_value=True)
+    def test_read_back_failure_exits_nonzero(self, _mode, capsys):
+        import json
+
+        def fake_call(tool, args, timeout=8.0):
+            if tool == "memory_save":
+                return ("Saved memory #1.", 0.01)
+            if tool == "memory_search":
+                return (json.dumps([]), 0.01)  # sentinel not found
+            return ("", 0.01)
+
+        with patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=fake_call):
+            with patch("sys.argv", ["mnemon", "verify-sharing"]):
+                with pytest.raises(SystemExit) as exc:
+                    main()
+        assert exc.value.code == 1
+        assert "could not read it back" in capsys.readouterr().err
+
+    @patch("mnemon.cli._remote_mode_active", return_value=False)
+    def test_local_mode_exits_nonzero(self, _mode, capsys):
+        with patch("sys.argv", ["mnemon", "verify-sharing"]):
+            with pytest.raises(SystemExit) as exc:
+                main()
+        assert exc.value.code == 1
+        assert "local-only" in capsys.readouterr().err
+
+    @patch("mnemon.cli._remote_mode_active", return_value=True)
+    def test_cleanup_forgets_only_sentinels(self, _mode, capsys):
+        import json
+
+        forgotten = []
+
+        def fake_call(tool, args, timeout=8.0):
+            if tool == "memory_search":
+                return (
+                    json.dumps([
+                        {"doc_id": 10, "title": "mnemon-sharing-check-aaaa"},
+                        {"doc_id": 11, "title": "mnemon-sharing-check-bbbb"},
+                        {"doc_id": 12, "title": "an unrelated real memory"},
+                    ]),
+                    0.01,
+                )
+            if tool == "memory_forget":
+                forgotten.append(args["id"])
+                return ("Forgot.", 0.01)
+            return ("", 0.01)
+
+        with patch("mnemon.hooks._remote_client.call_tool_sync", side_effect=fake_call):
+            with patch("sys.argv", ["mnemon", "verify-sharing", "--cleanup"]):
+                main()
+
+        assert forgotten == [10, 11]  # the non-sentinel #12 is left alone
+        assert "Removed 2 sharing-check sentinel(s)" in capsys.readouterr().out
+
+    def test_usage_lists_verify_sharing(self, capsys):
+        _print_usage()
+        assert "verify-sharing" in capsys.readouterr().out
