@@ -119,7 +119,11 @@ pip install "mnemon-memory[ui]"
 mnemon dashboard
 ```
 
-Streamlit UI at `http://localhost:8503` — stats, search, timeline, UMAP graph view, profile. Works against local and remote vaults.
+Streamlit UI at `http://localhost:8503` — vault health, search, timeline, an interactive graph view, and your profile. Works against both local and remote vaults.
+
+![mnemon dashboard — Vault Health](docs/images/dashboard.png)
+
+The graph view projects your embedding space to 2-D — UMAP for local vaults, and PCA computed server-side for remote vaults so it scales to thousands of memories without shipping every vector over the wire.
 
 ### Use it
 
