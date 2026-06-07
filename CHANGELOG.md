@@ -1,19 +1,22 @@
 # Changelog
 
-## [0.7.0] - 2026-06-07
+## [0.7.0rc9] - 2026-06-07
 
-First stable release of the 0.7 line — seals `0.7.0rc1`–`rc8`. The
-project remains pre-1.0 alpha (interfaces may still change), but this is
-the release-discipline cut that makes the package something an outside
-self-hoster can depend on.
+Continuing the 0.7 rc cycle — hardening toward a `0.7.0` stable that is
+genuinely rock-solid before the version drops the `rc`. (Not stable yet;
+the `status: alpha` posture stands.)
 
-Headline capabilities accumulated across the rc line: the **salience /
-standing tier** (`memory_promote` / `memory_demote` / `memory_list_standing`
-+ always-on standing-context injection), **capture-attention**
-(recurrence-weighted preserve+relate+boost), **NLI-based contradiction
-detection** (no LLM dependency), the **5-layer stored-injection defense**,
-the **local↔web two-product split** with symmetric `upgrade`/`downgrade`,
-and the **two-vaults guard** (`Store` fails loud in remote mode).
+First prerelease to actually ship the post-rc8 work below: rc8 was the
+last published artifact, and the two commits after it (#193, #194) merged
+to `main` without a version bump, so their PyPI publishes skip-existing'd
+as rc8. This rc carries them.
+
+### Fixed (release plumbing)
+- **Version is now single-sourced** from `src/mnemon/__init__.py` via
+  `[tool.hatch.version]` (`dynamic = ["version"]`). Previously the version
+  lived in BOTH `pyproject.toml` (static) and `__init__.py`; they drifted
+  in the 0.7.0 attempt (init→0.7.0, pyproject→rc8) and the build published
+  the wrong version. One bump site now; they can't disagree.
 
 ### Added
 - **`mnemon verify-sharing`** — write+read-back a sentinel against the
