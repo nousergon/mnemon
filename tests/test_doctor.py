@@ -571,3 +571,58 @@ class TestLocalChecks:
             with pytest.raises(SystemExit) as excinfo:
                 main()
         assert excinfo.value.code == 1
+
+
+class TestCheckNoShadowLocalVault:
+    """The two-vaults guard (remote mode): a populated local default.sqlite
+    shadowing the remote is the trap that twice served stale local reads.
+    Empty stub passes; populated warns; absent passes."""
+
+    def _make_vault(self, tmp_path, n_docs):
+        import sqlite3
+
+        vault = tmp_path / "default.sqlite"
+        conn = sqlite3.connect(vault)
+        conn.execute("CREATE TABLE documents (id INTEGER PRIMARY KEY)")
+        for _ in range(n_docs):
+            conn.execute("INSERT INTO documents DEFAULT VALUES")
+        conn.commit()
+        conn.close()
+        return vault
+
+    def test_passes_when_no_local_vault(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+        result = doctor.check_no_shadow_local_vault()
+        assert result.ok and not result.warn
+        assert "no local default.sqlite" in result.detail
+
+    def test_passes_when_empty_stub(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+        self._make_vault(tmp_path, 0)
+        result = doctor.check_no_shadow_local_vault()
+        assert result.ok and not result.warn
+        assert "present but empty" in result.detail
+
+    def test_warns_when_populated(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+        self._make_vault(tmp_path, 3)
+        result = doctor.check_no_shadow_local_vault()
+        assert result.ok and result.warn  # non-fatal note, not a hard fail
+        assert "3 documents" in result.detail
+        assert "two-vaults shadow" in result.detail
+
+    def test_passes_when_no_documents_table(self, monkeypatch, tmp_path):
+        import sqlite3
+
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+        vault = tmp_path / "default.sqlite"
+        conn = sqlite3.connect(vault)
+        conn.execute("CREATE TABLE unrelated (x)")
+        conn.commit()
+        conn.close()
+        result = doctor.check_no_shadow_local_vault()
+        assert result.ok and not result.warn
+        assert "present but empty" in result.detail
+
+    def test_registered_in_remote_checks(self):
+        assert doctor.check_no_shadow_local_vault in doctor.REMOTE_CHECKS
