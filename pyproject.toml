@@ -60,6 +60,13 @@ dev = [
     "starlette>=0.37",
     "pyjwt[crypto]>=2.8",
     "authlib>=1.3",
+    # Dashboard render-smoke tests (tests/test_dashboard_pages.py) use
+    # Streamlit's headless AppTest + plotly charts. Kept here (not just in
+    # [ui]) so the [dev] CI matrix runs them; the [server]-only job lacks
+    # streamlit and skips them via importorskip. (umap stays [ui]-only —
+    # the Graph test mocks load_umap_coords.)
+    "streamlit>=1.30",
+    "plotly>=5.18",
 ]
 all = [
     "mnemon-memory[llm,dev,ui,server]",
