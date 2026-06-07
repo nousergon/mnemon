@@ -246,11 +246,19 @@ _layer3_cleanup() {
     #    must put them back. Skipping this leaves prod mnemon unreachable.
     if [ -n "${LAYER3_AUTH_BACKUP_DIR:-}" ] && [ -d "$LAYER3_AUTH_BACKUP_DIR" ]; then
         local restored=0
-        for f in remote_url local_token; do
+        # as_passphrase added 2026-06-07: rc10+ `upgrade web` auto-provisions
+        # the OAuth AS and writes ~/.mnemon/as_passphrase, so layer3 must
+        # snapshot+restore it too (else it leaves the operator's prod
+        # passphrase as the destroyed test app's).
+        for f in remote_url local_token as_passphrase; do
             if [ -f "$LAYER3_AUTH_BACKUP_DIR/$f" ]; then
                 cp -p "$LAYER3_AUTH_BACKUP_DIR/$f" "$HOME/.mnemon/$f" \
                     && restored=$((restored + 1)) \
                     || echo_err "cleanup: FAILED to restore ~/.mnemon/$f — operator must recover by hand"
+            elif [ -f "$HOME/.mnemon/$f" ]; then
+                # File didn't exist pre-run (e.g. as_passphrase the deploy
+                # created) → remove the test artifact rather than leave it.
+                rm -f "$HOME/.mnemon/$f"
             fi
         done
         if [ "$restored" -gt 0 ]; then
@@ -378,7 +386,7 @@ cmd_layer3() {
     # Snapshot now, restore in the cleanup trap.
     export LAYER3_AUTH_BACKUP_DIR
     LAYER3_AUTH_BACKUP_DIR="$(mktemp -d -t mnemon-layer3-auth-XXXXXX)"
-    for f in remote_url local_token; do
+    for f in remote_url local_token as_passphrase; do
         if [ -f "$HOME/.mnemon/$f" ]; then
             cp -p "$HOME/.mnemon/$f" "$LAYER3_AUTH_BACKUP_DIR/$f"
         fi
