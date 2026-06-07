@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mnemon-memory"
-version = "0.7.0rc8"
+dynamic = ["version"]
 description = "Universal long-term memory layer for AI agents via MCP"
 readme = "README.md"
 license = "MIT"
@@ -66,6 +66,15 @@ all = [
 
 [project.scripts]
 mnemon = "mnemon.cli:main"
+
+# Single source of truth for the version: src/mnemon/__init__.py's
+# __version__. Bump it in ONE place and both the package runtime and the
+# built/published artifact agree. (Before 2026-06-07 the version was a
+# static field here AND a separate __version__ constant — they drifted in
+# PR #195, which bumped __init__ to 0.7.0 but left this at rc8, so the
+# build published the wrong version. Dynamic resolution prevents that.)
+[tool.hatch.version]
+path = "src/mnemon/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mnemon"]
