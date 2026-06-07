@@ -1,7 +1,8 @@
 """Tests for remote HTTP server configuration."""
 
 import os
-from unittest.mock import patch
+import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -95,6 +96,122 @@ class TestSessionManagerConfig:
             f"PersistentSessionManager must be wired with json_response=True; "
             f"got {captured.get('json_response')!r}. See class docstring for why."
         )
+
+
+class TestRunRemoteBranches:
+    """Drive run_remote()'s startup branches with the heavy deps mocked.
+
+    run_remote() is an orchestrator that ends in a blocking uvicorn.run();
+    its real behavior is exercised end-to-end by test_integration_remote.py
+    (a subprocess), but coverage.py can't see subprocess lines. These unit
+    tests mock the model pre-loads + uvicorn so each branch is covered
+    deterministically and fast."""
+
+    def _base_env(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("MNEMON_LOCAL_TOKEN", "x" * 32)
+        monkeypatch.setenv("MNEMON_VAULT_DIR", str(tmp_path))
+        monkeypatch.setenv("MNEMON_PUBLIC_URL", "http://127.0.0.1:8502")
+        monkeypatch.setenv("MNEMON_ALLOWED_HOSTS", "127.0.0.1,127.0.0.1:8502")
+        monkeypatch.delenv("MNEMON_AS_ENABLED", raising=False)
+
+    def _stub_models(self, monkeypatch):
+        monkeypatch.setattr("mnemon.embedder._get_model", lambda: object())
+        monkeypatch.setattr("mnemon.nli.prewarm", lambda: None)
+
+    def test_happy_path_calls_uvicorn_run(self, monkeypatch, tmp_path, capsys):
+        self._base_env(monkeypatch, tmp_path)
+        self._stub_models(monkeypatch)
+        fake_run = MagicMock()
+        monkeypatch.setattr("uvicorn.run", fake_run)
+
+        from mnemon.server_remote import run_remote
+        run_remote()
+
+        fake_run.assert_called_once()
+        # host/port forwarded; wrapped ASGI app passed positionally
+        assert fake_run.call_args.kwargs.get("port") == int(os.environ.get("PORT", "8502"))
+        assert "local static bearer token enabled" in capsys.readouterr().err
+
+    def test_embedder_preload_failure_warns_but_continues(self, monkeypatch, tmp_path, capsys):
+        self._base_env(monkeypatch, tmp_path)
+        monkeypatch.setattr(
+            "mnemon.embedder._get_model",
+            MagicMock(side_effect=RuntimeError("model boom")),
+        )
+        monkeypatch.setattr("mnemon.nli.prewarm", lambda: None)
+        monkeypatch.setattr("uvicorn.run", MagicMock())
+
+        from mnemon.server_remote import run_remote
+        run_remote()  # WARN, not fatal
+
+        assert "failed to pre-load embedding model" in capsys.readouterr().err
+
+    def test_nli_preload_failure_warns_but_continues(self, monkeypatch, tmp_path, capsys):
+        self._base_env(monkeypatch, tmp_path)
+        monkeypatch.setattr("mnemon.embedder._get_model", lambda: object())
+        monkeypatch.setattr(
+            "mnemon.nli.prewarm",
+            MagicMock(side_effect=RuntimeError("nli boom")),
+        )
+        monkeypatch.setattr("uvicorn.run", MagicMock())
+
+        from mnemon.server_remote import run_remote
+        run_remote()
+
+        assert "failed to pre-load NLI classifier" in capsys.readouterr().err
+
+    def test_as_misconfigured_exits(self, monkeypatch, tmp_path):
+        self._base_env(monkeypatch, tmp_path)
+        self._stub_models(monkeypatch)
+        # AS enabled but invalid → validate() returns problems → exit(1).
+        fake_as = MagicMock()
+        fake_as.enabled = True
+        fake_as.validate.return_value = ["MNEMON_AS_PASSPHRASE not set"]
+        monkeypatch.setattr(
+            "mnemon.oauth_as.AuthorizationServerConfig.from_env",
+            lambda: fake_as,
+        )
+
+        from mnemon.server_remote import run_remote
+        with pytest.raises(SystemExit):
+            run_remote()
+
+    def test_uvicorn_missing_exits(self, monkeypatch, tmp_path):
+        self._base_env(monkeypatch, tmp_path)
+        self._stub_models(monkeypatch)
+        # Make `import uvicorn` raise ImportError inside run_remote.
+        monkeypatch.setitem(sys.modules, "uvicorn", None)
+
+        from mnemon.server_remote import run_remote
+        with pytest.raises(SystemExit):
+            run_remote()
+
+    def test_decay_sweep_closure_runs_decay_and_closes_store(self, monkeypatch, tmp_path):
+        self._base_env(monkeypatch, tmp_path)
+        self._stub_models(monkeypatch)
+
+        captured: dict = {}
+
+        def fake_manager(*_args, **kwargs):
+            captured.update(kwargs)
+            raise SystemExit("abort before uvicorn")
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.PersistentSessionManager", fake_manager
+        )
+
+        from mnemon.server_remote import run_remote
+        with pytest.raises(SystemExit):
+            run_remote()
+
+        decay_fn = captured["decay_fn"]
+        fake_store = MagicMock()
+        monkeypatch.setattr("mnemon.store.Store", lambda: fake_store)
+        monkeypatch.setattr(
+            "mnemon.contradiction.apply_confidence_decay", lambda _s: 7
+        )
+        assert decay_fn() == 7
+        fake_store.close.assert_called_once()
 
 
 class TestMcpServer:

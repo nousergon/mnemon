@@ -21,7 +21,9 @@ from mnemon import upgrade
 from mnemon.upgrade import (
     UpgradeError,
     _archive_local_vault,
+    _client_config_root,
     _fly_app_exists,
+    _reconfigure_clients,
     _validate_app_name,
     upgrade_web,
 )
@@ -55,6 +57,58 @@ def _isolate_env(monkeypatch, tmp_path):
     # The settle test class re-enables it explicitly.
     monkeypatch.setenv("MNEMON_UPGRADE_SETTLE_SECONDS", "0")
     yield
+
+
+# ── _client_config_root / _reconfigure_clients ───────────────────────────────
+
+
+class TestClientConfigRoot:
+    def test_default_is_home(self, tmp_path):
+        # _isolate_env patches Path.home → tmp_path and clears the override.
+        assert _client_config_root() == tmp_path
+
+    def test_override_env_wins(self, monkeypatch, tmp_path):
+        override = tmp_path / "scratch-root"
+        monkeypatch.setenv("MNEMON_CLIENT_CONFIG_ROOT", str(override))
+        assert _client_config_root() == override
+
+
+class TestReconfigureClients:
+    """Exercise the real _reconfigure_clients (the upgrade_web flow tests
+    patch it out). Mirror of downgrade._reconfigure_clients_local but in
+    remote mode (passes remote_url + token to each setup target)."""
+
+    def test_iterates_targets_in_remote_mode_and_restores_home(
+        self, monkeypatch, tmp_path
+    ):
+        from mnemon import setup as setup_mod
+
+        prior_home = setup_mod.Path.home
+        cc = MagicMock()
+        cursor = MagicMock()
+        monkeypatch.setattr(setup_mod, "TARGETS", {"claude-code": cc, "cursor": cursor})
+        monkeypatch.setenv("MNEMON_CLIENT_CONFIG_ROOT", str(tmp_path / "root"))
+
+        result = _reconfigure_clients(
+            "https://app.fly.dev/mcp", "tok123", ["claude-code", "cursor"]
+        )
+
+        assert result == ["claude-code", "cursor"]
+        cc.assert_called_once_with(remote_url="https://app.fly.dev/mcp", token="tok123")
+        cursor.assert_called_once_with(remote_url="https://app.fly.dev/mcp", token="tok123")
+        assert setup_mod.Path.home is prior_home
+
+    def test_restores_home_even_when_setup_raises(self, monkeypatch, tmp_path):
+        from mnemon import setup as setup_mod
+
+        prior_home = setup_mod.Path.home
+        boom = MagicMock(side_effect=RuntimeError("setup blew up"))
+        monkeypatch.setattr(setup_mod, "TARGETS", {"claude-code": boom})
+        monkeypatch.setenv("MNEMON_CLIENT_CONFIG_ROOT", str(tmp_path / "root"))
+
+        with pytest.raises(RuntimeError, match="setup blew up"):
+            _reconfigure_clients("https://app.fly.dev/mcp", "tok", ["claude-code"])
+        assert setup_mod.Path.home is prior_home
 
 
 # ── _validate_app_name ───────────────────────────────────────────────────────

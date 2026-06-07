@@ -92,12 +92,12 @@ omit = [
     "src/mnemon/dashboard/*",
     # __main__ entry-point shim — 4 lines, no logic
     "src/mnemon/__main__.py",
-    # Release-engineering operations on Fly + AWS — exercised by the
-    # Layer-3 web test ritual (scripts/promote_stable.sh), not unit
-    # tests. Mocking the full upgrade/downgrade path adds maintenance
-    # cost without surfacing real bugs (those surface in Layer-3).
-    "src/mnemon/upgrade.py",
-    "src/mnemon/downgrade.py",
+    # NOTE: upgrade.py / downgrade.py are now MEASURED (un-omitted
+    # 2026-06-07). Their Fly + AWS subprocess calls are mocked in
+    # test_upgrade.py / test_downgrade.py so the local↔web migration
+    # paths carry CI coverage rather than relying solely on the
+    # operator Layer-3 web ritual — this minimizes the manual-test
+    # surface for long-term maintenance.
     # Deprecated / optional LLM path — kept for local-mode operators
     # who explicitly install [llm] extras. The deployed product is
     # LLM-free by design (2026-05-22 decision); NLI replaced the only
@@ -107,7 +107,12 @@ omit = [
 ]
 
 [tool.coverage.report]
-fail_under = 80
+# Raised 80 → 88 on 2026-06-07 after the comprehensive-tool-coverage pass
+# (downgrade 61→98, context_surfacing 74→99, server_remote 63→95,
+# upgrade 86→93, + upgrade/downgrade un-omitted). The gate locks in that
+# coverage so it can't silently regress — keeps the manual-test surface
+# small for long-term maintenance.
+fail_under = 88
 show_missing = true
 skip_empty = true
 exclude_lines = [
