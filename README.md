@@ -124,6 +124,15 @@ mnemon forget 42
 mnemon status
 ```
 
+### Verify it's working
+
+```bash
+mnemon doctor            # health + auth + a real save→search→forget round-trip
+mnemon verify-sharing    # prove multiple clients share one vault (web mode)
+```
+
+`doctor` auto-detects local vs web and runs the right checks (in web mode it also warns if a stale local vault is shadowing the remote). `verify-sharing` writes a sentinel to the remote and prints a search term to run in another client (e.g. Claude Desktop) — if it shows up there, that client is wired to the same vault. Clean up with `mnemon verify-sharing --cleanup`.
+
 ## MCP Tools
 
 ### Retrieval

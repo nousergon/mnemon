@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.7.0] - 2026-06-07
+
+First stable release of the 0.7 line — seals `0.7.0rc1`–`rc8`. The
+project remains pre-1.0 alpha (interfaces may still change), but this is
+the release-discipline cut that makes the package something an outside
+self-hoster can depend on.
+
+Headline capabilities accumulated across the rc line: the **salience /
+standing tier** (`memory_promote` / `memory_demote` / `memory_list_standing`
++ always-on standing-context injection), **capture-attention**
+(recurrence-weighted preserve+relate+boost), **NLI-based contradiction
+detection** (no LLM dependency), the **5-layer stored-injection defense**,
+the **local↔web two-product split** with symmetric `upgrade`/`downgrade`,
+and the **two-vaults guard** (`Store` fails loud in remote mode).
+
+### Added
+- **`mnemon verify-sharing`** — write+read-back a sentinel against the
+  configured remote (proves CLI↔remote), then print the exact search term
+  to confirm another client (Claude Desktop / claude.ai) is wired to the
+  same vault. `--cleanup` removes sentinels. Turns the recurring "is the
+  vault actually shared?" question into a deterministic check.
+- **`doctor` two-vaults shadow guard** (`check_no_shadow_local_vault`,
+  remote mode) — warns if a *populated* local `default.sqlite` is
+  shadowing the remote (the trap that twice served stale local reads),
+  with the archive recipe. Empty stub / absent passes.
+
+### Changed / internal
+- **Comprehensive test coverage pass** — all 17 MCP tools now have a
+  direct server-surface test, and the previously-unmeasured local↔web
+  migration (`upgrade.py` / `downgrade.py`) is un-omitted and covered.
+  Suite ~1016 → 1069; coverage gate raised **80% → 88%** to lock it in.
+
 ## [0.7.0rc8] - 2026-06-04
 
 ### Fix: local vault is inaccessible in remote mode (two-vaults bug, residual)
