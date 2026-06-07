@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0rc12] - 2026-06-07
+
+### Added
+- **`scripts/validate_cross_device.sh`** — scripts the cross-device
+  live-validation: deploys a throwaway Fly app from the current version,
+  asserts the auto-provisioned OAuth AS serves correct RFC-8414 metadata
+  (`mnemon doctor --fail-on-warn`, issuer match), surfaces the generated
+  passphrase + connector URL for the one manual claude.ai-connector step,
+  then tears down. Safety mirrors `promote_stable.sh layer3`: a prod-app
+  guard, fully isolated test state, and an EXIT-trap that restores
+  `~/.mnemon/{remote_url,local_token,as_passphrase}` even on Ctrl-C.
+  `--dry-run` prints the plan (no side effects); `--keep` leaves the app
+  up for unhurried browser testing. CI-smoke-tested in
+  `tests/test_validate_cross_device.py` (syntax, dry-run plan, prod guard).
+
+### Fixed
+- **`promote_stable.sh layer3` now snapshots/restores `as_passphrase`.**
+  rc10+ `upgrade web` writes `~/.mnemon/as_passphrase`; layer3 previously
+  only snapshotted `remote_url`/`local_token`, so a layer3 run would leave
+  the operator's prod passphrase as the destroyed test app's.
+
 ## [0.7.0rc11] - 2026-06-07
 
 Auth-completeness + CI hardening — toward rock-solid.

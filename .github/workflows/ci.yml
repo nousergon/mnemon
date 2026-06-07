@@ -9,9 +9,15 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    # Backstop against a hung test (e.g. the integration tests cold-
-    # downloading models at server boot) stalling on the 6h default.
+    # Backstop against a hung test (e.g. a stalled cold model download)
+    # stalling on the 6h default.
     timeout-minutes: 20
+    env:
+      # Pin the embedder (FastEmbed) + NLI (HF) model caches to a path we
+      # restore via actions/cache below, so tests don't cold-download
+      # ~100MB on every run — the source of an intermittent CI hang.
+      FASTEMBED_CACHE_DIR: ${{ github.workspace }}/.model-cache/fastembed
+      HF_HOME: ${{ github.workspace }}/.model-cache/hf
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache embedder + NLI models
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.model-cache
+          key: mnemon-models-${{ runner.os }}-v1
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -42,8 +54,9 @@ jobs:
         # [tool.coverage.report] fail_under. Build fails if a PR drops
         # coverage below the gate. Configuration (source paths, omits,
         # exclude_lines) lives in pyproject.toml so this stays a one-line
-        # invocation.
-        run: pytest tests/ -v --cov --cov-report=term-missing
+        # invocation. --timeout is a per-test backstop: a stalled cold
+        # model download fails that test fast instead of hanging the job.
+        run: pytest tests/ -v --cov --cov-report=term-missing --timeout=300 --timeout-method=thread
 
   secrets:
     runs-on: ubuntu-latest
