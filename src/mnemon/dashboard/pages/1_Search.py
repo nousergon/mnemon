@@ -22,8 +22,14 @@ if query:
     else:
         st.caption(f"{len(results)} results")
         for r in results:
-            with st.expander(f"**{r['title']}** — `{r['content_type']}` — score: {r['composite_score']:.3f}"):
-                fig = make_score_bars(r["composite_score"], r["recency_score"], r["confidence"])
+            with st.expander(f"**{r['title']}** — `{r['content_type']}` — score: {r.get('composite_score', 0.0):.3f}"):
+                # .get() defensively: an older remote (e.g. a Fly app on a
+                # pre-recency_score mnemon) won't include every score field.
+                fig = make_score_bars(
+                    r.get("composite_score", 0.0),
+                    r.get("recency_score", 0.0),
+                    r.get("confidence", 0.0),
+                )
                 st.plotly_chart(fig, use_container_width=True, key=f"score_{r['doc_id']}")
                 st.markdown(r["content"])
                 st.caption(f"ID: {r['doc_id']} | Created: {r['created_at']}")

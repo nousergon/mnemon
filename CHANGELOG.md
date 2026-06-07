@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0rc14] - 2026-06-07
+
+### Fixed
+- **Dashboard Search page crash (`KeyError: 'recency_score'`).** The
+  dashboard's remote path renders `memory_search` JSON, but that tool
+  hand-built its result dict and omitted `recency_score` (the local
+  `dataclasses.asdict` path included it). `memory_search` now serializes
+  `recency_score` too (additive), and the Search page reads score fields
+  with `.get(..., 0.0)` so it also tolerates an older remote (e.g. a Fly
+  app on a pre-`recency_score` mnemon) that doesn't send it. Caught
+  during the dashboard manual smoke. (`memory_search` was the only tool
+  using a hand-picked dict; the others use `asdict`, so no other page is
+  affected.)
+
 ## [0.7.0rc13] - 2026-06-07
 
 ### Changed
