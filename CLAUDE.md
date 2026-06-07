@@ -62,7 +62,7 @@ src/mnemon/
 ```bash
 # Development
 pip install -e ".[dev]"         # Install with dev deps
-pytest                          # Run tests (450+ tests)
+pytest                          # Run tests (1000+ tests, ≥88% coverage gate)
 pytest -v                       # Verbose output
 pytest tests/test_store.py      # Single file
 
