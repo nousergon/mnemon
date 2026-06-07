@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0rc15] - 2026-06-07
+
+### Added
+- **Dashboard render-smoke tests** (`tests/test_dashboard_pages.py`) — the
+  UI is now folded into the test suite. Streamlit's headless `AppTest`
+  renders every page (Home, Search, Timeline, Graph, Profile) against
+  **remote-shaped** mocked loader output and asserts no exception. This
+  catches the local-vs-remote serialization `KeyError` class (the rc14
+  `recency_score` crash) automatically in CI — including an explicit case
+  for an older remote that omits `recency_score`. `streamlit` + `plotly`
+  added to `[dev]`; the tests `importorskip` so the `[server]`-only job
+  skips them cleanly. (Dashboard stays out of the coverage denominator —
+  the value is crash detection on every page render, not a coverage %.)
+
 ## [0.7.0rc14] - 2026-06-07
 
 ### Fixed
