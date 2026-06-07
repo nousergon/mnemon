@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.7.0] - 2026-06-07
+
+First stable release of the 0.7.0 line. Consolidates the rc1–rc19
+prereleases below. Highlights since 0.6.0:
+
+- **Cross-device is the default.** `mnemon upgrade web` auto-provisions the
+  self-hosted OAuth 2.1 Authorization Server (PKCE + Dynamic Client
+  Registration) alongside the bearer token, so claude.ai web/mobile and
+  Claude Desktop connect turnkey to one shared Fly-hosted vault.
+- **Salience / standing tier.** First-class `documents.tier` with
+  `memory_promote` / `memory_demote` / `memory_list_standing`; standing
+  memories are injected unconditionally as always-on context.
+- **Capture-attention.** Recurring saves are preserved + related (via
+  `restates`) + boosted rather than dropped — non-destructive dedup.
+- **NLI-based contradiction detection** (cross-encoder, baked into the
+  Fly image) replacing the optional LLM path.
+- **Scalable dashboard Graph.** Server-side PCA projection
+  (`memory_export_coords`) + bulk relation export
+  (`memory_export_relations`) — the Graph renders at any vault size
+  (validated on a 3,000+ doc vault) instead of timing out.
+- **Comprehensive test suite.** 1,100+ tests; multi-platform CI with
+  model caching + timeouts; every dashboard page covered for both
+  render and remote-failure paths; full MCP-tool round-trip canary.
+- **PyPI auto-publish** on push to `main` via OIDC trusted publishing.
+
 ## [0.7.0rc19] - 2026-06-07
 
 ### Added
