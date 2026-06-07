@@ -46,6 +46,7 @@ def _make_search_result(**overrides):
         "confidence": 0.80,
         "created_at": "2026-04-01T00:00:00Z",
         "composite_score": 0.75,
+        "recency_score": 0.5,
         "vector_similarity": None,
     }
     defaults.update(overrides)
@@ -159,8 +160,8 @@ class TestMemorySearch:
         )]
         parsed = json.loads(memory_search("q"))[0]
         expected = {"doc_id", "title", "content", "content_type",
-                    "confidence", "composite_score", "vector_similarity",
-                    "created_at"}
+                    "confidence", "composite_score", "recency_score",
+                    "vector_similarity", "created_at"}
         assert expected.issubset(parsed.keys())
         assert parsed["vector_similarity"] == 0.87
 

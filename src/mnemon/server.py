@@ -81,7 +81,8 @@ def memory_search(
     Returns a JSON string — a list of result objects, empty when nothing
     matches. Each object contains: ``doc_id``, ``title``, ``content``,
     ``content_type``, ``confidence``, ``composite_score``,
-    ``vector_similarity``, ``created_at``. Score fields are floats.
+    ``recency_score``, ``vector_similarity``, ``created_at``. Score fields
+    are floats.
     ``vector_similarity`` is the raw cosine similarity (0.0–1.0) from the
     vector store, preserved before RRF fusion; it is None for BM25-only
     matches and is the right signal for dedup (``composite_score`` is a
@@ -97,6 +98,7 @@ def memory_search(
             "content_type": r.content_type,
             "confidence": r.confidence,
             "composite_score": r.composite_score,
+            "recency_score": r.recency_score,
             "vector_similarity": r.vector_similarity,
             "created_at": r.created_at,
         })
