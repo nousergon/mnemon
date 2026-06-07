@@ -8,10 +8,20 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.10", "3.12", "3.13"]
+        # macOS is the primary dev platform — validate it on one Python
+        # version to catch Mac-specific regressions without a full
+        # cross-product of CI minutes. Windows is scoped out: mnemon's
+        # runtime + deploy paths are unix-only (flyctl, ~/.mnemon paths,
+        # 0600 file perms).
+        include:
+          - os: macos-latest
+            python-version: "3.12"
 
     steps:
       - uses: actions/checkout@v4
@@ -25,11 +35,11 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests with coverage gate
-        # --cov-fail-under=80 enforces the project's 80% coverage floor
-        # per pyproject.toml [tool.coverage.report]. Build fails if a
-        # PR drops coverage below the gate. Configuration (source paths,
-        # omits, exclude_lines) lives in pyproject.toml so this stays
-        # a one-line invocation.
+        # Enforces the project's coverage floor (88%) per pyproject.toml
+        # [tool.coverage.report] fail_under. Build fails if a PR drops
+        # coverage below the gate. Configuration (source paths, omits,
+        # exclude_lines) lives in pyproject.toml so this stays a one-line
+        # invocation.
         run: pytest tests/ -v --cov --cov-report=term-missing
 
   secrets:
