@@ -16,10 +16,43 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
 import streamlit as st
+
+
+# ── Remote-failure guard ─────────────────────────────────────────────────────
+
+# Streamlit control-flow exceptions must pass THROUGH the guard untouched —
+# st.stop() / st.rerun() are normal flow, not errors. Matched by name so we
+# don't depend on Streamlit's internal exception module paths.
+_ST_CONTROL_EXC = {"StopException", "RerunException", "RerunData"}
+
+
+@contextmanager
+def remote_guard(what: str = "data from the remote vault"):
+    """Wrap a page's top-level loader call so a remote-call failure degrades
+    to a clean ``st.error`` + ``st.stop`` instead of an unhandled traceback.
+
+    The MCP remote calls (via ``call_tool_sync`` → streamable HTTP) can fail
+    at the transport layer on a slow/cold/unreachable remote, surfacing as an
+    anyio ``ExceptionGroup`` (or a timeout). Loaders are ``@st.cache_data``
+    so they can't safely emit UI on failure; the page is the right place to
+    catch — hence this guard around the call site.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 — UI boundary: degrade, don't crash
+        if type(exc).__name__ in _ST_CONTROL_EXC:
+            raise  # let st.stop()/st.rerun() flow normally
+        st.error(
+            f"Couldn't load {what} ({type(exc).__name__}). The remote may be "
+            "slow, cold-starting, or unreachable — retry, or run "
+            "`mnemon doctor` to check the connection."
+        )
+        st.stop()
 
 
 # ── Mode detection ──────────────────────────────────────────────────────────

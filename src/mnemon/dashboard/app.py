@@ -8,7 +8,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-from mnemon.dashboard.loaders import load_status, load_timeline, load_sweep
+from mnemon.dashboard.loaders import load_status, load_timeline, load_sweep, remote_guard
 from mnemon.dashboard.charts import make_type_distribution_chart, make_accumulation_chart
 
 
@@ -41,7 +41,8 @@ def main() -> None:
         + (" · remote" if _use_remote() else " · local")
     )
 
-    status = load_status()
+    with remote_guard("vault status"):
+        status = load_status()
     if not status or status["total_documents"] == 0:
         st.warning("Vault is empty. Start saving memories with `mnemon save` or via MCP tools.")
         st.stop()
@@ -55,13 +56,15 @@ def main() -> None:
         fig = make_type_distribution_chart(status.get("by_type", []))
         st.plotly_chart(fig, use_container_width=True)
     with col2:
-        timeline = load_timeline(limit=500)
+        with remote_guard("the timeline"):
+            timeline = load_timeline(limit=500)
         fig = make_accumulation_chart(timeline)
         st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
     st.subheader("Stale Memory Candidates")
-    sweep = load_sweep()
+    with remote_guard("stale-memory candidates"):
+        sweep = load_sweep()
     _render_sweep_candidates(sweep)
 
 

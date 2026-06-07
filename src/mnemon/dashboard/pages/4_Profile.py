@@ -5,13 +5,14 @@ import streamlit as st
 st.set_page_config(page_title="Profile — mnemon", layout="wide")
 st.title("Your Profile")
 
-from mnemon.dashboard.loaders import load_timeline
+from mnemon.dashboard.loaders import load_timeline, remote_guard
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.subheader("Preferences")
-    prefs = load_timeline(limit=50, content_type="preference")
+    with remote_guard("preferences"):
+        prefs = load_timeline(limit=50, content_type="preference")
     if not prefs:
         st.info("No preferences stored yet.")
     for p in prefs:
@@ -21,7 +22,8 @@ with col1:
 
 with col2:
     st.subheader("Decisions")
-    decisions = load_timeline(limit=50, content_type="decision")
+    with remote_guard("decisions"):
+        decisions = load_timeline(limit=50, content_type="decision")
     if not decisions:
         st.info("No decisions stored yet.")
     for d in decisions:
