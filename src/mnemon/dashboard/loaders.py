@@ -336,6 +336,40 @@ def load_coords_remote() -> tuple[list[str], np.ndarray, dict[str, dict]] | None
     return vec_ids, coords, doc_map
 
 
+@st.cache_data(ttl=900)
+def load_relations_bulk() -> dict[int, list[dict]]:
+    """All relation edges as ``{source_id: [{id, relation_type, weight}]}``.
+
+    The Graph edge overlay needs every edge. Remote mode fetches them in
+    **one** ``memory_export_relations`` call (the per-node loop was the
+    second large-vault Graph timeout — N round-trips); local mode runs a
+    single store query. ``id`` on each edge is the *target* doc id, the
+    shape ``add_relation_edges`` consumes.
+    """
+    if _use_remote():
+        payload = json.loads(_call_remote(
+            "memory_export_relations", {},
+            timeout=VECTOR_EXPORT_TIMEOUT_SEC,
+        ))
+        edges = payload.get("edges", [])
+        if payload.get("truncated"):
+            st.warning(
+                f"Relation overlay capped at {payload.get('count')} edges — "
+                "raise the server-side relations cap if you need them all."
+            )
+    else:
+        edges = get_store().export_relations()
+
+    rel_map: dict[int, list[dict]] = {}
+    for e in edges:
+        rel_map.setdefault(e["source_id"], []).append({
+            "id": e["target_id"],
+            "relation_type": e.get("relation_type"),
+            "weight": e.get("weight", 0.0),
+        })
+    return rel_map
+
+
 def load_graph_projection(n_neighbors: int = 15) -> tuple[list[str], np.ndarray, dict[str, dict]] | None:
     """Unified Graph-page projection: ``(vec_ids, coords_2d, doc_map)`` or None.
 

@@ -189,7 +189,7 @@ def test_graph_renders_with_points_local_umap():
              return_value=(vec_ids, np.zeros((6, 4)), doc_map),
          ), \
          patch("mnemon.dashboard.loaders.load_umap_coords", return_value=coords), \
-         patch("mnemon.dashboard.loaders.load_related", return_value=[]):
+         patch("mnemon.dashboard.loaders.load_relations_bulk", return_value={}):
         at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
     _assert_clean(at)
 
@@ -208,7 +208,10 @@ def test_graph_renders_with_points_remote_pca():
              "mnemon.dashboard.loaders.load_coords_remote",
              return_value=(vec_ids, coords, doc_map),
          ), \
-         patch("mnemon.dashboard.loaders.load_related", return_value=[]):
+         patch(
+             "mnemon.dashboard.loaders.load_relations_bulk",
+             return_value={0: [{"id": 1, "relation_type": "restates", "weight": 0.9}]},
+         ):
         at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
     _assert_clean(at)
 
@@ -237,6 +240,27 @@ def test_graph_degrades_when_remote_coords_fail():
          patch(
              "mnemon.dashboard.loaders.load_coords_remote",
              side_effect=RuntimeError("remote coords export failed"),
+         ):
+        at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
+    _assert_degraded(at)
+
+
+def test_graph_degrades_when_relation_edges_fail():
+    # Edges are a bulk call too; if it fails the page must degrade, not crash.
+    import numpy as np
+
+    vec_ids = [f"doc_{i}" for i in range(6)]
+    doc_map = _graph_doc_map(vec_ids)
+    coords = np.array([[float(i), float(i)] for i in range(6)], dtype=np.float32)
+    with patch("mnemon.dashboard.loaders._use_remote", return_value=True), \
+         patch("mnemon.dashboard.loaders.load_status", return_value={"total_documents": 6}), \
+         patch(
+             "mnemon.dashboard.loaders.load_coords_remote",
+             return_value=(vec_ids, coords, doc_map),
+         ), \
+         patch(
+             "mnemon.dashboard.loaders.load_relations_bulk",
+             side_effect=RuntimeError("remote relations export failed"),
          ):
         at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
     _assert_degraded(at)

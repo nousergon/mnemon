@@ -1055,6 +1055,42 @@ class TestMemoryExportCoords:
         assert parsed["count"] == _COORDS_EXPORT_MAX
 
 
+class TestMemoryExportRelations:
+    @patch("mnemon.server.Store")
+    def test_empty(self, MockStore):
+        from mnemon.server import memory_export_relations
+        MockStore.return_value.export_relations.return_value = []
+        assert json.loads(memory_export_relations()) == {
+            "count": 0, "truncated": False, "edges": [],
+        }
+
+    @patch("mnemon.server.Store")
+    def test_returns_edges(self, MockStore):
+        from mnemon.server import memory_export_relations
+        MockStore.return_value.export_relations.return_value = [
+            {"source_id": 1, "target_id": 2, "relation_type": "restates", "weight": 0.9},
+            {"source_id": 3, "target_id": 4, "relation_type": "supersedes", "weight": 0.5},
+        ]
+        parsed = json.loads(memory_export_relations())
+        assert parsed["count"] == 2
+        assert parsed["truncated"] is False
+        assert parsed["edges"][0]["source_id"] == 1
+        assert parsed["edges"][0]["relation_type"] == "restates"
+
+    @patch("mnemon.server.Store")
+    def test_truncates_at_cap(self, MockStore):
+        from mnemon.server import memory_export_relations, _RELATIONS_EXPORT_MAX
+        # Store is asked for cap+1; tool reports truncated and trims to cap.
+        edges = [
+            {"source_id": i, "target_id": i + 1, "relation_type": "restates", "weight": 1.0}
+            for i in range(_RELATIONS_EXPORT_MAX + 1)
+        ]
+        MockStore.return_value.export_relations.return_value = edges
+        parsed = json.loads(memory_export_relations())
+        assert parsed["truncated"] is True
+        assert parsed["count"] == _RELATIONS_EXPORT_MAX
+
+
 class TestPCA2D:
     def test_projects_to_two_dims(self):
         import numpy as np
