@@ -486,10 +486,106 @@ def main() -> None:
         subcommand = args[1] if len(args) > 1 else "list"
         _handle_standing(subcommand, args[2:])
 
+    elif command == "verify-sharing":
+        # Prove the configured remote vault is shared across MCP clients
+        # (Claude Code ↔ Claude Desktop ↔ claude.ai). Complements `doctor`,
+        # which only verifies CLI↔remote within one process.
+        _verify_sharing(cleanup="--cleanup" in args[1:])
+
     else:
         print(f"Unknown command: {command}", file=sys.stderr)
         _print_usage()
         sys.exit(1)
+
+
+_SHARING_SENTINEL_PREFIX = "mnemon-sharing-check"
+
+
+def _verify_sharing(*, cleanup: bool) -> None:
+    """Prove the configured remote vault is shared across MCP clients.
+
+    Writes a uniquely-named sentinel to the remote and reads it back —
+    proving CLI↔remote round-trips — then prints the exact search term to
+    run in another client (Claude Desktop / claude.ai) to confirm that
+    client is wired to the SAME vault. ``--cleanup`` removes sentinels.
+
+    The Desktop side cannot be auto-checked — no CLI can drive another
+    app's MCP connector — so this makes that one manual step deterministic
+    (fixed sentinel + exact search term + one-flag cleanup) rather than
+    ad-hoc. ``doctor``'s round-trip only covers CLI↔remote in one process.
+    """
+    import json as _json
+    import time
+    import uuid
+
+    from .hooks._remote_client import RemoteClientConfigError, call_tool_sync
+
+    if not _remote_mode_active():
+        print(
+            "verify-sharing is for REMOTE mode (proving multiple clients share "
+            "one cloud vault). No remote is configured — this machine is "
+            "local-only, so there is nothing to share.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if cleanup:
+        try:
+            raw, _ = call_tool_sync(
+                "memory_search",
+                {"query": _SHARING_SENTINEL_PREFIX, "limit": 50},
+                timeout=8.0,
+            )
+            results = _json.loads(raw)
+        except RemoteClientConfigError as exc:
+            print(f"verify-sharing cleanup failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        ids = [
+            r["doc_id"]
+            for r in results
+            if str(r.get("title", "")).startswith(_SHARING_SENTINEL_PREFIX)
+        ]
+        for doc_id in ids:
+            call_tool_sync("memory_forget", {"id": doc_id}, timeout=8.0)
+        print(f"Removed {len(ids)} sharing-check sentinel(s) from the remote vault.")
+        return
+
+    term = f"{_SHARING_SENTINEL_PREFIX}-{uuid.uuid4().hex[:8]}"
+    content = (
+        f"Sharing-check sentinel written by `mnemon verify-sharing` at "
+        f"{time.strftime('%Y-%m-%d %H:%M:%S')}. Safe to delete via "
+        f"`mnemon verify-sharing --cleanup`."
+    )
+    try:
+        call_tool_sync(
+            "memory_save",
+            {"title": term, "content": content, "content_type": "note"},
+            timeout=8.0,
+        )
+        raw, _ = call_tool_sync(
+            "memory_search", {"query": term, "limit": 5}, timeout=8.0
+        )
+        results = _json.loads(raw)
+    except RemoteClientConfigError as exc:
+        print(f"verify-sharing failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not any(str(r.get("title", "")) == term for r in results):
+        print(
+            f"✗ Wrote sentinel {term!r} but could not read it back from the "
+            f"remote — the remote vault may not be accepting writes. Run "
+            f"`mnemon doctor` to diagnose.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"✓ CLI↔remote verified — wrote and read back sentinel {term!r}.")
+    print("")
+    print("Now confirm another client shares this vault:")
+    print(f'  • In Claude Desktop / claude.ai, ask: "search your memory for {term}"')
+    print("  • If it returns the sentinel, that client is wired to the SAME vault.")
+    print("")
+    print("When done, remove it:  mnemon verify-sharing --cleanup")
 
 
 def _status_remote() -> None:
@@ -989,6 +1085,11 @@ Setup (configure MCP clients; use --remote-url for web mode):
                             [--remote-url URL] [--token TOKEN] [--skip-doctor]
   mnemon doctor             Run diagnostics (local or remote, auto-detected)
                             [--fail-on-warn] treat warnings as failures
+  mnemon verify-sharing     Prove the remote vault is shared across clients:
+                            writes + reads back a sentinel (CLI↔remote), then
+                            prints a search term to confirm in another client
+                            (Claude Desktop / claude.ai). [--cleanup] removes
+                            sentinels when you're done.
 
 Upgrade local → web (deploys a Fly.io app + reconfigures every client).
 Idempotent: rerun to redeploy an existing app with the current mnemon
