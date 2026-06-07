@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0rc16] - 2026-06-07
+
+### Fixed
+- **Dashboard Graph page crash when the vector export fails.**
+  `memory_export_vectors` is the heaviest remote call (it exports every
+  vector); on a large or cold remote it can time out / fail at the
+  transport layer (surfacing as an unhandled anyio `ExceptionGroup`),
+  which crashed the Graph page with a raw traceback. The page now wraps
+  the load in try/except → a clear, actionable `st.error` + `st.stop`
+  (retry / run `mnemon doctor`). Covered by a new loader-*failure*-path
+  AppTest (the success-mocked render tests didn't exercise it).
+
 ## [0.7.0rc15] - 2026-06-07
 
 ### Added

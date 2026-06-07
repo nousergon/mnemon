@@ -13,7 +13,20 @@ CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "resear
 # One point per document. Multi-chunk docs are mean-pooled in the
 # loader — otherwise a long memory showed up as several near-identical
 # points, which read as duplicates.
-vec_data = load_vectors_collapsed()
+try:
+    vec_data = load_vectors_collapsed()
+except Exception as exc:  # noqa: BLE001 — UI loader: degrade, don't crash the page
+    # memory_export_vectors is the heaviest remote call (it exports every
+    # vector). On a large or cold remote it can time out / fail at the
+    # transport layer (surfaces as an anyio ExceptionGroup). Show a clear,
+    # actionable error instead of a raw traceback.
+    st.error(
+        f"Couldn't load vectors from the vault ({type(exc).__name__}). "
+        "The vector export is the heaviest call — on a large or cold "
+        "remote it can time out. Retry, or run `mnemon doctor` to check "
+        "the connection."
+    )
+    st.stop()
 if vec_data is None:
     # Disambiguate: empty vault vs. saved-but-unembedded memories. The
     # second case is a silent-failure signal — tell the user how to fix it.

@@ -177,3 +177,18 @@ def test_graph_renders_with_points():
          patch("mnemon.dashboard.loaders.load_related", return_value=[]):
         at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
     _assert_clean(at)
+
+
+def test_graph_degrades_when_vector_export_fails():
+    # The heavy memory_export_vectors call can fail (timeout / transport
+    # ExceptionGroup) against a large/cold remote. The page must show a
+    # clean error + st.stop — NOT crash with a traceback. This is the
+    # loader-*failure* path the success-mocked tests don't exercise.
+    with patch(
+        "mnemon.dashboard.loaders.load_vectors_collapsed",
+        side_effect=RuntimeError("boom: vector export failed"),
+    ):
+        at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
+    _assert_clean(at)
+    assert any("Couldn't load vectors" in e.value for e in at.error), \
+        "expected a clean on-page error when the vector export fails"
