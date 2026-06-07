@@ -16,7 +16,11 @@ import pytest
 from mnemon import downgrade as dg
 from mnemon.downgrade import (
     DowngradeError,
+    _client_config_root,
+    _confirm,
     _extract_app_name,
+    _reconfigure_clients_local,
+    _resolve_remote_url,
     downgrade_local,
 )
 
@@ -396,3 +400,177 @@ class TestFlyDumpVaultBeforePull:
         assert call_args[6] == "mnemon sync push", (
             f"expected `mnemon sync push`, got: {call_args[6]!r}"
         )
+
+
+# ── _resolve_remote_url ──────────────────────────────────────────────────────
+
+
+class TestResolveRemoteUrl:
+    def test_env_var_takes_precedence(self, monkeypatch):
+        monkeypatch.setenv("MNEMON_REMOTE_URL", "https://env-app.fly.dev/mcp")
+        assert _resolve_remote_url() == "https://env-app.fly.dev/mcp"
+
+    def test_falls_back_to_remote_url_file(self, tmp_path):
+        mnemon_dir = tmp_path / ".mnemon"
+        mnemon_dir.mkdir()
+        (mnemon_dir / "remote_url").write_text("https://file-app.fly.dev/mcp\n")
+        assert _resolve_remote_url() == "https://file-app.fly.dev/mcp"
+
+    def test_oserror_reading_file_falls_through_to_raise(self, monkeypatch):
+        # exists() True but read_text() raises OSError → the except OSError
+        # branch swallows it and we fall through to the "no remote" raise.
+        fake_file = MagicMock()
+        fake_file.exists.return_value = True
+        fake_file.read_text.side_effect = OSError("permission denied")
+        monkeypatch.setattr("mnemon.downgrade.REMOTE_URL_FILE", fake_file)
+        with pytest.raises(DowngradeError, match="nothing to downgrade"):
+            _resolve_remote_url()
+
+
+# ── _client_config_root ──────────────────────────────────────────────────────
+
+
+class TestClientConfigRoot:
+    def test_default_is_home(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("MNEMON_CLIENT_CONFIG_ROOT", raising=False)
+        # _isolate_env patches Path.home → tmp_path
+        assert _client_config_root() == tmp_path
+
+    def test_override_env_wins(self, monkeypatch, tmp_path):
+        override = tmp_path / "custom-root"
+        monkeypatch.setenv("MNEMON_CLIENT_CONFIG_ROOT", str(override))
+        assert _client_config_root() == override
+
+
+# ── _reconfigure_clients_local ───────────────────────────────────────────────
+
+
+class TestReconfigureClientsLocalDirect:
+    """Exercise the real _reconfigure_clients_local (the downgrade_local
+    tests patch it out). Verifies it calls each detected client's setup
+    function in local (stdio) mode, skips the 'hooks' pseudo-target, and
+    restores setup.Path.home afterward."""
+
+    def test_iterates_targets_in_local_mode_and_restores_home(
+        self, monkeypatch, tmp_path
+    ):
+        from mnemon import setup as setup_mod
+
+        prior_home = setup_mod.Path.home
+        cc = MagicMock()
+        cursor = MagicMock()
+        fake_targets = {"claude-code": cc, "cursor": cursor}
+        monkeypatch.setattr(setup_mod, "TARGETS", fake_targets)
+        monkeypatch.setenv("MNEMON_CLIENT_CONFIG_ROOT", str(tmp_path / "root"))
+
+        # 'hooks' must be skipped even if it sneaks into the detected list.
+        result = _reconfigure_clients_local(["claude-code", "hooks", "cursor"])
+
+        assert result == ["claude-code", "cursor"]
+        cc.assert_called_once_with(remote_url=None, token=None)
+        cursor.assert_called_once_with(remote_url=None, token=None)
+        # Path.home restored to whatever it was on entry.
+        assert setup_mod.Path.home is prior_home
+
+    def test_restores_home_even_when_setup_raises(self, monkeypatch, tmp_path):
+        from mnemon import setup as setup_mod
+
+        prior_home = setup_mod.Path.home
+        boom = MagicMock(side_effect=RuntimeError("setup blew up"))
+        monkeypatch.setattr(setup_mod, "TARGETS", {"claude-code": boom})
+        monkeypatch.setenv("MNEMON_CLIENT_CONFIG_ROOT", str(tmp_path / "root"))
+
+        with pytest.raises(RuntimeError, match="setup blew up"):
+            _reconfigure_clients_local(["claude-code"])
+        # finally: block must restore Path.home despite the exception.
+        assert setup_mod.Path.home is prior_home
+
+
+# ── _confirm ─────────────────────────────────────────────────────────────────
+
+
+class TestConfirm:
+    def test_non_tty_returns_false(self, monkeypatch):
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = False
+        monkeypatch.setattr("mnemon.downgrade.sys.stdin", fake_stdin)
+        assert _confirm("destroy? ") is False
+
+    def test_tty_yes_returns_true(self, monkeypatch):
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = True
+        monkeypatch.setattr("mnemon.downgrade.sys.stdin", fake_stdin)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "  YES  ")
+        assert _confirm("destroy? ") is True
+
+    def test_tty_no_returns_false(self, monkeypatch):
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = True
+        monkeypatch.setattr("mnemon.downgrade.sys.stdin", fake_stdin)
+        monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+        assert _confirm("destroy? ") is False
+
+    def test_tty_eoferror_returns_false(self, monkeypatch):
+        fake_stdin = MagicMock()
+        fake_stdin.isatty.return_value = True
+        monkeypatch.setattr("mnemon.downgrade.sys.stdin", fake_stdin)
+
+        def _raise(_prompt):
+            raise EOFError
+
+        monkeypatch.setattr("builtins.input", _raise)
+        assert _confirm("destroy? ") is False
+
+
+# ── doctor step (skip_doctor=False) ──────────────────────────────────────────
+
+
+class TestDoctorStep:
+    """The existing downgrade_local tests all pass skip_doctor=True. These
+    exercise the Step-5 doctor block (run_doctor against the restored local
+    vault) including the clean, issues-found, and crash paths."""
+
+    def _seed_remote_config(self, tmp_path, url="https://mnemon-test.fly.dev/mcp"):
+        mnemon_dir = tmp_path / ".mnemon"
+        mnemon_dir.mkdir()
+        (mnemon_dir / "remote_url").write_text(url)
+
+    def _happy_path_patches(self):
+        return (
+            patch("mnemon.downgrade._fly_dump_vault"),
+            patch(
+                "mnemon.sync.pull",
+                return_value={"pulled": ["sqlite"], "errors": []},
+            ),
+            patch("mnemon.setup.detect_installed_clients", return_value=[]),
+            patch("mnemon.downgrade._reconfigure_clients_local", return_value=[]),
+        )
+
+    def test_doctor_clean_no_note(self, tmp_path):
+        self._seed_remote_config(tmp_path)
+        p1, p2, p3, p4 = self._happy_path_patches()
+        with p1, p2, p3, p4, patch(
+            "mnemon.doctor.run_doctor", return_value=0
+        ) as mock_doc:
+            result = downgrade_local(skip_doctor=False)
+        mock_doc.assert_called_once()
+        assert "Running mnemon doctor against the restored local vault" in result
+        assert "doctor reported issues" not in result
+
+    def test_doctor_issues_appends_note(self, tmp_path):
+        self._seed_remote_config(tmp_path)
+        p1, p2, p3, p4 = self._happy_path_patches()
+        with p1, p2, p3, p4, patch("mnemon.doctor.run_doctor", return_value=1):
+            result = downgrade_local(skip_doctor=False)
+        assert "doctor reported issues against the local vault" in result
+
+    def test_doctor_crash_is_caught(self, tmp_path):
+        self._seed_remote_config(tmp_path)
+        p1, p2, p3, p4 = self._happy_path_patches()
+        with p1, p2, p3, p4, patch(
+            "mnemon.doctor.run_doctor", side_effect=RuntimeError("doctor boom")
+        ):
+            result = downgrade_local(skip_doctor=False)
+        # Crash is captured into the summary, not propagated.
+        assert "doctor invocation crashed" in result
+        assert "RuntimeError" in result

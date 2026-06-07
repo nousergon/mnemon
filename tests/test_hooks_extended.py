@@ -886,6 +886,152 @@ class TestContextSurfacingMain:
         assert "Fast" in injected
 
 
+# ── context_surfacing.py: standing-tier helpers (Phase 0/1) ──────────────────
+
+
+class TestStandingTierHelpers:
+    """The Phase-0 standing-tier helper functions (env-var driven ID list,
+    rendered-cache read, per-id HTTP fallback) and the Phase-1 MCP
+    import-guard. build_context exercises the success paths via
+    test_standing_tier.py; these cover the helpers directly incl. the
+    failure branches."""
+
+    def test_standing_tier_enabled_env_override_true(self, monkeypatch):
+        from mnemon.hooks import context_surfacing as cs
+
+        monkeypatch.setenv("MNEMON_STANDING_TIER_ENABLED", "true")
+        assert cs._standing_tier_enabled() is True
+
+    def test_standing_tier_enabled_env_override_false(self, monkeypatch):
+        from mnemon.hooks import context_surfacing as cs
+
+        monkeypatch.setenv("MNEMON_STANDING_TIER_ENABLED", "off")
+        assert cs._standing_tier_enabled() is False
+
+    def test_fetch_standing_via_mcp_import_error_returns_empty(self, monkeypatch):
+        from mnemon.hooks import context_surfacing as cs
+
+        # Make `from ._remote_client import call_tool_sync` raise ImportError.
+        monkeypatch.setitem(sys.modules, "mnemon.hooks._remote_client", None)
+        assert cs._fetch_standing_via_mcp() == ""
+
+    def test_load_standing_ids_reads_file(self, monkeypatch, tmp_path):
+        from mnemon.hooks import context_surfacing as cs
+
+        f = tmp_path / "standing.json"
+        f.write_text(json.dumps({"ids": [1, 2, 3]}))
+        monkeypatch.setenv("MNEMON_STANDING_TIER_FILE", str(f))
+        assert cs._load_standing_ids() == [1, 2, 3]
+
+    def test_load_standing_ids_malformed_returns_empty(self, monkeypatch, tmp_path, capsys):
+        from mnemon.hooks import context_surfacing as cs
+
+        f = tmp_path / "standing.json"
+        f.write_text("{ not valid json")
+        monkeypatch.setenv("MNEMON_STANDING_TIER_FILE", str(f))
+        assert cs._load_standing_ids() == []
+        assert "failed to load standing-tier IDs" in capsys.readouterr().err
+
+    def test_read_rendered_cache_returns_sibling_md(self, monkeypatch, tmp_path):
+        from mnemon.hooks import context_surfacing as cs
+
+        sj = tmp_path / "standing.json"
+        sj.write_text("{}")
+        (tmp_path / "standing-rendered.md").write_text("  rendered standing block  ")
+        monkeypatch.setenv("MNEMON_STANDING_TIER_FILE", str(sj))
+        assert cs._read_rendered_cache() == "rendered standing block"
+
+    def test_read_rendered_cache_missing_returns_empty(self, monkeypatch, tmp_path):
+        from mnemon.hooks import context_surfacing as cs
+
+        sj = tmp_path / "standing.json"  # no sibling .md created
+        monkeypatch.setenv("MNEMON_STANDING_TIER_FILE", str(sj))
+        assert cs._read_rendered_cache() == ""
+
+    def test_read_rendered_cache_oserror_returns_empty(self, monkeypatch, tmp_path):
+        from mnemon.hooks import context_surfacing as cs
+
+        sj = tmp_path / "standing.json"
+        (tmp_path / "standing-rendered.md").write_text("x")
+        monkeypatch.setenv("MNEMON_STANDING_TIER_FILE", str(sj))
+
+        def _boom(*_a, **_k):
+            raise OSError("read denied")
+
+        monkeypatch.setattr("builtins.open", _boom)
+        assert cs._read_rendered_cache() == ""
+
+    def test_fetch_standing_block_empty_ids(self):
+        from mnemon.hooks import context_surfacing as cs
+
+        assert cs._fetch_standing_block([]) == ""
+
+    def test_fetch_standing_block_renders_docs(self, monkeypatch):
+        from mnemon.hooks import context_surfacing as cs
+
+        doc = json.dumps({"title": "Standing T", "content": "C body", "content_type": "preference"})
+        monkeypatch.setattr(
+            "mnemon.hooks._remote_client.call_tool_sync",
+            lambda _name, _args, timeout=5.0: (doc, 0.01),
+        )
+        out = cs._fetch_standing_block([1])
+        assert "**Standing T**" in out and "C body" in out and "id=1" in out
+
+    def test_fetch_standing_block_skips_failed_ids(self, monkeypatch):
+        from mnemon.hooks import context_surfacing as cs
+
+        def _call(_name, args, timeout=5.0):
+            if args["id"] == 1:
+                raise RuntimeError("fetch boom")
+            return (json.dumps({"title": "OK", "content": "good", "content_type": "note"}), 0.01)
+
+        monkeypatch.setattr("mnemon.hooks._remote_client.call_tool_sync", _call)
+        out = cs._fetch_standing_block([1, 2])
+        assert "boom" not in out
+        assert "**OK**" in out
+
+    def test_fetch_standing_block_import_error_returns_empty(self, monkeypatch):
+        from mnemon.hooks import context_surfacing as cs
+
+        monkeypatch.setitem(sys.modules, "mnemon.hooks._remote_client", None)
+        assert cs._fetch_standing_block([1]) == ""
+
+
+class TestContextSurfacingMainErrorTail:
+    """The outer try/except in main() — the last line of defense so a hook
+    crash never propagates into Claude Code."""
+
+    def test_outer_exception_is_logged_not_raised(self, monkeypatch):
+        from mnemon.hooks.context_surfacing import main
+
+        monkeypatch.setattr(
+            "mnemon.hooks.framework.read_stdin",
+            MagicMock(side_effect=RuntimeError("stdin boom")),
+        )
+        hit = {}
+        monkeypatch.setattr(
+            "mnemon.hooks.framework.log_hook_error",
+            lambda *_a, **_k: hit.setdefault("logged", True),
+        )
+        main()  # must not raise
+        assert hit.get("logged")
+
+    def test_outer_exception_falls_back_to_stderr(self, monkeypatch, capsys):
+        from mnemon.hooks.context_surfacing import main
+
+        monkeypatch.setattr(
+            "mnemon.hooks.framework.read_stdin",
+            MagicMock(side_effect=RuntimeError("stdin boom")),
+        )
+        # The tail's own log_hook_error also fails → inner except → stderr.
+        monkeypatch.setattr(
+            "mnemon.hooks.framework.log_hook_error",
+            MagicMock(side_effect=RuntimeError("logger boom")),
+        )
+        main()  # must not raise
+        assert "context-surfacing error" in capsys.readouterr().err
+
+
 # ── session_extractor.py: extract_with_llm ───────────────────────────────────
 
 

@@ -8,9 +8,11 @@ import pytest
 import mnemon.server as server_mod
 from mnemon.server import (
     memory_check_contradictions,
+    memory_demote,
     memory_export_vectors,
     memory_forget,
     memory_get,
+    memory_list_standing,
     memory_pin,
     memory_promote,
     memory_rebuild,
@@ -444,6 +446,78 @@ class TestMemoryPromoteCoherenceCheck:
             result = memory_promote(1)
         assert "Promoted memory #1" in result
         assert "⚠" not in result
+
+
+# ── memory_demote ────────────────────────────────────────────────────────────
+
+
+class TestMemoryDemote:
+    """Server-surface tests for memory_demote (symmetry with
+    TestMemoryPromoteCoherenceCheck; the tool was unit-covered in
+    test_standing_tier.py + the all-tools integration test, but lacked a
+    direct server-surface test that locks its return-shape contract)."""
+
+    @patch("mnemon.server.Store")
+    def test_demote_success_reports_remaining_count(self, MockStore):
+        store = MockStore.return_value
+        store.demote_to_situational.return_value = True
+        store.standing_tier_status.return_value = {"count": 2, "cap": 15}
+        result = memory_demote(5)
+        assert "Demoted memory #5 to situational" in result
+        assert "2/15 remain standing" in result
+
+    @patch("mnemon.server.Store")
+    def test_demote_noop_when_not_on_tier(self, MockStore):
+        store = MockStore.return_value
+        store.demote_to_situational.return_value = False
+        store.standing_tier_status.return_value = {"count": 0, "cap": 15}
+        result = memory_demote(99)
+        assert result == "Memory #99 was not on the standing tier."
+
+    @patch("mnemon.server.Store")
+    def test_demote_standing_tier_error_returns_clean_message(self, MockStore):
+        from mnemon.store import StandingTierError
+        store = MockStore.return_value
+        store.demote_to_situational.side_effect = StandingTierError("boom")
+        result = memory_demote(5)
+        assert result == "Error: boom"
+
+
+# ── memory_list_standing ─────────────────────────────────────────────────────
+
+
+class TestMemoryListStanding:
+    """Server-surface tests for memory_list_standing — locks the JSON
+    array shape consumed by hooks/context_surfacing.py."""
+
+    @patch("mnemon.server.Store")
+    def test_returns_json_array_of_standing_docs(self, MockStore):
+        store = MockStore.return_value
+        store.list_standing.return_value = [
+            _make_document(
+                id=1, title="Runway", content="multi-year",
+                content_type="preference", confidence=0.9,
+                created_at="2026-05-01",
+            ),
+            _make_document(
+                id=2, title="Severance", content="lump sum",
+                content_type="preference", confidence=0.8,
+                created_at="2026-05-02",
+            ),
+        ]
+        parsed = json.loads(memory_list_standing())
+        assert [d["doc_id"] for d in parsed] == [1, 2]
+        assert parsed[0]["title"] == "Runway"
+        assert parsed[0]["content_type"] == "preference"
+        assert set(parsed[0].keys()) == {
+            "doc_id", "title", "content", "content_type",
+            "confidence", "created_at",
+        }
+
+    @patch("mnemon.server.Store")
+    def test_empty_when_nothing_promoted(self, MockStore):
+        MockStore.return_value.list_standing.return_value = []
+        assert json.loads(memory_list_standing()) == []
 
 
 # ── memory_status ────────────────────────────────────────────────────────────
