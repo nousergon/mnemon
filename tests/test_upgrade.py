@@ -449,6 +449,77 @@ class TestFlySecretsForwardS3PrefixAndVaultName:
         assert any(kv.startswith("AWS_SECRET_ACCESS_KEY=") for kv in kvs)
 
 
+class TestOAuthASProvisioning:
+    """Cross-device default (2026-06-07): `upgrade web` auto-provisions the
+    self-hosted OAuth AS — the claude.ai / Desktop browser-login path — not
+    just the bearer token. The AS keypair persists on the Fly volume
+    (/data/oauth_keys); the passphrase is generated, set as a Fly secret,
+    surfaced, and saved 0600 locally for the operator's login."""
+
+    def _capture_secrets_args(self, monkeypatch, **kwargs):
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA-test")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret-test")
+        with patch("mnemon.upgrade.subprocess.run") as mock_run:
+            mock_run.return_value = _ok_completed()
+            upgrade._fly_set_secrets("mnemon-test", "tok", "bucket", **kwargs)
+        return [a for a in mock_run.call_args.args[0] if "=" in a]
+
+    def test_as_secrets_set_when_passphrase_and_url_given(self, monkeypatch):
+        kvs = self._capture_secrets_args(
+            monkeypatch,
+            as_passphrase="super-secret-pass",
+            public_url="https://mnemon-test.fly.dev",
+        )
+        assert "MNEMON_AS_ENABLED=true" in kvs
+        assert "MNEMON_AS_PASSPHRASE=super-secret-pass" in kvs
+        assert "MNEMON_PUBLIC_URL=https://mnemon-test.fly.dev" in kvs
+
+    def test_as_secrets_omitted_when_not_provided(self, monkeypatch):
+        # Back-compat (e.g. the redeploy path passes neither): no AS secrets.
+        kvs = self._capture_secrets_args(monkeypatch)
+        assert not any(kv.startswith("MNEMON_AS_") for kv in kvs)
+        assert not any(kv.startswith("MNEMON_PUBLIC_URL=") for kv in kvs)
+
+    def test_persist_as_passphrase_writes_0600(self, tmp_path, monkeypatch):
+        import stat as _stat
+        # _isolate_env patches Path.home → tmp_path.
+        upgrade._persist_as_passphrase("my-passphrase")
+        f = tmp_path / ".mnemon" / "as_passphrase"
+        assert f.read_text().strip() == "my-passphrase"
+        assert _stat.S_IMODE(f.stat().st_mode) == 0o600
+
+    def test_upgrade_web_provisions_as_end_to_end(self, tmp_path, monkeypatch):
+        vdir = tmp_path / ".mnemon"
+        vdir.mkdir()
+        (vdir / "default.sqlite").write_bytes(b"seeded")
+        monkeypatch.setattr("mnemon.config.vault_dir", lambda: vdir)
+
+        with patch("mnemon.sync.push", return_value={"pushed": ["sqlite"], "errors": []}), \
+            patch("mnemon.upgrade.subprocess.run", return_value=_ok_completed()) as mock_run, \
+            patch("mnemon.upgrade._require_flyctl"), \
+            patch("mnemon.upgrade._require_aws"), \
+            patch("mnemon.upgrade._fly_app_exists", return_value=False), \
+            patch("mnemon.upgrade._reconfigure_clients", return_value=["claude-code"]):
+            result = upgrade_web(
+                app_name="mnemon-xyz", s3_bucket="b", token="t",
+                region="sjc", mnemon_version="0.7.0rc10", skip_doctor=True,
+            )
+
+        secrets_calls = [
+            c.args[0] for c in mock_run.call_args_list
+            if c.args[0][:2] == ["flyctl", "secrets"]
+        ]
+        assert secrets_calls, "expected a flyctl secrets set call"
+        flat = secrets_calls[0]
+        assert "MNEMON_AS_ENABLED=true" in flat
+        assert "MNEMON_PUBLIC_URL=https://mnemon-xyz.fly.dev" in flat
+        assert any(kv.startswith("MNEMON_AS_PASSPHRASE=") for kv in flat)
+        # Passphrase persisted locally + surfaced in the summary.
+        assert (vdir / "as_passphrase").exists()
+        assert "AS passphrase" in result
+        assert "claude.ai" in result
+
+
 # ── _fly_app_exists detection ────────────────────────────────────────────────
 
 

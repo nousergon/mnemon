@@ -65,27 +65,35 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-### Local
+mnemon's whole point is **one memory vault across every client** — Claude Code, claude.ai web, Claude Desktop, the mobile app, Cursor. That's the **default setup** below. It's a deploy of your own Fly.io app (on your keys, your data), and `upgrade web` makes it turnkey — including auth for both headless *and* browser clients.
+
+### Cross-device (the default)
+
+Prereqs: [`flyctl`](https://fly.io/docs/flyctl/install/) authenticated, `aws` CLI configured, an S3 bucket.
+
+```bash
+pip install "mnemon-memory[server]"
+export MNEMON_S3_BUCKET=my-mnemon-vault
+mnemon upgrade web --app-name my-mnemon
+```
+
+This deploys **your own** mnemon to Fly, seeds the vault, and provisions auth for both client kinds:
+
+- **Headless clients** (Claude Code, Cursor) — reconfigured automatically with a bearer token.
+- **Browser clients** (claude.ai web, Claude Desktop, mobile) — a self-hosted OAuth Authorization Server is enabled for you (keypair persists on the Fly volume). Add the connector `https://my-mnemon.fly.dev/mcp` in the app's Settings → Connectors; it opens a login page — sign in with the **passphrase printed at the end of the deploy** (also saved to `~/.mnemon/as_passphrase`).
+
+No third-party auth vendor, no manual secret-wrangling. `mnemon doctor` runs at the end to verify the deployment.
+
+### Local-only (quick demo)
+
+Just trying it on one machine, with no Fly/AWS accounts? You can elect the local-only path instead — but note it's **single-machine, no cross-device sharing** (that's the whole feature you'd be skipping):
 
 ```bash
 pip install mnemon-memory
 mnemon setup
 ```
 
-Auto-detects Claude Code, Claude Desktop, Cursor, Gemini CLI — configures each, then runs `mnemon doctor`.
-
-First `memory_search` takes ~10–20s (one-time FastEmbed model download). Subsequent calls are fast.
-
-### Web
-
-Prereqs: `flyctl` authenticated, `aws` CLI configured, an S3 bucket.
-
-```bash
-export MNEMON_S3_BUCKET=my-mnemon-vault
-mnemon upgrade web --app-name my-mnemon
-```
-
-After it finishes, add `https://my-mnemon.fly.dev/mcp` to claude.ai and the Claude mobile app manually (Settings → Connectors / Connected Apps).
+Auto-detects Claude Code, Claude Desktop, Cursor, Gemini CLI — configures each, then runs `mnemon doctor`. First `memory_search` takes ~10–20s (one-time FastEmbed model download). Move up to the full cross-device setup anytime with `mnemon upgrade web`.
 
 ### Upgrade to a newer version (already on web)
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.0rc10] - 2026-06-07
+
+Cross-device is now the **default** path, and it's turnkey.
+
+### Added
+- **`mnemon upgrade web` auto-provisions the self-hosted OAuth AS.** Previously `upgrade web` set up a bearer token (headless clients: Claude Code, Cursor) but left the OAuth Authorization Server — which the **browser** clients (claude.ai web, Claude Desktop, mobile) need — to manual `flyctl secrets` setup. So the cross-device path, mnemon's headline feature, wasn't actually turnkey. Now first-time deploys generate a passphrase and set `MNEMON_AS_ENABLED` + `MNEMON_AS_PASSPHRASE` + `MNEMON_PUBLIC_URL` automatically (the AS keypair already persists on the Fly volume at `/data/oauth_keys`). The passphrase is surfaced in the deploy summary and saved 0600 to `~/.mnemon/as_passphrase` — it's the operator's claude.ai/Desktop login.
+
+### Changed
+- **README leads with cross-device as the default**; local-only is demoted to a "quick demo" you elect *after* seeing the full setup. Reflects that the whole reason to run mnemon (vs. Claude's siloed native memory) is the cross-client vault.
+
 ## [0.7.0rc9] - 2026-06-07
 
 Continuing the 0.7 rc cycle — hardening toward a `0.7.0` stable that is
