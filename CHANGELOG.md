@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0rc13] - 2026-06-07
+
+### Changed
+- **Clarified connector-setup wording** (operator-caught during live
+  validation). The `upgrade web` summary, `validate_cross_device.sh`
+  output, and the README cross-device section now say: add the connector
+  with a **name + URL only — leave Client ID/Secret blank** (the
+  self-hosted AS registers clients via DCR), and the **passphrase is the
+  OAuth login prompt shown on Connect, not a connector field**. Also notes
+  to disable a co-enabled prod connector during a test so save/search
+  routes to the intended app (both expose the same tool names).
+
 ## [0.7.0rc12] - 2026-06-07
 
 ### Added

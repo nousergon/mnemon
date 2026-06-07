@@ -80,7 +80,7 @@ mnemon upgrade web --app-name my-mnemon
 This deploys **your own** mnemon to Fly, seeds the vault, and provisions auth for both client kinds:
 
 - **Headless clients** (Claude Code, Cursor) — reconfigured automatically with a bearer token.
-- **Browser clients** (claude.ai web, Claude Desktop, mobile) — a self-hosted OAuth Authorization Server is enabled for you (keypair persists on the Fly volume). Add the connector `https://my-mnemon.fly.dev/mcp` in the app's Settings → Connectors; it opens a login page — sign in with the **passphrase printed at the end of the deploy** (also saved to `~/.mnemon/as_passphrase`).
+- **Browser clients** (claude.ai web, Claude Desktop, mobile) — a self-hosted OAuth Authorization Server is enabled for you (keypair persists on the Fly volume). In the app's Settings → Connectors, add a custom connector with a name + the URL `https://my-mnemon.fly.dev/mcp` — **leave Client ID / Client Secret blank** (the AS self-registers via Dynamic Client Registration). When you click Connect it redirects to a login page; enter the **passphrase printed at the end of the deploy** there (also saved to `~/.mnemon/as_passphrase`). The passphrase is the OAuth login, *not* a connector field.
 
 No third-party auth vendor, no manual secret-wrangling. `mnemon doctor` runs at the end to verify the deployment.
 
