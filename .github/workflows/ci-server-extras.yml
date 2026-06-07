@@ -28,6 +28,10 @@ on:
 jobs:
   test-server-extras-only:
     runs-on: ubuntu-latest
+    # Backstop: this job is a fast import/unit check, so a multi-minute
+    # run means something hung — fail in 15 min instead of stalling on
+    # GitHub's 6h default.
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -57,9 +61,19 @@ jobs:
           ! pip show llama-cpp-python > /dev/null 2>&1 \
             || (echo "::error::llama-cpp-python is installed under [server] — it must remain in [llm]"; exit 1)
 
-      # Run the full test suite under [server]-only install. Any test
-      # that imports something only available in [llm]/[ui] will fail
-      # here — that's a real bug worth catching at PR time, not after
-      # a Fly redeploy surfaces it client-side.
+      # Run the suite under [server]-only install. Any test that imports
+      # something only available in [llm]/[ui] fails here — that's a real
+      # bug worth catching at PR time, not after a Fly redeploy surfaces
+      # it client-side.
+      #
+      # `-m "not integration"` excludes the end-to-end tests that spawn a
+      # real `mnemon serve-remote` subprocess: on a fresh container they
+      # cold-download the embedder + NLI models (~100 MB) at server boot
+      # with no per-download timeout, which can stall this job for hours.
+      # Those tests are already covered in ci.yml ([dev]) and the clean
+      # wheel-install smoke runs in install-test.yml; this job's job is to
+      # catch optional-dep leaks into the [server] import path, which the
+      # unit suite (incl. the run_remote branch tests) already exercises
+      # under [server]-only.
       - name: Run tests under [server]-only install
-        run: pytest tests/ -v --tb=short
+        run: pytest tests/ -v --tb=short -m "not integration"

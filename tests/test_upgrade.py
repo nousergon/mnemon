@@ -11,6 +11,7 @@ are NOT exercised here — see ``private/e2e-test-runbook-260421.md``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from subprocess import CalledProcessError, CompletedProcess
 from unittest.mock import MagicMock, patch
@@ -518,6 +519,76 @@ class TestOAuthASProvisioning:
         assert (vdir / "as_passphrase").exists()
         assert "AS passphrase" in result
         assert "claude.ai" in result
+
+
+class TestRedeployASBackfill:
+    """All deploy paths provision auth: a redeploy of an app that predates
+    AS auto-provisioning (rc10) back-fills the OAuth AS — but never rotates
+    an existing passphrase, and never acts when the secret list is
+    unavailable."""
+
+    def test_fly_secret_names_parses_json(self):
+        out = json.dumps([
+            {"Name": "MNEMON_LOCAL_TOKEN", "Digest": "x"},
+            {"Name": "AWS_ACCESS_KEY_ID", "Digest": "y"},
+        ])
+        with patch("mnemon.upgrade.subprocess.run", return_value=_ok_completed(stdout=out)):
+            names = upgrade._fly_secret_names("app")
+        assert names == {"MNEMON_LOCAL_TOKEN", "AWS_ACCESS_KEY_ID"}
+
+    def test_fly_secret_names_none_on_failure(self):
+        with patch(
+            "mnemon.upgrade.subprocess.run",
+            side_effect=CalledProcessError(1, ["flyctl"]),
+        ):
+            assert upgrade._fly_secret_names("app") is None
+
+    def test_fly_secret_names_none_on_nonjson(self):
+        with patch("mnemon.upgrade.subprocess.run", return_value=_ok_completed(stdout="not json")):
+            assert upgrade._fly_secret_names("app") is None
+
+    def test_redeploy_backfills_as_when_missing(self):
+        with patch("mnemon.upgrade._fly_secret_names", return_value={"MNEMON_LOCAL_TOKEN"}), \
+            patch("mnemon.upgrade._fly_set_as_secrets") as mock_set_as, \
+            patch("mnemon.upgrade._persist_as_passphrase") as mock_persist, \
+            patch("mnemon.upgrade._fly_deploy"), \
+            patch("mnemon.upgrade._settle_after_deploy"):
+            result = upgrade._redeploy_web(
+                app_name="old-app", region="sjc",
+                mnemon_version="0.7.0rc11", skip_doctor=True,
+            )
+        mock_set_as.assert_called_once()
+        call = mock_set_as.call_args.args
+        assert call[0] == "old-app"
+        assert call[2] == "https://old-app.fly.dev"
+        mock_persist.assert_called_once()
+        assert "newly enabled" in result
+
+    def test_redeploy_skips_as_when_present(self):
+        with patch(
+            "mnemon.upgrade._fly_secret_names",
+            return_value={"MNEMON_AS_PASSPHRASE", "MNEMON_LOCAL_TOKEN"},
+        ), \
+            patch("mnemon.upgrade._fly_set_as_secrets") as mock_set_as, \
+            patch("mnemon.upgrade._fly_deploy"), \
+            patch("mnemon.upgrade._settle_after_deploy"):
+            result = upgrade._redeploy_web(
+                app_name="app", region="sjc",
+                mnemon_version="0.7.0rc11", skip_doctor=True,
+            )
+        mock_set_as.assert_not_called()
+        assert "newly enabled" not in result
+
+    def test_redeploy_skips_as_when_list_unavailable(self):
+        with patch("mnemon.upgrade._fly_secret_names", return_value=None), \
+            patch("mnemon.upgrade._fly_set_as_secrets") as mock_set_as, \
+            patch("mnemon.upgrade._fly_deploy"), \
+            patch("mnemon.upgrade._settle_after_deploy"):
+            upgrade._redeploy_web(
+                app_name="app", region="sjc",
+                mnemon_version="0.7.0rc11", skip_doctor=True,
+            )
+        mock_set_as.assert_not_called()
 
 
 # ── _fly_app_exists detection ────────────────────────────────────────────────

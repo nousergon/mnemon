@@ -44,6 +44,7 @@ Layer 3 runbook: ``private/e2e-test-runbook-260421.md``.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import re
 import secrets
@@ -463,6 +464,49 @@ def _fly_set_secrets(
     )
 
 
+def _fly_secret_names(app_name: str) -> set[str] | None:
+    """Return the set of Fly secret NAMES set on ``app_name`` (values are
+    never exposed by ``flyctl secrets list``). Returns None if the list
+    can't be retrieved (old flyctl, perms) — callers treat None as
+    "unknown, don't act" rather than "empty".
+    """
+    try:
+        out = subprocess.run(
+            ["flyctl", "secrets", "list", "--app", app_name, "--json"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    try:
+        rows = json.loads(out.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    # flyctl returns a list of {"Name": ..., "Digest": ..., ...} objects.
+    return {r.get("Name") for r in rows if isinstance(r, dict) and r.get("Name")}
+
+
+def _fly_set_as_secrets(app_name: str, as_passphrase: str, public_url: str) -> None:
+    """Set ONLY the OAuth-AS secrets (staged), without touching AWS/S3.
+
+    Used by the redeploy path to back-fill the AS on apps deployed before
+    auto-provisioning existed — so it must not require AWS creds (which a
+    redeploy-only operator may not have in env). The subsequent deploy
+    applies the staged secrets.
+    """
+    subprocess.run(
+        [
+            "flyctl", "secrets", "set", "--app", app_name, "--stage",
+            "MNEMON_AS_ENABLED=true",
+            f"MNEMON_AS_PASSPHRASE={as_passphrase}",
+            f"MNEMON_PUBLIC_URL={public_url}",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
 def _resolve_aws_key(key: str) -> str | None:
     try:
         out = subprocess.run(
@@ -566,6 +610,23 @@ def _redeploy_web(
     and bearer token, so no client-side action is required — every MCP
     connection picks up the new image on next request.
     """
+    # Back-fill the OAuth AS if this app predates auto-provisioning (rc10).
+    # Cross-device (claude.ai/Desktop) is the default path, so a redeploy
+    # of an older app should gain the browser-auth AS too. Only act when
+    # we can confirm the secret is ABSENT — if the list call fails
+    # (None) or the passphrase already exists, leave it alone (never
+    # rotate an existing passphrase: that invalidates issued tokens).
+    newly_provisioned_passphrase: str | None = None
+    existing_secrets = _fly_secret_names(app_name)
+    if existing_secrets is not None and "MNEMON_AS_PASSPHRASE" not in existing_secrets:
+        newly_provisioned_passphrase = secrets.token_urlsafe(32)
+        _fly_set_as_secrets(
+            app_name,
+            newly_provisioned_passphrase,
+            f"https://{app_name}.fly.dev",
+        )
+        _persist_as_passphrase(newly_provisioned_passphrase)
+
     with tempfile.TemporaryDirectory(prefix="mnemon-redeploy-") as tdir:
         workdir = Path(tdir)
         (workdir / "Dockerfile").write_text(
@@ -584,6 +645,13 @@ def _redeploy_web(
         f"Redeploy complete: {remote_url}",
         f"  Fly app:       {app_name}",
         f"  Version:       mnemon-memory=={mnemon_version}",
+    ]
+    if newly_provisioned_passphrase:
+        summary_lines += [
+            f"  OAuth AS:      newly enabled (this app predated it) — passphrase saved to {AS_PASSPHRASE_FILE_DISPLAY}",
+            "                 claude.ai / Desktop / mobile can now connect; sign in with that passphrase.",
+        ]
+    summary_lines += [
         "",
         "No client-side changes needed — every MCP client keeps its URL",
         "and bearer token. New image is picked up on the next request.",

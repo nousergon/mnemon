@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.0rc11] - 2026-06-07
+
+Auth-completeness + CI hardening — toward rock-solid.
+
+### Added
+- **Redeploy path back-fills the OAuth AS.** rc10 auto-provisioned the
+  AS on *first-time* deploys; apps deployed earlier wouldn't gain it on
+  a plain `mnemon upgrade web` redeploy (Fly secrets are first-time-only).
+  Now `_redeploy_web` checks `flyctl secrets list` and, only if
+  `MNEMON_AS_PASSPHRASE` is absent, generates + sets the AS secrets and
+  surfaces the passphrase. It never rotates an existing passphrase (that
+  would invalidate issued tokens) and never acts when the secret list
+  can't be read. So **every** deploy path now provisions browser-client
+  auth.
+- **CI runs on macOS too.** The test matrix adds `macos-latest` (one
+  Python version) alongside the Linux × {3.10, 3.12, 3.13} grid, to
+  catch Mac-specific regressions on the primary dev platform. Windows is
+  explicitly scoped out (unix-only deploy paths).
+
+### Fixed
+- CI comment referenced the old 80% coverage floor; the gate is 88%.
+
 ## [0.7.0rc10] - 2026-06-07
 
 Cross-device is now the **default** path, and it's turnkey.
