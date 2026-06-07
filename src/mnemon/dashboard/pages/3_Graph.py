@@ -5,7 +5,7 @@ import streamlit as st
 st.set_page_config(page_title="Memory Graph — mnemon", layout="wide")
 st.title("Memory Graph")
 
-from mnemon.dashboard.loaders import load_graph_projection, load_related, load_status, remote_guard, _use_remote
+from mnemon.dashboard.loaders import load_graph_projection, load_relations_bulk, load_related, load_status, remote_guard, _use_remote
 from mnemon.dashboard.charts import make_graph_scatter, add_relation_edges
 
 CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
@@ -70,14 +70,11 @@ if len(vec_ids) < 5:
 # Build scatter plot
 fig = make_graph_scatter(coords_2d, vec_ids, doc_map, visible_types=set(visible_types))
 
-# Relation edges
+# Relation edges — one bulk fetch (was one call per document, which
+# timed out on large remotes). add_relation_edges filters to visible nodes.
 if show_edges:
-    all_doc_ids = {info["id"] for info in doc_map.values()}
-    relations: dict[int, list[dict]] = {}
-    for doc_id in all_doc_ids:
-        rels = load_related(doc_id, limit=5)
-        if rels:
-            relations[doc_id] = rels
+    with remote_guard("relation edges"):
+        relations = load_relations_bulk()
     if relations:
         fig = add_relation_edges(fig, coords_2d, vec_ids, doc_map, relations)
 

@@ -858,6 +858,28 @@ class Store:
             results.append(rd)
         return results
 
+    def export_relations(self, limit: int = 20000) -> list[dict]:
+        """All relation edges between live documents, in one query.
+
+        The Graph page's edge overlay used to call ``get_related`` once per
+        document — N round-trips, untenable on a large remote vault. This
+        returns every edge whose *both* endpoints are non-invalidated, as
+        ``[{source_id, target_id, relation_type, weight}]`` ordered by
+        weight desc, capped at ``limit``. Lightweight (ids + type + weight
+        only — no document content, so no defang needed).
+        """
+        rows = self.db.execute(
+            """SELECT r.source_id, r.target_id, r.relation_type, r.weight
+               FROM relations r
+               JOIN documents s ON s.id = r.source_id
+               JOIN documents t ON t.id = r.target_id
+               WHERE s.invalidated_at IS NULL AND t.invalidated_at IS NULL
+               ORDER BY r.weight DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def add_relation(self, source_id: int, target_id: int, relation_type: str, weight: float = 1.0) -> None:
         """Add a relation between two documents."""
         self.db.execute(

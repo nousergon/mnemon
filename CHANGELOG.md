@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.0rc19] - 2026-06-07
+
+### Added
+- **Memory Graph relation-edge overlay now scales too** (the second
+  large-vault Graph timeout). The edge overlay fetched relations **one
+  document at a time** — N MCP round-trips (3,000+ on a large remote),
+  which timed out even when the projection itself was fast. New
+  `memory_export_relations` MCP tool returns every edge between live
+  documents in **one** call (`{count, truncated, edges}`), backed by a
+  single `Store.export_relations()` query; the Graph page builds the
+  overlay from that one payload via a new `load_relations_bulk()` loader.
+  Edges are capped at `_RELATIONS_EXPORT_MAX` (20,000) and the bulk call
+  is wrapped in the page's `remote_guard`. Together with rc18's
+  server-side PCA projection, the Graph now renders end-to-end at any
+  vault size. Coverage: server `memory_export_relations` tests +
+  `Store.export_relations` tests (live edges, invalidated-endpoint
+  exclusion) + a dashboard edges-failure-degrade AppTest. Tool inventory
+  18 → 19.
+
 ## [0.7.0rc18] - 2026-06-07
 
 ### Added

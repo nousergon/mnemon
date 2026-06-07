@@ -275,6 +275,28 @@ class TestRelations:
         assert len(store.get_related(id1)) == 1
         assert len(store.get_related(id2)) == 1
 
+    def test_export_relations_returns_all_live_edges(self, store):
+        a = store.save(title="A", content="content A")
+        b = store.save(title="B", content="content B")
+        c = store.save(title="C", content="content C")
+        store.add_relation(a, b, "restates", 0.9)
+        store.add_relation(b, c, "supersedes", 0.5)
+
+        edges = store.export_relations()
+        assert len(edges) == 2
+        # Shape: flat source/target/type/weight — no document content.
+        pairs = {(e["source_id"], e["target_id"], e["relation_type"]) for e in edges}
+        assert (a, b, "restates") in pairs
+        assert (b, c, "supersedes") in pairs
+
+    def test_export_relations_excludes_invalidated_endpoints(self, store):
+        a = store.save(title="A", content="content A")
+        b = store.save(title="B", content="content B")
+        store.add_relation(a, b, "restates", 0.9)
+        store.forget(b)  # invalidate one endpoint
+        # Edge whose target is now invalidated must not be exported.
+        assert store.export_relations() == []
+
 
 class TestCorrectionOf:
     """Regression for 2026-05-22 P2 ROADMAP follow-up: ``correction_of``

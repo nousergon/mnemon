@@ -111,6 +111,7 @@ def _tool_inputs_for(seeded: dict[str, Any]) -> dict[str, dict]:
         "memory_list_standing": {},
         "memory_export_vectors": {},
         "memory_export_coords": {},
+        "memory_export_relations": {},
         "profile_get": {},
 
         # Pure-create — safe, doesn't modify existing rows

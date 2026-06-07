@@ -445,6 +445,11 @@ _VECTOR_EXPORT_MAX = 5000
 # Fly machine.
 _COORDS_EXPORT_MAX = 50000
 
+# Relations-export cap: bounds the single bulk edge fetch for the Graph
+# overlay. A few thousand edges render fine in plotly; beyond this the
+# overlay is visual noise anyway.
+_RELATIONS_EXPORT_MAX = 20000
+
 
 def _pca_2d(matrix):
     """Project an (n, d) embedding matrix to (n, 2) via PCA (numpy SVD).
@@ -630,6 +635,32 @@ def memory_export_coords() -> str:
         "count": len(items),
         "truncated": truncated,
         "items": items,
+    })
+
+
+@mcp.tool()
+def memory_export_relations() -> str:
+    """Export every relation edge between live documents in one call.
+
+    The Graph page's edge overlay previously fetched relations one
+    document at a time (``memory_related`` per node — N round-trips,
+    which times out on a large remote vault even when the projection is
+    fast). This returns all edges between non-invalidated docs in a
+    single call:
+
+    ``{count, truncated, edges:[{source_id, target_id, relation_type,
+    weight}]}``. Edges are ordered by weight desc and capped at
+    ``_RELATIONS_EXPORT_MAX``.
+    """
+    store = _get_store()
+    edges = store.export_relations(limit=_RELATIONS_EXPORT_MAX + 1)
+    truncated = len(edges) > _RELATIONS_EXPORT_MAX
+    if truncated:
+        edges = edges[:_RELATIONS_EXPORT_MAX]
+    return json.dumps({
+        "count": len(edges),
+        "truncated": truncated,
+        "edges": edges,
     })
 
 
