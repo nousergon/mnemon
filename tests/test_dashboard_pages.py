@@ -87,6 +87,14 @@ def _assert_clean(at: AppTest):
     assert not at.exception, f"page raised: {at.exception}"
 
 
+def _assert_degraded(at: AppTest):
+    """A loader failure must degrade to a clean on-page error (the
+    remote_guard message starts 'Couldn't load …') + no raw exception."""
+    assert not at.exception, f"page raised instead of degrading: {at.exception}"
+    assert any("Couldn't load" in e.value for e in at.error), \
+        "expected a clean 'Couldn't load …' error from remote_guard"
+
+
 # ── Home (app.py) ────────────────────────────────────────────────────────────
 
 def test_home_renders():
@@ -179,16 +187,40 @@ def test_graph_renders_with_points():
     _assert_clean(at)
 
 
+# ── loader-FAILURE paths (remote_guard) — every page must degrade, not crash ──
+# A remote-call failure (timeout / transport ExceptionGroup on a slow/cold/
+# unreachable remote) must surface as a clean on-page error, never a traceback.
+# These are the paths the success-mocked render tests above don't exercise.
+
 def test_graph_degrades_when_vector_export_fails():
-    # The heavy memory_export_vectors call can fail (timeout / transport
-    # ExceptionGroup) against a large/cold remote. The page must show a
-    # clean error + st.stop — NOT crash with a traceback. This is the
-    # loader-*failure* path the success-mocked tests don't exercise.
     with patch(
         "mnemon.dashboard.loaders.load_vectors_collapsed",
         side_effect=RuntimeError("boom: vector export failed"),
     ):
         at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
-    _assert_clean(at)
-    assert any("Couldn't load vectors" in e.value for e in at.error), \
-        "expected a clean on-page error when the vector export fails"
+    _assert_degraded(at)
+
+
+def test_search_degrades_on_loader_failure():
+    with patch("mnemon.dashboard.loaders.load_search", side_effect=RuntimeError("remote down")):
+        at = AppTest.from_file(str(PAGES / "1_Search.py"), default_timeout=RUN_TIMEOUT).run()
+        at.text_input[0].set_value("anything").run()
+    _assert_degraded(at)
+
+
+def test_timeline_degrades_on_loader_failure():
+    with patch("mnemon.dashboard.loaders.load_timeline", side_effect=RuntimeError("remote down")):
+        at = AppTest.from_file(str(PAGES / "2_Timeline.py"), default_timeout=RUN_TIMEOUT).run()
+    _assert_degraded(at)
+
+
+def test_profile_degrades_on_loader_failure():
+    with patch("mnemon.dashboard.loaders.load_timeline", side_effect=RuntimeError("remote down")):
+        at = AppTest.from_file(str(PAGES / "4_Profile.py"), default_timeout=RUN_TIMEOUT).run()
+    _assert_degraded(at)
+
+
+def test_home_degrades_on_loader_failure():
+    with patch("mnemon.dashboard.loaders.load_status", side_effect=RuntimeError("remote down")):
+        at = AppTest.from_file(str(DASH / "app.py"), default_timeout=RUN_TIMEOUT).run()
+    _assert_degraded(at)

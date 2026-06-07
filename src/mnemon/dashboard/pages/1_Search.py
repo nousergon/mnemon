@@ -5,7 +5,7 @@ import streamlit as st
 st.set_page_config(page_title="Search — mnemon", layout="wide")
 st.title("Search Memories")
 
-from mnemon.dashboard.loaders import load_search
+from mnemon.dashboard.loaders import load_search, remote_guard
 from mnemon.dashboard.charts import make_score_bars
 
 CONTENT_TYPES = ["All", "decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
@@ -15,7 +15,8 @@ content_type_filter = st.selectbox("Filter by type", CONTENT_TYPES)
 
 if query:
     ct = None if content_type_filter == "All" else content_type_filter
-    results = load_search(query, limit=20, content_type=ct)
+    with remote_guard("search results"):
+        results = load_search(query, limit=20, content_type=ct)
 
     if not results:
         st.info("No results found.")

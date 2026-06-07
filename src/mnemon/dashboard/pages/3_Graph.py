@@ -5,28 +5,17 @@ import streamlit as st
 st.set_page_config(page_title="Memory Graph — mnemon", layout="wide")
 st.title("Memory Graph")
 
-from mnemon.dashboard.loaders import load_vectors_collapsed, load_umap_coords, load_related, load_status
+from mnemon.dashboard.loaders import load_vectors_collapsed, load_umap_coords, load_related, load_status, remote_guard
 from mnemon.dashboard.charts import make_graph_scatter, add_relation_edges
 
 CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
 
 # One point per document. Multi-chunk docs are mean-pooled in the
 # loader — otherwise a long memory showed up as several near-identical
-# points, which read as duplicates.
-try:
+# points, which read as duplicates. memory_export_vectors is the heaviest
+# remote call — on a large/cold remote it can time out, so guard it.
+with remote_guard("the vector export (the heaviest call)"):
     vec_data = load_vectors_collapsed()
-except Exception as exc:  # noqa: BLE001 — UI loader: degrade, don't crash the page
-    # memory_export_vectors is the heaviest remote call (it exports every
-    # vector). On a large or cold remote it can time out / fail at the
-    # transport layer (surfaces as an anyio ExceptionGroup). Show a clear,
-    # actionable error instead of a raw traceback.
-    st.error(
-        f"Couldn't load vectors from the vault ({type(exc).__name__}). "
-        "The vector export is the heaviest call — on a large or cold "
-        "remote it can time out. Retry, or run `mnemon doctor` to check "
-        "the connection."
-    )
-    st.stop()
 if vec_data is None:
     # Disambiguate: empty vault vs. saved-but-unembedded memories. The
     # second case is a silent-failure signal — tell the user how to fix it.

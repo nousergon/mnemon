@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0rc17] - 2026-06-07
+
+### Added / Fixed
+- **Every dashboard page now degrades gracefully on a remote-call failure**
+  (comprehensive UI resilience). Added a shared `remote_guard()` context
+  manager in `loaders.py` and wrapped every page's top-level loader call
+  (Home, Search, Timeline, Graph, Profile): a slow/cold/unreachable remote
+  now yields a clean `st.error` + `st.stop` instead of an unhandled
+  `ExceptionGroup` traceback. (rc16 fixed only Graph; this generalizes it.)
+  The guard passes Streamlit's own control-flow exceptions (`st.stop` /
+  `st.rerun`) through untouched. **Every page now has both a success-render
+  AppTest and a loader-failure AppTest** (13 dashboard tests) — so the UI
+  is comprehensively in the suite for both render and failure paths.
+
 ## [0.7.0rc16] - 2026-06-07
 
 ### Fixed

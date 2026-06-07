@@ -6,7 +6,7 @@ from datetime import datetime, date
 st.set_page_config(page_title="Timeline — mnemon", layout="wide")
 st.title("Memory Timeline")
 
-from mnemon.dashboard.loaders import load_timeline
+from mnemon.dashboard.loaders import load_timeline, remote_guard
 
 CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
 
@@ -15,7 +15,8 @@ col1, col2 = st.sidebar.columns(2)
 date_from = col1.date_input("From", value=date(2024, 1, 1))
 date_to = col2.date_input("To", value=date.today())
 
-timeline = load_timeline(limit=500)
+with remote_guard("the timeline"):
+    timeline = load_timeline(limit=500)
 
 filtered = [
     d for d in timeline
