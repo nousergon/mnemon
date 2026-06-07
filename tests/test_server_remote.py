@@ -220,7 +220,8 @@ class TestMcpServer:
         tools = mcp._tool_manager._tools
         # 14 originals + 3 salience-tier Phase 1 (memory_promote /
         # memory_demote / memory_list_standing, added 2026-05-22)
-        assert len(tools) == 17
+        # + 1 memory_export_coords (server-side PCA Graph path, rc18)
+        assert len(tools) == 18
 
     def test_mcp_tool_names(self):
         from mnemon.server import mcp
@@ -230,7 +231,7 @@ class TestMcpServer:
             "memory_get", "memory_timeline",
             "memory_save", "memory_pin", "memory_forget",
             "memory_status", "memory_sweep", "memory_related",
-            "memory_export_vectors",
+            "memory_export_vectors", "memory_export_coords",
             "memory_rebuild", "memory_check_contradictions",
             "profile_get", "profile_update",
             # Salience tier Phase 1 (added 2026-05-22) —

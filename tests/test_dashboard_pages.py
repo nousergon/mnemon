@@ -155,18 +155,8 @@ def test_profile_renders():
 
 # ── Graph (3_Graph.py) ───────────────────────────────────────────────────────
 
-def test_graph_empty_is_graceful():
-    with patch("mnemon.dashboard.loaders.load_vectors_collapsed", return_value=None), \
-         patch("mnemon.dashboard.loaders.load_status", return_value={"total_documents": 0}):
-        at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
-    _assert_clean(at)
-
-
-def test_graph_renders_with_points():
-    import numpy as np
-
-    vec_ids = [f"v{i}" for i in range(6)]
-    doc_map = {
+def _graph_doc_map(vec_ids):
+    return {
         vid: {
             "id": i,
             "title": f"Doc {i}",
@@ -176,12 +166,48 @@ def test_graph_renders_with_points():
         }
         for i, vid in enumerate(vec_ids)
     }
+
+
+def test_graph_empty_is_graceful():
+    with patch("mnemon.dashboard.loaders._use_remote", return_value=False), \
+         patch("mnemon.dashboard.loaders.load_status", return_value={"total_documents": 0}):
+        at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
+    _assert_clean(at)
+
+
+def test_graph_renders_with_points_local_umap():
+    import numpy as np
+
+    vec_ids = [f"v{i}" for i in range(6)]
+    doc_map = _graph_doc_map(vec_ids)
     # load_umap_coords returns an (N, 2) numpy array (charts index it as [i, 0]).
     coords = np.array([[float(i), float(i)] for i in range(6)])
-    with patch(
-        "mnemon.dashboard.loaders.load_vectors_collapsed",
-        return_value=(vec_ids, np.zeros((6, 4)), doc_map),
-    ), patch("mnemon.dashboard.loaders.load_umap_coords", return_value=coords), \
+    with patch("mnemon.dashboard.loaders._use_remote", return_value=False), \
+         patch("mnemon.dashboard.loaders.load_status", return_value={"total_documents": 6}), \
+         patch(
+             "mnemon.dashboard.loaders.load_vectors_collapsed",
+             return_value=(vec_ids, np.zeros((6, 4)), doc_map),
+         ), \
+         patch("mnemon.dashboard.loaders.load_umap_coords", return_value=coords), \
+         patch("mnemon.dashboard.loaders.load_related", return_value=[]):
+        at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
+    _assert_clean(at)
+
+
+def test_graph_renders_with_points_remote_pca():
+    # Remote path: server-side PCA coords come back via load_coords_remote
+    # as (vec_ids, (N,2) coords, doc_map). The page must render the same.
+    import numpy as np
+
+    vec_ids = [f"doc_{i}" for i in range(6)]
+    doc_map = _graph_doc_map(vec_ids)
+    coords = np.array([[float(i), -float(i)] for i in range(6)], dtype=np.float32)
+    with patch("mnemon.dashboard.loaders._use_remote", return_value=True), \
+         patch("mnemon.dashboard.loaders.load_status", return_value={"total_documents": 6}), \
+         patch(
+             "mnemon.dashboard.loaders.load_coords_remote",
+             return_value=(vec_ids, coords, doc_map),
+         ), \
          patch("mnemon.dashboard.loaders.load_related", return_value=[]):
         at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
     _assert_clean(at)
@@ -192,11 +218,26 @@ def test_graph_renders_with_points():
 # unreachable remote) must surface as a clean on-page error, never a traceback.
 # These are the paths the success-mocked render tests above don't exercise.
 
-def test_graph_degrades_when_vector_export_fails():
-    with patch(
-        "mnemon.dashboard.loaders.load_vectors_collapsed",
-        side_effect=RuntimeError("boom: vector export failed"),
-    ):
+def test_graph_degrades_when_local_projection_fails():
+    with patch("mnemon.dashboard.loaders._use_remote", return_value=False), \
+         patch("mnemon.dashboard.loaders.load_status", return_value={"total_documents": 6}), \
+         patch(
+             "mnemon.dashboard.loaders.load_vectors_collapsed",
+             side_effect=RuntimeError("boom: vector export failed"),
+         ):
+        at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
+    _assert_degraded(at)
+
+
+def test_graph_degrades_when_remote_coords_fail():
+    # The exact failure class Brian hit: the heavy remote projection call
+    # times out / transport-errors on a cold or large remote.
+    with patch("mnemon.dashboard.loaders._use_remote", return_value=True), \
+         patch("mnemon.dashboard.loaders.load_status", return_value={"total_documents": 3057}), \
+         patch(
+             "mnemon.dashboard.loaders.load_coords_remote",
+             side_effect=RuntimeError("remote coords export failed"),
+         ):
         at = AppTest.from_file(str(PAGES / "3_Graph.py"), default_timeout=RUN_TIMEOUT).run()
     _assert_degraded(at)
 

@@ -946,6 +946,140 @@ class TestMemoryExportVectors:
         assert parsed["count"] == _VECTOR_EXPORT_MAX
 
 
+# ── memory_export_coords (server-side PCA) ───────────────────────────────────
+
+
+class TestMemoryExportCoords:
+    def _rows(self, n):
+        return [
+            {"hash": f"hash{i}", "id": i, "title": f"T{i}",
+             "content_type": "note", "confidence": 0.5,
+             "created_at": "2026-01-01", "pinned": i % 2}
+            for i in range(n)
+        ]
+
+    @patch("mnemon.server.Store")
+    def test_empty_vault(self, MockStore):
+        import numpy as np
+        MockStore.return_value.vec_store.export_all.return_value = (
+            [], np.zeros((0, 384))
+        )
+        from mnemon.server import memory_export_coords
+        assert json.loads(memory_export_coords()) == {
+            "count": 0, "truncated": False, "items": [],
+        }
+
+    @patch("mnemon.server.Store")
+    def test_returns_2d_coords_not_full_vectors(self, MockStore):
+        import numpy as np
+        from mnemon.server import memory_export_coords
+        n = 8
+        vec_ids = [f"hash{i}_0" for i in range(n)]
+        # Spread points so PCA has variance to project onto.
+        rng = np.zeros((n, 384), dtype=np.float32)
+        for i in range(n):
+            rng[i, i % 384] = float(i + 1)
+            rng[i, (i + 1) % 384] = float(n - i)
+        MockStore.return_value.vec_store.export_all.return_value = (vec_ids, rng)
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = self._rows(n)
+
+        parsed = json.loads(memory_export_coords())
+        assert parsed["count"] == n
+        assert parsed["truncated"] is False
+        for it in parsed["items"]:
+            # The whole point: coords, not raw vectors over the wire.
+            assert "vector" not in it
+            assert isinstance(it["x"], float) and isinstance(it["y"], float)
+            # Synthetic vec_id keeps click-to-detail working.
+            assert it["vec_id"] == f"doc_{it['doc_id']}"
+        # pinned round-trips as bool.
+        assert any(it["pinned"] is True for it in parsed["items"])
+        assert any(it["pinned"] is False for it in parsed["items"])
+
+    @patch("mnemon.server.Store")
+    def test_collapses_multichunk_docs_to_one_point(self, MockStore):
+        """Two chunks of the same doc → one mean-pooled point."""
+        import numpy as np
+        from mnemon.server import memory_export_coords
+        # Three chunks across two docs (hashA has 2 chunks, hashB has 1)
+        # plus a couple more so PCA has ≥2 points of variance.
+        vec_ids = ["hashA_0", "hashA_1", "hashB_0", "hashC_0"]
+        vecs = np.zeros((4, 384), dtype=np.float32)
+        vecs[0, 0] = 1.0; vecs[1, 1] = 1.0; vecs[2, 2] = 1.0; vecs[3, 3] = 1.0
+        MockStore.return_value.vec_store.export_all.return_value = (vec_ids, vecs)
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = [
+            {"hash": "hashA", "id": 1, "title": "A", "content_type": "note",
+             "confidence": 0.5, "created_at": "2026-01-01", "pinned": 0},
+            {"hash": "hashB", "id": 2, "title": "B", "content_type": "note",
+             "confidence": 0.5, "created_at": "2026-01-01", "pinned": 0},
+            {"hash": "hashC", "id": 3, "title": "C", "content_type": "note",
+             "confidence": 0.5, "created_at": "2026-01-01", "pinned": 0},
+        ]
+        parsed = json.loads(memory_export_coords())
+        assert parsed["count"] == 3  # 4 chunks → 3 docs
+        assert {it["doc_id"] for it in parsed["items"]} == {1, 2, 3}
+
+    @patch("mnemon.server.Store")
+    def test_skips_invalidated_docs(self, MockStore):
+        import numpy as np
+        from mnemon.server import memory_export_coords
+        MockStore.return_value.vec_store.export_all.return_value = (
+            ["abc_0", "orphan_0", "def_0"],
+            np.array([[1.0] + [0.0] * 383, [0.5] * 384, [0.0] * 383 + [1.0]],
+                     dtype=np.float32),
+        )
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = [
+            {"hash": "abc", "id": 1, "title": "Kept", "content_type": "note",
+             "confidence": 0.5, "created_at": "2026-01-01", "pinned": 0},
+            {"hash": "def", "id": 2, "title": "Kept2", "content_type": "note",
+             "confidence": 0.5, "created_at": "2026-01-01", "pinned": 0},
+        ]
+        parsed = json.loads(memory_export_coords())
+        assert parsed["count"] == 2
+        assert {it["doc_id"] for it in parsed["items"]} == {1, 2}
+
+    @patch("mnemon.server.Store")
+    def test_truncates_at_cap(self, MockStore):
+        import numpy as np
+        from mnemon.server import memory_export_coords, _COORDS_EXPORT_MAX
+        n = _COORDS_EXPORT_MAX + 25
+        vec_ids = [f"hash{i}_0" for i in range(n)]
+        vecs = np.zeros((n, 384), dtype=np.float32)
+        for i in range(n):
+            vecs[i, i % 384] = float(i + 1)
+        MockStore.return_value.vec_store.export_all.return_value = (vec_ids, vecs)
+        MockStore.return_value.db.execute.return_value.fetchall.return_value = \
+            self._rows(_COORDS_EXPORT_MAX)
+        parsed = json.loads(memory_export_coords())
+        assert parsed["truncated"] is True
+        assert parsed["count"] == _COORDS_EXPORT_MAX
+
+
+class TestPCA2D:
+    def test_projects_to_two_dims(self):
+        import numpy as np
+        from mnemon.server import _pca_2d
+        X = np.random.RandomState(0).randn(20, 384)
+        coords = _pca_2d(X)
+        assert coords.shape == (20, 2)
+
+    def test_handles_degenerate_small_inputs(self):
+        import numpy as np
+        from mnemon.server import _pca_2d
+        assert _pca_2d(np.zeros((0, 384))).shape == (0, 2)
+        assert _pca_2d(np.ones((1, 384))).shape == (1, 2)
+
+    def test_preserves_dominant_axis_separation(self):
+        # Two well-separated clusters must stay separated in 2-D.
+        import numpy as np
+        from mnemon.server import _pca_2d
+        a = np.tile([5.0] + [0.0] * 383, (10, 1))
+        b = np.tile([-5.0] + [0.0] * 383, (10, 1))
+        coords = _pca_2d(np.vstack([a, b]).astype(np.float32))
+        # First-component means of the two clusters differ substantially.
+        assert abs(coords[:10, 0].mean() - coords[10:, 0].mean()) > 1.0
+
+
 # ── Output-boundary defanging ────────────────────────────────────────────────
 
 
