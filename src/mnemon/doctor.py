@@ -384,6 +384,54 @@ def _best_effort_forget(doc_id: int) -> None:
         pass
 
 
+def check_no_shadow_local_vault() -> CheckResult:
+    """Two-vaults guard (remote mode): there must be no *populated* local
+    default vault shadowing the remote.
+
+    A populated ``~/.mnemon/default.sqlite`` while a remote is configured
+    is the trap that twice silently served stale local reads (the rc8
+    ``Store`` guard now makes it structurally inaccessible — this check
+    catches a residual file before it can confuse anyone). An empty stub
+    is harmless and passes; a populated one warns with the archive recipe.
+    """
+    from .config import vault_dir
+
+    vault_file = vault_dir() / "default.sqlite"
+    if not vault_file.exists():
+        return CheckResult(
+            "No shadow local vault",
+            True,
+            "no local default.sqlite — remote is the sole vault",
+        )
+
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{vault_file}?mode=ro", uri=True)
+        try:
+            n = conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        # No documents table / unreadable → not a populated vault.
+        n = 0
+
+    if n > 0:
+        return CheckResult(
+            "No shadow local vault",
+            True,
+            f"{vault_file} holds {n} documents while in remote mode — possible "
+            f"two-vaults shadow. Archive it: "
+            f"mv {vault_file}* ~/.mnemon/decommissioned/",
+            warn=True,
+        )
+    return CheckResult(
+        "No shadow local vault",
+        True,
+        f"local default.sqlite present but empty ({vault_file})",
+    )
+
+
 # ── Local-mode checks ──────────────────────────────────────────────────────
 
 
@@ -519,6 +567,7 @@ REMOTE_CHECKS: list[Callable[[], CheckResult]] = [
     check_oauth_as_metadata,
     check_auth_and_tool_call,
     check_round_trip,
+    check_no_shadow_local_vault,
 ]
 
 LOCAL_CHECKS: list[Callable[[], CheckResult]] = [
