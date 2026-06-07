@@ -383,7 +383,12 @@ def _fly_create_volume(app_name: str, region: str) -> None:
 
 
 def _fly_set_secrets(
-    app_name: str, local_token: str, s3_bucket: str
+    app_name: str,
+    local_token: str,
+    s3_bucket: str,
+    *,
+    as_passphrase: str | None = None,
+    public_url: str | None = None,
 ) -> None:
     """Set Fly secrets: mnemon token + forward AWS creds for sync pull.
 
@@ -397,6 +402,15 @@ def _fly_set_secrets(
     falls back to ``sync.S3_PREFIX_DEFAULT`` / ``VAULT_NAME_DEFAULT`` and
     seeds from the operator's prod prefix instead of any test-scoped
     override (caught 2026-05-21 during the 0.6.0 Layer-3 test).
+
+    When ``as_passphrase`` + ``public_url`` are given, also enables the
+    self-hosted OAuth Authorization Server (``MNEMON_AS_ENABLED`` +
+    passphrase + public URL). This is what lets the **browser** clients —
+    claude.ai web / mobile / Claude Desktop's account connector — connect
+    (they authenticate via OAuth DCR+PKCE, not the static bearer token).
+    Cross-device is mnemon's default path, so first-time deploys provision
+    it automatically; the AS keypair persists on the Fly volume
+    (``/data/oauth_keys``) across restarts.
     """
     env = os.environ.copy()
     aws_access = env.get("AWS_ACCESS_KEY_ID") or _resolve_aws_key(
@@ -432,6 +446,14 @@ def _fly_set_secrets(
         f"MNEMON_S3_PREFIX={s3_prefix}",
         f"MNEMON_VAULT_NAME={vault_name}",
     ]
+    # Self-hosted OAuth AS — the browser-client (claude.ai / Desktop) auth
+    # path. Provisioned on first-time deploy so cross-device works turnkey.
+    if as_passphrase and public_url:
+        secrets_kv += [
+            "MNEMON_AS_ENABLED=true",
+            f"MNEMON_AS_PASSPHRASE={as_passphrase}",
+            f"MNEMON_PUBLIC_URL={public_url}",
+        ]
     # --stage: don't restart machines immediately (they don't exist yet).
     subprocess.run(
         ["flyctl", "secrets", "set", "--app", app_name, "--stage"]
@@ -697,12 +719,18 @@ def upgrade_web(
             os.environ["MNEMON_S3_BUCKET"] = prior_bucket
 
     # Step 3: Fly deploy (or skip if override env var is set).
+    # as_passphrase is the operator's claude.ai/Desktop browser-login
+    # credential (the OAuth AS). Generated + provisioned only on a real
+    # Fly deploy; stays None on the override (Layer-2 test) path.
+    as_passphrase: str | None = None
     override = _fly_endpoint_override()
     if override:
         remote_url = override.rstrip("/")
         if not remote_url.endswith("/mcp"):
             remote_url = remote_url + "/mcp"
     else:
+        as_passphrase = secrets.token_urlsafe(32)
+        public_url = f"https://{app_name}.fly.dev"
         with tempfile.TemporaryDirectory(prefix="mnemon-upgrade-") as tdir:
             workdir = Path(tdir)
             (workdir / "Dockerfile").write_text(
@@ -716,8 +744,15 @@ def upgrade_web(
             )
             _fly_launch(workdir, app_name, region)
             _fly_create_volume(app_name, region)
-            _fly_set_secrets(app_name, local_token, bucket)
+            _fly_set_secrets(
+                app_name, local_token, bucket,
+                as_passphrase=as_passphrase, public_url=public_url,
+            )
             _fly_deploy(workdir, app_name)
+
+        # Persist the AS passphrase locally (0600) — the operator needs it
+        # to log in when adding the claude.ai / Desktop connector.
+        _persist_as_passphrase(as_passphrase)
 
         # Step 4: seed vault on Fly from S3.
         if local_exists:
@@ -743,24 +778,38 @@ def upgrade_web(
         f"Upgrade to web complete: {remote_url}",
         f"  Fly app:       {app_name}",
         f"  S3 bucket:     {bucket}",
-        f"  Token:         {LOCAL_TOKEN_FILE_DISPLAY} (chmod 600)",
+        f"  Token:         {LOCAL_TOKEN_FILE_DISPLAY} (chmod 600) — headless clients (Claude Code, Cursor)",
     ]
+    if as_passphrase:
+        summary_lines.append(
+            f"  AS passphrase: {AS_PASSPHRASE_FILE_DISPLAY} (chmod 600) — your claude.ai / Desktop login"
+        )
     if archived_to:
         summary_lines.append(f"  Local archive: {archived_to}")
     if reconfigured:
         summary_lines.append(
             "  Reconfigured:  " + ", ".join(reconfigured)
         )
-    summary_lines.extend(
-        [
-            "",
-            "Next steps:",
-            "  • Restart each client above to pick up the new MCP endpoint.",
-            f"  • Add the remote manually to claude.ai / mobile: {remote_url}",
-            f"    (Bearer token is in ~/.mnemon/local_token on this machine.)",
-            "  • Run `mnemon downgrade local` to revert (pulls Fly vault back to local).",
+    next_steps = [
+        "",
+        "Next steps:",
+        "  • Restart each client above to pick up the new MCP endpoint.",
+    ]
+    if as_passphrase:
+        next_steps += [
+            f"  • Add the connector in claude.ai / Claude Desktop / mobile: {remote_url}",
+            "    It opens a login page — sign in with the AS passphrase above",
+            f"    (saved to {AS_PASSPHRASE_FILE_DISPLAY}). This is the cross-device path.",
         ]
+    else:
+        next_steps += [
+            f"  • Add the remote manually to claude.ai / mobile: {remote_url}",
+            "    (Bearer token is in ~/.mnemon/local_token on this machine.)",
+        ]
+    next_steps.append(
+        "  • Run `mnemon downgrade local` to revert (pulls Fly vault back to local)."
     )
+    summary_lines.extend(next_steps)
 
     if skip_doctor:
         return "\n".join(summary_lines)
@@ -811,3 +860,18 @@ def upgrade_web(
 # top and pollute hot paths. The real path resolution lives in setup.py;
 # this is purely for the user-facing summary.
 LOCAL_TOKEN_FILE_DISPLAY = "~/.mnemon/local_token"
+AS_PASSPHRASE_FILE_DISPLAY = "~/.mnemon/as_passphrase"
+
+
+def _persist_as_passphrase(passphrase: str) -> None:
+    """Write the OAuth AS passphrase to ``~/.mnemon/as_passphrase`` (0600).
+
+    It's the operator's single-user browser-login credential for the
+    claude.ai / Desktop connector, so they need it readable somewhere
+    after the deploy. Mirrors the bearer-token-on-disk convention.
+    """
+    mnemon_dir = Path.home() / ".mnemon"
+    mnemon_dir.mkdir(parents=True, exist_ok=True)
+    path = mnemon_dir / "as_passphrase"
+    path.write_text(passphrase + "\n")
+    path.chmod(0o600)
