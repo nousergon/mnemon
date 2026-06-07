@@ -9,6 +9,9 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # Backstop against a hung test (e.g. the integration tests cold-
+    # downloading models at server boot) stalling on the 6h default.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
