@@ -5,32 +5,56 @@ import streamlit as st
 st.set_page_config(page_title="Memory Graph — mnemon", layout="wide")
 st.title("Memory Graph")
 
-from mnemon.dashboard.loaders import load_vectors_collapsed, load_umap_coords, load_related, load_status, remote_guard
+from mnemon.dashboard.loaders import load_graph_projection, load_related, load_status, remote_guard, _use_remote
 from mnemon.dashboard.charts import make_graph_scatter, add_relation_edges
 
 CONTENT_TYPES = ["decision", "preference", "antipattern", "observation", "research", "project", "handoff", "note"]
 
-# One point per document. Multi-chunk docs are mean-pooled in the
-# loader — otherwise a long memory showed up as several near-identical
-# points, which read as duplicates. memory_export_vectors is the heaviest
-# remote call — on a large/cold remote it can time out, so guard it.
-with remote_guard("the vector export (the heaviest call)"):
-    vec_data = load_vectors_collapsed()
-if vec_data is None:
-    # Disambiguate: empty vault vs. saved-but-unembedded memories. The
-    # second case is a silent-failure signal — tell the user how to fix it.
+remote = _use_remote()
+
+# Status first (cheap) — bounds the empty-vault case and the local UMAP
+# n_neighbors slider without paying for the projection up front.
+with remote_guard("vault status"):
     doc_count = load_status().get("total_documents", 0)
-    if doc_count == 0:
-        st.warning("No memories saved yet. Save a memory to get started.")
-    else:
-        st.warning(
-            f"{doc_count} memor{'y' if doc_count == 1 else 'ies'} saved but no embeddings found — "
-            "the embedding step did not run or failed silently. "
-            "Run `mnemon doctor` to diagnose, then `mnemon rebuild` to re-embed."
-        )
+if doc_count == 0:
+    st.warning("No memories saved yet. Save a memory to get started.")
     st.stop()
 
-vec_ids, vectors, doc_map = vec_data
+# Sidebar controls. The neighbor knob is UMAP-only (local); the remote
+# path is server-side PCA, which ships just the 2-D coordinates so the
+# Graph scales to large vaults instead of timing out on a full export.
+if remote:
+    st.sidebar.caption("Projection: PCA — computed server-side, scales to large vaults.")
+    n_neighbors = 15  # unused on the remote (PCA) path
+else:
+    max_neighbors = min(50, max(2, doc_count - 1))
+    if max_neighbors > 5:
+        n_neighbors = st.sidebar.slider("UMAP n_neighbors", min_value=5, max_value=max_neighbors, value=min(15, max_neighbors), step=5, help="Higher = more global structure, lower = more local clusters")
+    else:
+        n_neighbors = max_neighbors
+        st.sidebar.caption(f"UMAP n_neighbors: {n_neighbors} (auto — small vault)")
+visible_types = st.sidebar.multiselect("Visible types", CONTENT_TYPES, default=CONTENT_TYPES)
+show_edges = st.sidebar.checkbox("Show relation edges", value=True)
+
+# One point per document. Multi-chunk docs are mean-pooled (so a long
+# memory isn't several near-identical points). Remote reduces server-side
+# (tiny payload); local runs UMAP client-side — both can be slow/cold, so
+# guard the call.
+with remote_guard("the memory graph projection"):
+    with st.spinner("Computing projection..."):
+        proj = load_graph_projection(n_neighbors=n_neighbors)
+
+if proj is None:
+    # doc_count > 0 but no embeddings — a silent-failure signal; tell the
+    # user how to fix it rather than showing a blank graph.
+    st.warning(
+        f"{doc_count} memor{'y' if doc_count == 1 else 'ies'} saved but no embeddings found — "
+        "the embedding step did not run or failed silently. "
+        "Run `mnemon doctor` to diagnose, then `mnemon rebuild` to re-embed."
+    )
+    st.stop()
+
+vec_ids, coords_2d, doc_map = proj
 
 # Post-collapse each point = one memory, so count in memory-units here —
 # otherwise the Graph page's "1 vector" contradicts `mnemon status`'s
@@ -38,26 +62,10 @@ vec_ids, vectors, doc_map = vec_data
 if len(vec_ids) < 5:
     st.warning(
         f"Only {len(vec_ids)} memor{'y' if len(vec_ids) == 1 else 'ies'} — "
-        "need at least 5 memories for a meaningful UMAP projection. "
+        "need at least 5 memories for a meaningful projection. "
         "Add more and come back."
     )
     st.stop()
-
-# Sidebar controls
-max_neighbors = min(50, len(vec_ids) - 1)
-if max_neighbors > 5:
-    n_neighbors = st.sidebar.slider("UMAP n_neighbors", min_value=5, max_value=max_neighbors, value=min(15, max_neighbors), step=5, help="Higher = more global structure, lower = more local clusters")
-else:
-    n_neighbors = max_neighbors
-    st.sidebar.caption(f"UMAP n_neighbors: {n_neighbors} (auto — small vault)")
-visible_types = st.sidebar.multiselect("Visible types", CONTENT_TYPES, default=CONTENT_TYPES)
-show_edges = st.sidebar.checkbox("Show relation edges", value=True)
-
-# UMAP reduction
-with st.spinner("Computing UMAP projection..."):
-    coords_2d = load_umap_coords(vectors, n_neighbors=n_neighbors)
-
-# doc_map is already populated by load_vectors() — no extra query needed.
 
 # Build scatter plot
 fig = make_graph_scatter(coords_2d, vec_ids, doc_map, visible_types=set(visible_types))

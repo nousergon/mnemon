@@ -438,6 +438,32 @@ def memory_related(id: int, limit: int = 10) -> str:
 # cap so a runaway vault size doesn't OOM the server process silently.
 _VECTOR_EXPORT_MAX = 5000
 
+# Coords-export cap: the projected payload is O(n_docs × 2) regardless of
+# embedding dim, so it stays tiny even for large vaults — the cap here
+# bounds server-side PCA compute/memory, not wire size. SVD on
+# 50000 × 384 float32 is a few seconds and ~150 MB, comfortably within a
+# Fly machine.
+_COORDS_EXPORT_MAX = 50000
+
+
+def _pca_2d(matrix):
+    """Project an (n, d) embedding matrix to (n, 2) via PCA (numpy SVD).
+
+    Zero new deps (numpy is a base requirement) and O(n·d·min(n,d)) — the
+    scalable alternative to shipping full vectors and reducing client-side.
+    Mean-centers, then projects onto the top-2 right singular vectors.
+    """
+    import numpy as np
+
+    X = np.asarray(matrix, dtype=np.float64)
+    if X.shape[0] < 2:
+        # 0 or 1 point — nothing to separate; place at the origin.
+        return np.zeros((X.shape[0], 2), dtype=np.float64)
+    Xc = X - X.mean(axis=0)
+    # Economy SVD: Vt rows are the principal axes (descending variance).
+    _, _, Vt = np.linalg.svd(Xc, full_matrices=False)
+    return Xc @ Vt[:2].T
+
 
 @mcp.tool()
 def memory_export_vectors() -> str:
@@ -510,6 +536,98 @@ def memory_export_vectors() -> str:
     return json.dumps({
         "count": len(items),
         "dim": store.vec_store.dim,
+        "truncated": truncated,
+        "items": items,
+    })
+
+
+@mcp.tool()
+def memory_export_coords() -> str:
+    """Export a 2-D PCA projection of the vault's document embeddings.
+
+    The dashboard Graph page's **scalable** path. ``memory_export_vectors``
+    ships every full 384-d vector over the wire (~10 MB for a few thousand
+    docs) and reduces client-side — untenable on a cold/slow remote, where
+    the transport times out. This instead collapses each document to one
+    mean-pooled, L2-normalized vector, runs PCA → 2-D **server-side**, and
+    returns only the coordinates plus metadata. The payload is
+    O(n_docs × 2) regardless of embedding dim, so it scales to large vaults
+    where exporting full vectors would fail.
+
+    Returns ``{count, truncated, items}`` where each item is
+    ``{doc_id, vec_id, x, y, title, content_type, confidence, created_at,
+    pinned}``. ``vec_id`` is the synthetic ``"doc_{id}"`` so the Graph
+    page's click-to-detail (via ``customdata.doc_id``) keeps working.
+    Invalidated docs are excluded. ``truncated`` is True if the vault
+    exceeds ``_COORDS_EXPORT_MAX``.
+    """
+    import numpy as np
+
+    store = _get_store()
+    vec_ids, vectors = store.vec_store.export_all()
+    if not vec_ids:
+        return json.dumps({"count": 0, "truncated": False, "items": []})
+
+    truncated = len(vec_ids) > _COORDS_EXPORT_MAX
+    if truncated:
+        vec_ids = vec_ids[:_COORDS_EXPORT_MAX]
+        vectors = vectors[:_COORDS_EXPORT_MAX]
+
+    hashes = [vid.rsplit("_", 1)[0] for vid in vec_ids]
+    unique_hashes = list(dict.fromkeys(hashes))
+    placeholders = ",".join("?" * len(unique_hashes))
+    rows = store.db.execute(
+        f"""SELECT hash, id, title, content_type, confidence, created_at, pinned
+            FROM documents
+            WHERE hash IN ({placeholders})
+              AND invalidated_at IS NULL""",
+        unique_hashes,
+    ).fetchall()
+    hash_to_doc = {r["hash"]: dict(r) for r in rows}
+
+    # Collapse chunks → one mean-pooled, L2-normalized vector per document
+    # (mirrors the dashboard's former client-side load_vectors_collapsed),
+    # then keep insertion order so coords align with docs deterministically.
+    by_doc: dict = {}
+    for vec_id, content_hash, vector in zip(vec_ids, hashes, vectors):
+        doc = hash_to_doc.get(content_hash)
+        if doc is None:
+            # Vector's source doc was invalidated/deleted — skip.
+            continue
+        entry = by_doc.setdefault(doc["id"], {"doc": doc, "vecs": []})
+        entry["vecs"].append(np.asarray(vector, dtype=np.float32))
+
+    if not by_doc:
+        return json.dumps({"count": 0, "truncated": truncated, "items": []})
+
+    doc_ids = list(by_doc.keys())
+    pooled = []
+    for did in doc_ids:
+        mean_vec = np.mean(by_doc[did]["vecs"], axis=0)
+        norm = np.linalg.norm(mean_vec)
+        if norm > 0:
+            mean_vec = mean_vec / norm
+        pooled.append(mean_vec)
+
+    coords = _pca_2d(np.array(pooled, dtype=np.float32))
+
+    items = []
+    for did, (x, y) in zip(doc_ids, coords):
+        doc = by_doc[did]["doc"]
+        items.append({
+            "doc_id": doc["id"],
+            "vec_id": f"doc_{doc['id']}",
+            "x": float(x),
+            "y": float(y),
+            "title": doc["title"],
+            "content_type": doc["content_type"],
+            "confidence": doc["confidence"],
+            "created_at": doc["created_at"],
+            "pinned": bool(doc["pinned"]),
+        })
+
+    return json.dumps({
+        "count": len(items),
         "truncated": truncated,
         "items": items,
     })

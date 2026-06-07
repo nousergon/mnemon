@@ -110,6 +110,7 @@ def _tool_inputs_for(seeded: dict[str, Any]) -> dict[str, dict]:
         "memory_related": {"id": ids[0], "limit": 5},
         "memory_list_standing": {},
         "memory_export_vectors": {},
+        "memory_export_coords": {},
         "profile_get": {},
 
         # Pure-create — safe, doesn't modify existing rows

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0rc18] - 2026-06-07
+
+### Added
+- **Memory Graph now scales to large vaults.** The Graph page previously
+  pulled every document's full 384-d vector over MCP
+  (`memory_export_vectors` — ~10 MB JSON for a few thousand docs) and ran
+  UMAP client-side; on a large or cold remote that transfer timed out and
+  the page couldn't render. New `memory_export_coords` MCP tool collapses
+  each document to one mean-pooled, L2-normalized vector and runs **PCA →
+  2-D server-side** (numpy SVD, zero new deps), returning only the
+  coordinates + metadata. The payload is now O(n_docs × 2) regardless of
+  embedding dimension, so the Graph renders at any vault size.
+  - Remote mode uses the server-side PCA projection; **local mode keeps
+    client-side UMAP** (small demo vaults, no transfer cost). The Graph
+    page dispatches via a new `load_graph_projection()` loader and labels
+    which projection is in use.
+  - Coverage: server tests for `memory_export_coords` + `_pca_2d`
+    (collapse, invalidated-doc skip, cap, cluster separation) and dashboard
+    AppTests for both the remote-PCA render path and a remote-coords
+    failure-degrade path.
+
 ## [0.7.0rc17] - 2026-06-07
 
 ### Added / Fixed

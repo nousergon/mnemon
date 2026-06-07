@@ -298,6 +298,65 @@ def load_umap_coords(_vectors: np.ndarray, n_neighbors: int = 15) -> np.ndarray:
     return reducer.fit_transform(_vectors)
 
 
+@st.cache_data(ttl=900)
+def load_coords_remote() -> tuple[list[str], np.ndarray, dict[str, dict]] | None:
+    """Remote Graph path: the server computes the 2-D PCA projection and
+    returns only coordinates (O(n_docs) payload), so it scales to large
+    vaults where exporting full vectors would time out on a cold remote.
+
+    Returns ``(vec_ids, coords_2d, doc_map)`` — same shape the Graph page
+    consumes from the local UMAP path — or None when the vault has no
+    embeddings yet.
+    """
+    payload = json.loads(_call_remote(
+        "memory_export_coords", {},
+        timeout=VECTOR_EXPORT_TIMEOUT_SEC,
+    ))
+    items = payload.get("items", [])
+    if not items:
+        return None
+    vec_ids = [it["vec_id"] for it in items]
+    coords = np.array([[it["x"], it["y"]] for it in items], dtype=np.float32)
+    doc_map = {
+        it["vec_id"]: {
+            "id": it["doc_id"],
+            "title": it["title"],
+            "content_type": it["content_type"],
+            "confidence": it["confidence"],
+            "created_at": it["created_at"],
+        }
+        for it in items
+    }
+    if payload.get("truncated"):
+        st.warning(
+            f"Graph projection was capped at {payload.get('count')} of your "
+            "vault's documents — raise the server-side coords cap if you need "
+            "the full set."
+        )
+    return vec_ids, coords, doc_map
+
+
+def load_graph_projection(n_neighbors: int = 15) -> tuple[list[str], np.ndarray, dict[str, dict]] | None:
+    """Unified Graph-page projection: ``(vec_ids, coords_2d, doc_map)`` or None.
+
+    - **Remote** (the default on Fly): server-side PCA via
+      ``memory_export_coords`` — ships only coordinates, scales to large
+      vaults. ``n_neighbors`` is ignored (PCA has no neighbor knob).
+    - **Local**: client-side UMAP over the collapsed vectors — small demo
+      vaults where ``umap`` is installed and there's no transfer cost.
+
+    Dispatch only — the underlying loaders are individually cached.
+    """
+    if _use_remote():
+        return load_coords_remote()
+    raw = load_vectors_collapsed()
+    if raw is None:
+        return None
+    vec_ids, vectors, doc_map = raw
+    coords = load_umap_coords(vectors, n_neighbors=n_neighbors)
+    return vec_ids, coords, doc_map
+
+
 def _build_vector_doc_map_local(vec_ids: list[str]) -> dict[str, dict]:
     """Local-mode doc-map: open a fresh SQLite connection and resolve
     vec_ids → doc metadata via content_hash. Remote mode gets this
