@@ -590,6 +590,28 @@ class TestRedeployASBackfill:
             )
         mock_set_as.assert_not_called()
 
+    def test_redeploy_does_not_rotate_when_sentinel_absent(self, capsys):
+        """Fail-closed: if the secret list parses but the MNEMON_LOCAL_TOKEN
+        sentinel is missing (e.g. flyctl renamed its `--json` `Name` field, so
+        the parse silently yields a wrong/empty set), the back-fill must NOT
+        fire — provisioning would rotate a live passphrase and break every
+        connected client. The naive `"AS" not in secrets` guard would mis-fire
+        here; the sentinel gate must catch it and WARN."""
+        with patch("mnemon.upgrade._fly_secret_names", return_value=set()), \
+            patch("mnemon.upgrade._fly_set_as_secrets") as mock_set_as, \
+            patch("mnemon.upgrade._persist_as_passphrase") as mock_persist, \
+            patch("mnemon.upgrade._fly_deploy"), \
+            patch("mnemon.upgrade._settle_after_deploy"):
+            result = upgrade._redeploy_web(
+                app_name="app", region="sjc",
+                mnemon_version="0.7.0rc11", skip_doctor=True,
+            )
+        mock_set_as.assert_not_called()
+        mock_persist.assert_not_called()
+        assert "newly enabled" not in result
+        # Fail-loud: the anomalous read is surfaced, not swallowed.
+        assert "MNEMON_LOCAL_TOKEN" in capsys.readouterr().err
+
 
 # ── _fly_app_exists detection ────────────────────────────────────────────────
 

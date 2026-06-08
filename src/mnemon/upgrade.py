@@ -612,20 +612,49 @@ def _redeploy_web(
     """
     # Back-fill the OAuth AS if this app predates auto-provisioning (rc10).
     # Cross-device (claude.ai/Desktop) is the default path, so a redeploy
-    # of an older app should gain the browser-auth AS too. Only act when
-    # we can confirm the secret is ABSENT — if the list call fails
-    # (None) or the passphrase already exists, leave it alone (never
-    # rotate an existing passphrase: that invalidates issued tokens).
+    # of an older app should gain the browser-auth AS too.
+    #
+    # FAIL-CLOSED on the never-rotate invariant: provisioning generates a
+    # FRESH passphrase that invalidates every issued token (and breaks the
+    # operator's claude.ai/Desktop login), so we must act ONLY on a
+    # POSITIVELY confirmed absence — never on an ambiguous read. A read can
+    # lie two ways: (1) the list call fails → _fly_secret_names returns
+    # None; (2) flyctl's `--json` shape changes (e.g. the `Name` field is
+    # renamed) → the parse silently yields an empty / wrong set. Case (2)
+    # is the dangerous one: an empty set passes a naive `"AS" not in set`
+    # check and triggers a rotation.
+    #
+    # Guard: an existing Fly app ALWAYS carries MNEMON_LOCAL_TOKEN (set at
+    # first-time deploy), so we use it as a parse-sanity SENTINEL. Only
+    # "sentinel present AND AS absent" is a confirmed back-fill. If the
+    # list parsed but the sentinel is missing, the read is untrustworthy —
+    # WARN loudly and leave the passphrase untouched rather than silently
+    # rotate a live credential.
     newly_provisioned_passphrase: str | None = None
     existing_secrets = _fly_secret_names(app_name)
-    if existing_secrets is not None and "MNEMON_AS_PASSPHRASE" not in existing_secrets:
-        newly_provisioned_passphrase = secrets.token_urlsafe(32)
-        _fly_set_as_secrets(
-            app_name,
-            newly_provisioned_passphrase,
-            f"https://{app_name}.fly.dev",
-        )
-        _persist_as_passphrase(newly_provisioned_passphrase)
+    if existing_secrets is not None:
+        if "MNEMON_LOCAL_TOKEN" not in existing_secrets:
+            # No sentinel in a parsed secret list — impossible for a real
+            # deployed app. flyctl's output shape likely changed; do NOT
+            # provision (it would rotate a live passphrase and break every
+            # connected client).
+            print(
+                "WARNING: could not confirm existing Fly secrets for "
+                f"'{app_name}' — the parse-sanity sentinel MNEMON_LOCAL_TOKEN "
+                "is missing from the secret list (flyctl's --json output shape "
+                "may have changed). Leaving the OAuth AS passphrase UNTOUCHED "
+                "to avoid invalidating issued tokens. If claude.ai/Desktop "
+                "auth is not yet provisioned, set MNEMON_AS_* manually.",
+                file=sys.stderr,
+            )
+        elif "MNEMON_AS_PASSPHRASE" not in existing_secrets:
+            newly_provisioned_passphrase = secrets.token_urlsafe(32)
+            _fly_set_as_secrets(
+                app_name,
+                newly_provisioned_passphrase,
+                f"https://{app_name}.fly.dev",
+            )
+            _persist_as_passphrase(newly_provisioned_passphrase)
 
     with tempfile.TemporaryDirectory(prefix="mnemon-redeploy-") as tdir:
         workdir = Path(tdir)
