@@ -104,6 +104,8 @@ pip install -U 'mnemon-memory[server]'
 mnemon upgrade web --app-name my-mnemon
 ```
 
+> **Upgrading from a pre-0.7.0rc10 deployment? Re-auth your browser connectors once.** Apps deployed before the OAuth Authorization Server was auto-provisioned only ever had the headless bearer token. The first `upgrade web` on such an app **provisions a brand-new OAuth passphrase** (and enables the AS) — so your existing claude.ai / Desktop / mobile connector login stops working until you re-authenticate. Grab the new passphrase from the deploy summary or `~/.mnemon/as_passphrase` and re-enter it on the connector's login page. This is a **one-time** transition: once the passphrase exists, every later redeploy leaves it untouched (it is never rotated). Headless clients (Claude Code, Cursor) are unaffected — they keep their bearer token.
+
 ### Downgrade back to local
 
 ```bash
