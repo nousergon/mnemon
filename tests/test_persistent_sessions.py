@@ -78,6 +78,28 @@ class TestSessionStore:
         # Sanity: the default isn't accidentally short.
         assert DEFAULT_TTL_SECONDS == 7 * 24 * 3600
 
+    def test_oldest_age_seconds_empty_is_zero(self, tmp_path):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        assert store.oldest_age_seconds() == 0.0
+
+    def test_oldest_age_seconds_tracks_least_recently_active(self, tmp_path):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        store.register("old")
+        time.sleep(0.5)
+        store.register("new")
+        age = store.oldest_age_seconds()
+        # Reflects the oldest row (the first register), so ≥ the gap.
+        assert age >= 0.5
+
+    def test_oldest_age_seconds_surfaces_unpruned_overdue_rows(self, tmp_path):
+        # The prune-health signal: a row past the TTL that expire_old()
+        # hasn't removed must show up here even though count() hides it.
+        store = SessionStore(tmp_path / "sessions.sqlite", ttl_seconds=1)
+        store.register("overdue")
+        time.sleep(1.1)
+        assert store.count() == 0  # expired → excluded from count()
+        assert store.oldest_age_seconds() > 1.0  # but still visible here
+
 
 # ---------------------------------------------------------------------------
 # _PersistingInstanceDict
@@ -283,6 +305,7 @@ class TestMetricsCounters:
         assert m["stale_session_misses"] == 0
         assert m["persisted_sessions_total"] == 0
         assert m["in_memory_sessions_current"] == 0
+        assert m["oldest_session_age_seconds"] == 0
 
     async def test_in_memory_hit_increments_counter(self, tmp_path, monkeypatch):
         manager = self._make_manager(tmp_path)
