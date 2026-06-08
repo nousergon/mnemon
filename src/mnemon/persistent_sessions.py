@@ -160,6 +160,24 @@ class SessionStore:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    def oldest_age_seconds(self) -> float:
+        """Age (seconds) of the least-recently-active persisted row, or 0.0.
+
+        This is the volume-INDEPENDENT prune-health signal. ``count()``
+        filters expired rows out, so it can never reveal a broken prune;
+        this looks at *all* rows. Under a working ``expire_old()`` nothing
+        survives past ``ttl_seconds`` (+ up to one prune interval), so this
+        stays bounded near the TTL regardless of session volume. If it
+        climbs well past the TTL, the periodic prune has stopped running.
+        """
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT MIN(last_active_at) FROM mcp_transport_sessions"
+            ).fetchone()
+        if not row or row[0] is None:
+            return 0.0
+        return max(0.0, time.time() - float(row[0]))
+
 
 class _PersistingInstanceDict(dict[str, StreamableHTTPServerTransport]):
     """Dict subclass that ``register()``s every key on assignment.
@@ -266,6 +284,9 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
             **self._counters,
             "persisted_sessions_total": self._session_store.count(),
             "in_memory_sessions_current": len(self._server_instances),
+            # Volume-independent prune-health signal: bounded near the TTL
+            # while expire_old() runs, climbs only if the prune stalls.
+            "oldest_session_age_seconds": int(self._session_store.oldest_age_seconds()),
         }
 
     @contextlib.asynccontextmanager

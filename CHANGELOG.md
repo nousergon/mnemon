@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.2] - 2026-06-07
+
+### Fixed
+- **Health-monitor perpetual false-positive (issue #208).** The checker
+  warned when `persisted_sessions_total >= 5000`, opening a tracking
+  issue every run for active users. But that metric is computed by
+  `SessionStore.count()`, which filters `WHERE last_active_at > cutoff` —
+  it only counts *non-expired* sessions, so it tracks legitimate volume
+  and can never reveal a broken prune. Replaced the volume threshold with
+  a **volume-independent prune-health signal**: new
+  `oldest_session_age_seconds` metric (via `SessionStore.oldest_age_seconds()`)
+  reports the age of the least-recently-active row across *all* rows. The
+  checker now warns only if that exceeds the 7-day TTL + 2 prune cycles
+  (12h grace) — i.e. only when the periodic `expire_old()` task has
+  actually stalled. `persisted_sessions_total` is kept for observability
+  (no longer thresholded). Coverage: `tests/test_check_health.py` (incl. a
+  regression guard that high volume no longer warns) +
+  `oldest_age_seconds` store tests.
+
 ## [0.7.1] - 2026-06-07
 
 ### Fixed

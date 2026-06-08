@@ -12,7 +12,8 @@ Usage::
 Exit codes:
     0 — all checks passed
     1 — hard failure (status != ok, stale_session_misses > 0, schema drift)
-    2 — soft warning (persisted_sessions_total above threshold)
+    2 — soft warning (session prune appears stalled — oldest session far
+        past the TTL)
 """
 
 from __future__ import annotations
@@ -25,14 +26,21 @@ import urllib.request
 
 DEFAULT_URL = "https://mnemon-memory.fly.dev/health"
 
-# Soft cap. Since 0.6.0rc12, PersistentSessionManager runs a periodic
-# expire_old() task on a 6h tick (DEFAULT_EXPIRE_INTERVAL_SECONDS in
-# persistent_sessions.py), so unbounded growth is no longer the failure
-# mode this guarded against. The remaining drift is steady-state count
-# under the 7-day TTL; the threshold trips when actual session volume
-# outpaces the prune cadence — investigate by lowering TTL or tightening
-# the prune interval rather than assuming pruning is broken.
-PERSISTED_SESSIONS_WARN_THRESHOLD = 5_000
+# Prune-health threshold (volume-INDEPENDENT). The previous check warned
+# on persisted_sessions_total >= 5000, but that metric only counts
+# *non-expired* rows (count() filters WHERE last_active_at > cutoff), so
+# it can never reveal a broken prune — it just tracks legitimate session
+# volume and fired perpetually for active users (issue #208).
+#
+# The real failure mode is the periodic expire_old() task stalling, which
+# lets rows survive past the 7-day TTL. oldest_session_age_seconds
+# (added 0.7.1) surfaces exactly that and is independent of how many
+# sessions a user creates. Under a working prune nothing lives past
+# TTL (7d) + one prune interval (6h); we warn at TTL + 2 intervals (12h
+# grace) so a single skipped cycle doesn't trip it.
+_TTL_SECONDS = 7 * 24 * 3600              # DEFAULT_TTL_SECONDS
+_PRUNE_INTERVAL_SECONDS = 6 * 3600        # DEFAULT_EXPIRE_INTERVAL_SECONDS
+SESSION_AGE_WARN_SECONDS = _TTL_SECONDS + 2 * _PRUNE_INTERVAL_SECONDS
 
 
 def fetch_health(url: str, timeout: float = 30.0) -> dict:
@@ -84,16 +92,24 @@ def main() -> int:
             f"persistent_sessions.py registration path)"
         )
 
-    persisted = metrics.get("persisted_sessions_total")
-    if persisted is None:
+    # persisted_sessions_total is kept for observability but NOT
+    # thresholded — high legitimate volume is healthy. Its absence still
+    # signals schema drift.
+    if metrics.get("persisted_sessions_total") is None:
         failures.append("metrics.persisted_sessions_total missing — schema drift")
-    elif persisted >= PERSISTED_SESSIONS_WARN_THRESHOLD:
+
+    # Prune-health: oldest session far past the TTL means expire_old()
+    # stalled. Absent on pre-0.7.1 deploys — skip rather than fail so a
+    # rollback doesn't false-alarm (mirrors the metrics-absent handling).
+    oldest = metrics.get("oldest_session_age_seconds")
+    if oldest is not None and oldest > SESSION_AGE_WARN_SECONDS:
+        oldest_days = oldest / 86400
         warnings.append(
-            f"metrics.persisted_sessions_total = {persisted} "
-            f"(>= {PERSISTED_SESSIONS_WARN_THRESHOLD}). Periodic prune runs "
-            f"every 6h since rc12, so this is steady-state count under the "
-            f"7-day TTL — investigate by lowering TTL or tightening the prune "
-            f"interval if the warning fires repeatedly."
+            f"metrics.oldest_session_age_seconds = {oldest} ({oldest_days:.1f}d) "
+            f"> {SESSION_AGE_WARN_SECONDS} ({SESSION_AGE_WARN_SECONDS / 86400:.1f}d). "
+            f"A session is surviving well past the 7-day TTL — the periodic "
+            f"expire_old() prune has likely stopped running; check the server's "
+            f"lifespan task group / logs."
         )
 
     print(f"OK: status={payload['status']}, metrics={json.dumps(metrics)}")
