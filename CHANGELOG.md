@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.1] - 2026-06-07
+
+### Fixed
+- **Graph chart title was wrong and collided with the legend.** It
+  hard-coded "Memory Vector Space (UMAP 2D)" — overlapping the top
+  legend, and inaccurate in remote mode (which projects via PCA, not
+  UMAP, since rc18). The title now reflects the actual reducer
+  (`Memory vector space · PCA 2D` remote / `· UMAP 2D` local) and the
+  legend moved to the bottom of the chart so it can't collide.
+
+### Docs
+- README: added the Memory Graph screenshot (`docs/images/graph.png`)
+  under "Visualize your vault".
+
 ## [0.7.0] - 2026-06-07
 
 First stable release of the 0.7.0 line. Consolidates the rc1–rc19

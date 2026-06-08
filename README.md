@@ -125,6 +125,8 @@ Streamlit UI at `http://localhost:8503` — vault health, search, timeline, an i
 
 The graph view projects your embedding space to 2-D — UMAP for local vaults, and PCA computed server-side for remote vaults so it scales to thousands of memories without shipping every vector over the wire.
 
+![mnemon Memory Graph — 2-D projection of the embedding space, colored by memory type](docs/images/graph.png)
+
 ### Use it
 
 Once configured, mnemon works automatically — memories save and surface during your sessions. You can also interact directly:

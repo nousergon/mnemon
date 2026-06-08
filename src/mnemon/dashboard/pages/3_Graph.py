@@ -68,7 +68,11 @@ if len(vec_ids) < 5:
     st.stop()
 
 # Build scatter plot
-fig = make_graph_scatter(coords_2d, vec_ids, doc_map, visible_types=set(visible_types))
+fig = make_graph_scatter(
+    coords_2d, vec_ids, doc_map,
+    visible_types=set(visible_types),
+    projection="PCA" if remote else "UMAP",
+)
 
 # Relation edges — one bulk fetch (was one call per document, which
 # timed out on large remotes). add_relation_edges filters to visible nodes.

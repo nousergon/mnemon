@@ -111,8 +111,13 @@ def make_graph_scatter(
     vec_ids: list[str],
     doc_map: dict[str, dict],
     visible_types: set[str] | None = None,
+    projection: str = "PCA",
 ) -> go.Figure:
-    """UMAP scatter plot — one trace per content_type."""
+    """2-D embedding scatter — one trace per content_type.
+
+    ``projection`` labels the reducer (PCA server-side for remote vaults,
+    UMAP client-side for local) so the chart title stays honest.
+    """
     fig = go.Figure()
 
     type_groups: dict[str, dict] = {}
@@ -168,12 +173,20 @@ def make_graph_scatter(
             customdata=unmapped["customdata"],
         ))
 
+    # Move the legend to the BOTTOM for this chart (the shared default
+    # floats it top-right, where it collides with the long title). Title
+    # gets the top row to itself.
+    graph_layout = {
+        **_LAYOUT_DEFAULTS,
+        "legend": dict(orientation="h", yanchor="top", y=-0.02, xanchor="left", x=0),
+        "margin": dict(t=50, b=70, l=40, r=20),
+    }
     fig.update_layout(
-        title="Memory Vector Space (UMAP 2D)",
+        title=f"Memory vector space · {projection} 2D",
         xaxis=dict(visible=False),
         yaxis=dict(visible=False),
         height=650,
-        **_LAYOUT_DEFAULTS,
+        **graph_layout,
     )
     return fig
 
