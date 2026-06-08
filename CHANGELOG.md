@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.3] - 2026-06-08
+
+### Fixed
+- **Redeploy could silently rotate a live OAuth AS passphrase (fail-open
+  guard).** The rc11 back-fill in `_redeploy_web` provisions the OAuth AS
+  only when `MNEMON_AS_PASSPHRASE` is absent from the Fly secret list, and
+  is meant to *never* rotate an existing passphrase (rotation invalidates
+  every issued token and breaks the operator's claude.ai/Desktop login).
+  But the absence check trusted `_fly_secret_names` unconditionally: if
+  flyctl's `secrets list --json` shape ever changed (e.g. the `Name` field
+  renamed), the parse would silently yield an empty/wrong set, the naive
+  `"MNEMON_AS_PASSPHRASE" not in secrets` check would pass, and the
+  redeploy would **rotate a live passphrase**. Made the guard fail-closed:
+  an existing Fly app always carries `MNEMON_LOCAL_TOKEN`, so it's now used
+  as a parse-sanity **sentinel** — the back-fill fires only on "sentinel
+  present AND AS absent." A parsed list missing the sentinel is treated as
+  an untrustworthy read: the passphrase is left untouched and a loud
+  `WARNING` is emitted to stderr instead of silently rotating. Every other
+  read failure (list call fails → `None`) already skipped. Coverage:
+  `tests/test_upgrade.py::TestRedeployASBackfill` (new regression guard
+  that a renamed-`Name`/empty-set read does NOT provision and DOES warn).
+
 ## [0.7.2] - 2026-06-07
 
 ### Fixed
