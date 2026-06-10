@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.4] - 2026-06-10
+
+### Fixed
+- **Self-hosted web deploys now `suspend` an idle Fly machine instead of
+  `stop`, so a connector survives the host going to sleep.** The
+  self-hosted OAuth AS (`/oauth/token`) introduced in rc10/rc11 runs on the
+  same Fly machine as the MCP server. With `auto_stop_machines = "stop"` an
+  idle machine cold-boots on wake, which is slow enough that a connector's
+  silent token refresh after the operator's host reboots (e.g. Claude
+  Desktop after an overnight shutdown) times out — dropping the connector
+  to "disconnected" and forcing a full passphrase re-auth (observed as
+  repeated DCR client registrations piling up). Switching the generated
+  `fly.toml` (and `fly.toml.example`) to `auto_stop_machines = "suspend"`
+  snapshots RAM and resumes in ~1s, keeping refresh under the client
+  timeout so the connection persists. Server-side token/key state already
+  persisted on the volume; this only addresses cold-start latency on the
+  auth endpoint. Existing deployments can apply the fix without a redeploy
+  via `fly machine update <id> --autostop=suspend`.
+
 ## [0.7.3] - 2026-06-08
 
 ### Fixed
