@@ -24,7 +24,13 @@ primary_region = "sjc"                # pick one close to you: fly platform regi
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  # "suspend" (not "stop") so an idle machine snapshots RAM and resumes in
+  # ~1s instead of cold-booting. The self-hosted OAuth AS (/oauth/token) runs
+  # on this same machine, so a slow cold boot after idle makes a connector's
+  # token refresh on wake (e.g. Claude Desktop after the host reboots) time
+  # out and drop to "disconnected", forcing a full re-auth. Suspend-resume
+  # stays under the client timeout so the connection persists.
+  auto_stop_machines = "suspend"
   auto_start_machines = true
   min_machines_running = 0
 
