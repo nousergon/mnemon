@@ -161,7 +161,14 @@ primary_region = "{region}"
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = "stop"
+  # "suspend" (not "stop") so an idle machine snapshots RAM and resumes in
+  # ~1s instead of cold-booting. Critical because the self-hosted OAuth AS
+  # (/oauth/token) runs on this same machine: a cold boot after idle is slow
+  # enough that a connector's token refresh on wake (e.g. Claude Desktop
+  # after the host reboots overnight) times out and the connector drops to
+  # "disconnected", forcing a full passphrase re-auth. A ~1s suspend-resume
+  # keeps refresh under the client timeout so the connection persists.
+  auto_stop_machines = "suspend"
   auto_start_machines = true
   min_machines_running = 0
 
