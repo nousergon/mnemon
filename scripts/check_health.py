@@ -42,6 +42,17 @@ _TTL_SECONDS = 7 * 24 * 3600              # DEFAULT_TTL_SECONDS
 _PRUNE_INTERVAL_SECONDS = 6 * 3600        # DEFAULT_EXPIRE_INTERVAL_SECONDS
 SESSION_AGE_WARN_SECONDS = _TTL_SECONDS + 2 * _PRUNE_INTERVAL_SECONDS
 
+# Decay-health threshold. Mirrors the prune signal for the confidence-
+# decay sweep, which shares the suspend-freeze hazard (issue #217): its
+# periodic event-loop timer stalls while a Fly machine is suspended, so
+# the request-path trigger (_maybe_decay) keeps seconds_since_last_decay
+# bounded under the interval on a trafficked deploy. We warn at interval
+# + 12h grace so a single skipped cycle (or a brief traffic lull) doesn't
+# trip it. Absence of the metric is tolerated below (decay-disabled
+# deploy or pre-0.7.6 server) — not a failure.
+_DECAY_INTERVAL_SECONDS = 24 * 3600       # DEFAULT_DECAY_INTERVAL_SECONDS
+DECAY_AGE_WARN_SECONDS = _DECAY_INTERVAL_SECONDS + 12 * 3600
+
 
 def fetch_health(url: str, timeout: float = 30.0) -> dict:
     # 30s tolerates a Fly cold-start (machine wake + Python boot + bge-small
@@ -110,6 +121,23 @@ def main() -> int:
             f"A session is surviving well past the 7-day TTL — the periodic "
             f"expire_old() prune has likely stopped running; check the server's "
             f"lifespan task group / logs."
+        )
+
+    # Decay-health: seconds_since_last_decay climbing past the interval
+    # means BOTH the periodic timer and the request-path trigger have
+    # stalled — the suspend-freeze failure mode of issue #217. Absent on
+    # decay-disabled deploys (stdio) and pre-0.7.6 servers — skip rather
+    # than fail, mirroring the oldest-age handling.
+    since_decay = metrics.get("seconds_since_last_decay")
+    if since_decay is not None and since_decay > DECAY_AGE_WARN_SECONDS:
+        since_hours = since_decay / 3600
+        warnings.append(
+            f"metrics.seconds_since_last_decay = {since_decay} ({since_hours:.1f}h) "
+            f"> {DECAY_AGE_WARN_SECONDS} ({DECAY_AGE_WARN_SECONDS / 3600:.1f}h). "
+            f"Confidence decay has not run within the interval — the periodic "
+            f"sweep has likely stalled (e.g. an idle suspended machine) and no "
+            f"request has triggered the request-path fallback; check the "
+            f"server's lifespan task group / logs."
         )
 
     print(f"OK: status={payload['status']}, metrics={json.dumps(metrics)}")
