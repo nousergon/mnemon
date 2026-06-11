@@ -273,6 +273,19 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         # passes a closure that opens its own thread-local Store.
         self._decay_fn = decay_fn
         self._decay_interval_seconds = decay_interval_seconds
+        # Wall-clock timestamp of the last decay sweep (periodic OR
+        # request-path). Same suspend hazard as _last_prune_ts: the
+        # periodic decay timer freezes while the Fly machine is suspended
+        # (issue #217), so the request-path trigger (_maybe_decay) gates
+        # on this real-clock timestamp instead. Initialized to the
+        # construction wall-clock — NOT 0.0 — so decay runs ~once per
+        # interval rather than walking the full vault on every cold boot:
+        # unlike the prune (which must fire on each wake to bound the
+        # TTL), a missed decay cycle is cheap, so there's no value in
+        # re-decaying immediately after every deploy/wake. A suspend
+        # longer than the interval still trips the gate on the next
+        # request, which is the failure mode #217 is about.
+        self._last_decay_ts: float = time.time()
         # Process-lifetime counters scraped via /health for cold-stop diagnosis.
         # Single-event-loop server, so plain ints are race-free without a Lock.
         # NOTE: scripts/check_health.py reads these key names directly. If you
@@ -293,7 +306,7 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         surface. ``resume_hits`` counts the cold-stop recovery path firing.
         Persistent across process lifetime; resets on cold-stop.
         """
-        return {
+        m: dict[str, int] = {
             **self._counters,
             "persisted_sessions_total": self._session_store.count(),
             "in_memory_sessions_current": len(self._server_instances),
@@ -301,6 +314,18 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
             # while expire_old() runs, climbs only if the prune stalls.
             "oldest_session_age_seconds": int(self._session_store.oldest_age_seconds()),
         }
+        # Decay-health signal — emitted ONLY when the decay sweep is wired
+        # (the web server passes decay_fn; stdio does not, and would have
+        # no sweep to reset it). Seconds since decay was last TRIGGERED
+        # (periodic timer OR request-path _maybe_decay). Bounded under the
+        # interval while either path fires; climbs only if BOTH stall —
+        # i.e. the suspend-freeze failure mode of issue #217, which was
+        # previously silent. check_health.py soft-warns (exit 2) when it
+        # exceeds the interval + grace. Its ABSENCE is tolerated (decay-
+        # disabled deploy / older server) — NOT treated as schema drift.
+        if self._decay_fn is not None:
+            m["seconds_since_last_decay"] = int(time.time() - self._last_decay_ts)
+        return m
 
     @contextlib.asynccontextmanager
     async def run(self) -> AsyncIterator[None]:
@@ -366,6 +391,9 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         assert self._decay_fn is not None
         while True:
             await anyio.sleep(self._decay_interval_seconds)
+            # Coordinate with the request-path decay so the next request
+            # after a timer tick doesn't redundantly re-sweep the vault.
+            self._last_decay_ts = time.time()
             try:
                 updated = await anyio.to_thread.run_sync(self._decay_fn)
             except Exception:  # noqa: BLE001
@@ -409,6 +437,50 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         if expired:
             logger.info("Request-path prune: removed %d expired MCP session(s)", expired)
 
+    def _maybe_decay(self) -> None:
+        """Wall-clock-gated decay trigger on the request path — the
+        suspend-robust companion to _run_periodic_decay, whose event-loop
+        timer freezes while a Fly machine is suspended (issue #217). Gated
+        on ``time.time()`` + the in-memory ``_last_decay_ts`` (both survive
+        a RAM snapshot), so the first request after the decay interval has
+        elapsed fires one sweep regardless of suspension.
+
+        Unlike _maybe_prune, the sweep is NOT run inline:
+        ``apply_confidence_decay`` walks the full vault (slow, blocking
+        SQL), so it's spawned onto the lifespan task group to run in a
+        worker thread (_run_request_path_decay) without blocking the
+        client request it rides on. The gate is stamped synchronously
+        BEFORE spawning so concurrent requests in the same interval fire
+        at most one sweep (single event loop → the check-and-set can't
+        interleave). Disabled when decay isn't wired or the interval <= 0.
+        """
+        if self._decay_fn is None or self._decay_interval_seconds <= 0:
+            return
+        if self._task_group is None:
+            # Lifespan not started yet (e.g. a request races startup);
+            # the periodic task covers warm uptime once run() spawns it.
+            return
+        now = time.time()
+        if now - self._last_decay_ts < self._decay_interval_seconds:
+            return
+        self._last_decay_ts = now
+        self._task_group.start_soon(self._run_request_path_decay)
+
+    async def _run_request_path_decay(self) -> None:
+        """The decay sweep spawned by :meth:`_maybe_decay`, run in a
+        worker thread off the request's event-loop task. Mirrors the body
+        of _run_periodic_decay; failures are logged and swallowed so a
+        transient SQLite hiccup can't crash the spawning task group.
+        """
+        assert self._decay_fn is not None
+        try:
+            updated = await anyio.to_thread.run_sync(self._decay_fn)
+        except Exception:  # noqa: BLE001
+            logger.exception("Request-path memory decay raised; retrying next interval")
+            return
+        if updated:
+            logger.info("Request-path decay: aged %d memory document(s)", updated)
+
     async def _handle_stateful_request(
         self,
         scope: Scope,
@@ -416,6 +488,7 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         send: Send,
     ) -> None:
         self._maybe_prune()
+        self._maybe_decay()
         request = Request(scope, receive)
         session_id = request.headers.get(MCP_SESSION_ID_HEADER)
 

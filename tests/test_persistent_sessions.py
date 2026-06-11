@@ -834,6 +834,130 @@ class TestPeriodicDecayTask:
 
 
 # ---------------------------------------------------------------------------
+# Request-path decay (_maybe_decay) — the suspend-robust companion to the
+# periodic decay timer (issue #217). Wall-clock-gated; spawns the sweep onto
+# the lifespan task group so the full-vault walk doesn't block the request.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+class TestRequestPathDecay:
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    @staticmethod
+    def _make_manager(tmp_path, *, decay_fn=lambda: 0, decay_interval_seconds=3600):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        return PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            decay_fn=decay_fn,
+            decay_interval_seconds=decay_interval_seconds,
+        )
+
+    def test_last_decay_ts_inits_to_construction_time_not_zero(self, tmp_path):
+        """Unlike the prune (_last_prune_ts = 0.0 → prune on first request),
+        decay inits to wall-clock now so it does NOT walk the full vault on
+        every cold boot — only once the interval has elapsed."""
+        manager = self._make_manager(tmp_path)
+        assert manager._last_decay_ts > 0.0
+
+    def test_fires_after_interval_elapsed(self, tmp_path):
+        manager = self._make_manager(tmp_path, decay_interval_seconds=3600)
+        manager._task_group = MagicMock(name="task_group")
+        manager._last_decay_ts = 0.0  # far in the past → gate open
+        manager._maybe_decay()
+        manager._task_group.start_soon.assert_called_once_with(
+            manager._run_request_path_decay
+        )
+
+    def test_gated_within_interval(self, tmp_path):
+        """Fresh manager (_last_decay_ts ≈ now) must not fire."""
+        manager = self._make_manager(tmp_path, decay_interval_seconds=3600)
+        manager._task_group = MagicMock(name="task_group")
+        manager._maybe_decay()
+        manager._task_group.start_soon.assert_not_called()
+
+    def test_stamps_before_spawn_so_concurrent_requests_fire_once(self, tmp_path):
+        manager = self._make_manager(tmp_path, decay_interval_seconds=3600)
+        manager._task_group = MagicMock(name="task_group")
+        manager._last_decay_ts = 0.0
+        manager._maybe_decay()  # fires + stamps _last_decay_ts ≈ now
+        manager._maybe_decay()  # gated by the fresh stamp
+        assert manager._task_group.start_soon.call_count == 1
+
+    def test_disabled_when_decay_fn_none(self, tmp_path):
+        manager = self._make_manager(tmp_path, decay_fn=None)
+        manager._task_group = MagicMock(name="task_group")
+        manager._last_decay_ts = 0.0
+        manager._maybe_decay()
+        manager._task_group.start_soon.assert_not_called()
+
+    def test_disabled_when_interval_zero(self, tmp_path):
+        manager = self._make_manager(tmp_path, decay_interval_seconds=0)
+        manager._task_group = MagicMock(name="task_group")
+        manager._last_decay_ts = 0.0
+        manager._maybe_decay()
+        manager._task_group.start_soon.assert_not_called()
+
+    def test_noop_when_task_group_not_started(self, tmp_path):
+        """A request racing lifespan startup must not crash."""
+        manager = self._make_manager(tmp_path)
+        manager._task_group = None
+        manager._last_decay_ts = 0.0
+        manager._maybe_decay()  # must not raise
+
+    async def test_spawned_sweep_runs_decay_through_real_task_group(self, tmp_path):
+        """End-to-end: the gate spawns onto a real anyio task group and the
+        sweep actually executes (in a worker thread) before the group exits."""
+        import anyio
+
+        calls: list[int] = []
+        manager = self._make_manager(
+            tmp_path,
+            decay_fn=lambda: (calls.append(1), 5)[1],
+            decay_interval_seconds=3600,
+        )
+        manager._last_decay_ts = 0.0
+        async with anyio.create_task_group() as tg:
+            manager._task_group = tg
+            manager._maybe_decay()
+        assert calls == [1]
+
+    async def test_run_request_path_decay_logs_count(self, tmp_path, caplog):
+        manager = self._make_manager(tmp_path, decay_fn=lambda: 4)
+        with caplog.at_level("INFO", logger="mnemon.persistent_sessions"):
+            await manager._run_request_path_decay()
+        assert any(
+            "Request-path decay" in rec.message and "4 memory" in rec.message
+            for rec in caplog.records
+        )
+
+    async def test_run_request_path_decay_swallows_errors(self, tmp_path, caplog):
+        def _boom():
+            raise RuntimeError("disk on fire")
+
+        manager = self._make_manager(tmp_path, decay_fn=_boom)
+        with caplog.at_level("ERROR", logger="mnemon.persistent_sessions"):
+            await manager._run_request_path_decay()  # must not raise
+        assert any(
+            "Request-path memory decay raised" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_metrics_emits_decay_age_only_when_decay_wired(self, tmp_path):
+        with_decay = self._make_manager(tmp_path, decay_fn=lambda: 0)
+        assert "seconds_since_last_decay" in with_decay.metrics()
+        without = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=SessionStore(tmp_path / "s2.sqlite"),
+            decay_fn=None,
+        )
+        assert "seconds_since_last_decay" not in without.metrics()
+
+
+# ---------------------------------------------------------------------------
 # Narrow-lock contract — _session_creation_lock must be released BEFORE
 # transport.handle_request is awaited, so a wedged handler can't block
 # subsequent fresh-init / resume requests from acquiring the lock

@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.7.6] - 2026-06-11
+
+### Fixed
+- **Confidence-decay sweep now fires on a wall-clock cadence, so it
+  survives the suspend-on-idle Fly machine — and is no longer silent
+  (issue #217).** Same root cause as the 0.7.5 session-prune fix: the
+  periodic decay task (`_run_periodic_decay`, 24h) is an event-loop
+  interval timer, and that clock freezes while the Fly machine is
+  suspended (`auto_stop_machines = "suspend"`, `min_machines_running =
+  0`), so on the web tier decay effectively stopped running — degrading
+  scoring quality with **no red signal**, because (unlike the prune)
+  nothing on `/health` tracked it. Added a request-path decay trigger
+  (`_maybe_decay`, called from `_handle_stateful_request`) gated on
+  `time.time()` + an in-memory `_last_decay_ts` (both survive a RAM
+  snapshot). Because `apply_confidence_decay` walks the full vault
+  (slow, blocking SQL), the sweep is **not** run inline — it's spawned
+  onto the lifespan task group to run in a worker thread without blocking
+  the client request. `_last_decay_ts` initializes to construction time
+  (not `0.0`), so decay runs ~once per interval rather than re-walking
+  the vault on every cold boot; a suspend longer than the interval still
+  trips the gate on the next request. The periodic timer is retained for
+  warm uptimes and stamps `_last_decay_ts` to coordinate.
+- **`/health` now exposes `seconds_since_last_decay`** (emitted only when
+  decay is wired — the web server, not stdio). `scripts/check_health.py`
+  soft-warns (exit 2) when it exceeds the 24h interval + 12h grace, so a
+  stalled decay surfaces on the Health Monitor instead of failing
+  silently. Absence is tolerated (decay-disabled or pre-0.7.6 servers).
+
 ## [0.7.5] - 2026-06-11
 
 ### Fixed

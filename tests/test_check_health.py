@@ -94,3 +94,34 @@ def test_missing_oldest_age_is_tolerated(monkeypatch):
 
 def test_threshold_is_ttl_plus_two_prune_cycles():
     assert check_health.SESSION_AGE_WARN_SECONDS == 7 * 24 * 3600 + 2 * 6 * 3600
+
+
+def test_fresh_decay_age_passes(monkeypatch):
+    # A recently-run decay sweep is healthy and must not warn.
+    rc = _run_with(
+        monkeypatch,
+        {"status": "ok", "metrics": _healthy_metrics(seconds_since_last_decay=3600)},
+    )
+    assert rc == 0
+
+
+def test_stalled_decay_warns(monkeypatch, capsys):
+    # Decay not run within the interval + grace → decay-stalled WARN (exit 2).
+    overdue = check_health.DECAY_AGE_WARN_SECONDS + 3600
+    rc = _run_with(
+        monkeypatch,
+        {"status": "ok", "metrics": _healthy_metrics(seconds_since_last_decay=overdue)},
+    )
+    assert rc == 2
+    assert "decay" in capsys.readouterr().out.lower()
+
+
+def test_missing_decay_age_is_tolerated(monkeypatch):
+    # Decay-disabled deploys (stdio) and pre-0.7.6 servers lack the metric —
+    # absence must not false-alarm (the default _healthy_metrics omits it).
+    rc = _run_with(monkeypatch, {"status": "ok", "metrics": _healthy_metrics()})
+    assert rc == 0
+
+
+def test_decay_threshold_is_interval_plus_grace():
+    assert check_health.DECAY_AGE_WARN_SECONDS == 24 * 3600 + 12 * 3600
