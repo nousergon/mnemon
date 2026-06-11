@@ -254,6 +254,19 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         # sessions table otherwise grows monotonically until the next
         # restart.
         self._expire_interval_seconds = expire_interval_seconds
+        # Wall-clock timestamp of the last expire_old() (periodic OR
+        # request-path). The periodic task above relies on the event-loop
+        # clock, which FREEZES while a Fly machine is suspended
+        # (auto_stop_machines = "suspend", min_machines_running = 0): a 6h
+        # anyio.sleep only advances during awake time, so on a scale-to-
+        # zero deploy the prune fires far less often than every 6h of
+        # WALL-CLOCK time and rows survive past the TTL (issue #215). The
+        # request-path prune (_maybe_prune, called from
+        # _handle_stateful_request) is gated on this real-clock timestamp
+        # instead, so every machine wake bounds the oldest row near the
+        # TTL regardless of suspension. 0.0 → the first request after a
+        # cold boot prunes immediately.
+        self._last_prune_ts: float = 0.0
         # Decay sweep is opt-in via an injected callable so this module
         # doesn't import Store directly — keeps the session-management
         # layer decoupled from the memory-vault layer. server_remote.py
@@ -326,6 +339,9 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
             except Exception:  # noqa: BLE001
                 logger.exception("Periodic session prune raised; retrying next tick")
                 continue
+            # Coordinate with the request-path prune so the next request
+            # after a timer tick doesn't redundantly re-prune.
+            self._last_prune_ts = time.time()
             if expired:
                 logger.info(
                     "Periodic prune: removed %d expired MCP session(s)",
@@ -361,12 +377,45 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
                     updated,
                 )
 
+    def _maybe_prune(self) -> None:
+        """Wall-clock-gated prune, run synchronously on the request path.
+
+        Companion to the event-loop-timer prune (_run_periodic_expire),
+        which is unreliable on a suspend-on-idle Fly machine because the
+        monotonic clock freezes during suspension. This path keys off
+        ``time.time()`` (real wall-clock, survives the RAM snapshot) and
+        an in-memory ``_last_prune_ts`` (also survives suspend/resume),
+        so the first request after the expire interval has elapsed prunes
+        once — bounding ``oldest_session_age_seconds`` near the TTL on
+        every wake regardless of how long the machine was suspended.
+
+        Cheap: a single indexed DELETE, gated to at most once per
+        ``_expire_interval_seconds``. Failures are logged and swallowed —
+        a transient SQLite hiccup must not fail the client request it's
+        riding on; the next request retries. ``_expire_interval_seconds
+        <= 0`` disables it (mirrors the periodic-task opt-out).
+        """
+        if self._expire_interval_seconds <= 0:
+            return
+        now = time.time()
+        if now - self._last_prune_ts < self._expire_interval_seconds:
+            return
+        self._last_prune_ts = now
+        try:
+            expired = self._session_store.expire_old()
+        except Exception:  # noqa: BLE001
+            logger.exception("Request-path session prune raised; retrying next request")
+            return
+        if expired:
+            logger.info("Request-path prune: removed %d expired MCP session(s)", expired)
+
     async def _handle_stateful_request(
         self,
         scope: Scope,
         receive: Receive,
         send: Send,
     ) -> None:
+        self._maybe_prune()
         request = Request(scope, receive)
         session_id = request.headers.get(MCP_SESSION_ID_HEADER)
 

@@ -526,6 +526,164 @@ class TestPeriodicExpireTask:
 
 
 # ---------------------------------------------------------------------------
+# Request-path prune (_maybe_prune) — the suspend-robust companion to the
+# periodic task. Keyed on wall-clock time.time() + an in-memory timestamp,
+# so it fires on machine wake even when the event-loop timer froze under a
+# Fly suspend (issue #215). Gated to once per expire_interval_seconds.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+class TestRequestPathPrune:
+    @pytest.fixture
+    def anyio_backend(self):
+        return "asyncio"
+
+    @staticmethod
+    def _make_manager(tmp_path, *, expire_interval_seconds=3600):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        return PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            expire_interval_seconds=expire_interval_seconds,
+        )
+
+    @staticmethod
+    def _scope(session_id: bytes | None):
+        headers = []
+        if session_id is not None:
+            headers.append((b"mcp-session-id", session_id))
+        return {"type": "http", "method": "POST", "path": "/mcp", "headers": headers}
+
+    @staticmethod
+    async def _noop_receive():  # pragma: no cover — never invoked
+        return {"type": "http.disconnect"}
+
+    @staticmethod
+    async def _noop_send(_):  # pragma: no cover — never invoked
+        pass
+
+    async def _drive_stale_request(self, manager, monkeypatch):
+        """Send one request through _handle_stateful_request (stale-id
+        branch, the cheapest) so _maybe_prune runs at the top."""
+
+        async def fake_super(self, scope, receive, send):  # noqa: ANN001
+            pass
+
+        monkeypatch.setattr(
+            "mnemon.persistent_sessions.StreamableHTTPSessionManager."
+            "_handle_stateful_request",
+            fake_super,
+        )
+        await manager._handle_stateful_request(
+            self._scope(b"phantom"), self._noop_receive, self._noop_send
+        )
+
+    async def test_first_request_prunes_immediately(self, tmp_path, monkeypatch):
+        """_last_prune_ts starts at 0.0, so the first request after a cold
+        boot always prunes — the cold-boot-then-suspend case."""
+        manager = self._make_manager(tmp_path)
+        calls: list[None] = []
+        original = manager._session_store.expire_old
+        monkeypatch.setattr(
+            manager._session_store,
+            "expire_old",
+            lambda: (calls.append(None), original())[1],
+        )
+        await self._drive_stale_request(manager, monkeypatch)
+        assert len(calls) == 1
+
+    async def test_second_request_within_interval_is_gated(
+        self, tmp_path, monkeypatch
+    ):
+        """A 6h-interval deploy must not prune on every request — only the
+        first one past the interval boundary."""
+        manager = self._make_manager(tmp_path, expire_interval_seconds=3600)
+        calls: list[None] = []
+        original = manager._session_store.expire_old
+        monkeypatch.setattr(
+            manager._session_store,
+            "expire_old",
+            lambda: (calls.append(None), original())[1],
+        )
+        await self._drive_stale_request(manager, monkeypatch)  # prunes (ts was 0)
+        await self._drive_stale_request(manager, monkeypatch)  # gated
+        assert len(calls) == 1
+
+    async def test_request_after_interval_prunes_again(self, tmp_path, monkeypatch):
+        """Advance wall-clock past the interval → the next request prunes."""
+        import mnemon.persistent_sessions as mod
+
+        manager = self._make_manager(tmp_path, expire_interval_seconds=3600)
+        calls: list[None] = []
+        original = manager._session_store.expire_old
+        monkeypatch.setattr(
+            manager._session_store,
+            "expire_old",
+            lambda: (calls.append(None), original())[1],
+        )
+        clock = {"t": 1_000_000.0}
+        monkeypatch.setattr(mod.time, "time", lambda: clock["t"])
+
+        await self._drive_stale_request(manager, monkeypatch)  # prunes (ts was 0)
+        clock["t"] += 1800  # half an interval — still gated
+        await self._drive_stale_request(manager, monkeypatch)
+        clock["t"] += 1801  # now past 3600s since the first prune
+        await self._drive_stale_request(manager, monkeypatch)
+        assert len(calls) == 2
+
+    async def test_zero_interval_disables_request_path_prune(
+        self, tmp_path, monkeypatch
+    ):
+        manager = self._make_manager(tmp_path, expire_interval_seconds=0)
+        calls: list[None] = []
+        monkeypatch.setattr(
+            manager._session_store,
+            "expire_old",
+            lambda: calls.append(None),
+        )
+        await self._drive_stale_request(manager, monkeypatch)
+        assert calls == []
+
+    async def test_request_path_removes_overdue_row_without_periodic_task(
+        self, tmp_path, monkeypatch
+    ):
+        """The issue #215 scenario end-to-end: the periodic timer never
+        ran (suspended machine), a row is past the TTL, and a single
+        request prunes it — bounding oldest_session_age_seconds."""
+        store = SessionStore(tmp_path / "sessions.sqlite", ttl_seconds=1)
+        store.register("overdue")
+        time.sleep(1.1)
+        assert store.oldest_age_seconds() > 1.0  # survives, prune hasn't run
+        manager = PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            expire_interval_seconds=3600,
+        )
+        await self._drive_stale_request(manager, monkeypatch)
+        assert store.oldest_age_seconds() == 0.0  # row gone
+
+    async def test_request_path_prune_swallows_errors(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A transient SQLite hiccup in the prune must not fail the client
+        request riding on it."""
+        manager = self._make_manager(tmp_path)
+        monkeypatch.setattr(
+            manager._session_store,
+            "expire_old",
+            MagicMock(side_effect=RuntimeError("disk on fire")),
+        )
+        with caplog.at_level("ERROR", logger="mnemon.persistent_sessions"):
+            await self._drive_stale_request(manager, monkeypatch)  # must not raise
+        assert manager.metrics()["stale_session_misses"] == 1  # request still served
+        assert any(
+            "Request-path session prune raised" in rec.message
+            for rec in caplog.records
+        )
+
+
+# ---------------------------------------------------------------------------
 # Periodic memory-decay sweep — wired alongside the prune task in run().
 # Runs apply_confidence_decay() on the vault every decay_interval_seconds
 # in a worker thread. Failures swallowed; counts logged when nonzero.
