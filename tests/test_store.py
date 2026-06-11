@@ -364,6 +364,82 @@ class TestCorrectionOf:
         mock_apply.assert_not_called()
 
 
+class TestProseSupersedes:
+    """ROADMAP 'memory_save auto-`supersedes` from prose': when the caller
+    omits correction_of but the content explicitly states it supersedes a
+    specific id, auto-record the relation (additive, WARN, never raise on a
+    bad id). The motivating case is the very prose this codifies —
+    'Supersedes the partial financial framings in id 2402' (#2543)."""
+
+    def test_detect_helper_canonical_and_motivating_forms(self):
+        from mnemon.store import _detect_prose_supersedes as d
+        assert d("supersedes id 42") == 42
+        assert d("Supersedes #42 entirely") == 42
+        assert d("superseded ID 42") == 42
+        # The motivating real case — words between verb and id.
+        assert d("Supersedes the partial financial framings in id 2402") == 2402
+
+    def test_detect_helper_rejects_cross_clause_and_nonmatches(self):
+        from mnemon.store import _detect_prose_supersedes as d
+        # Clause boundary (;) between verb and id → not a supersession link.
+        assert d("supersedes the old way; for context see id 5") is None
+        # "id-based" has no numeric id; plain mentions don't match.
+        assert d("supersedes the need for id-based lookups") is None
+        assert d("a normal note with id 5 mentioned") is None
+        assert d("") is None
+
+    def test_prose_supersedes_inserts_relation(self, store):
+        prior = store.save(title="Old framing", content="old content")
+        new = store.save(
+            title="Corrected", content=f"New authoritative take. Supersedes id {prior}.",
+        )
+        related = store.get_related(new)
+        supersedes = [r for r in related if r.relation_type == "supersedes"]
+        assert len(supersedes) == 1
+        assert supersedes[0].id == prior
+
+    def test_explicit_correction_of_takes_precedence_over_prose(self, store):
+        # When both are present, the explicit param wins; the prose scan
+        # must not double-insert or override.
+        a = store.save(title="A", content="a")
+        b = store.save(title="B", content="b")
+        new = store.save(
+            title="C", content=f"supersedes id {a}", correction_of=b,
+        )
+        rows = store.db.execute(
+            "SELECT target_id FROM relations WHERE source_id = ? "
+            "AND relation_type = 'supersedes'",
+            (new,),
+        ).fetchall()
+        assert [r["target_id"] for r in rows] == [b]
+
+    def test_prose_supersedes_missing_id_does_not_raise(self, store, caplog):
+        # Unlike explicit correction_of, a prose mention of a non-existent
+        # id must NOT break the save — just WARN and skip the relation.
+        with caplog.at_level("WARNING", logger="mnemon.store"):
+            new = store.save(title="N", content="supersedes id 999999")
+        rows = store.db.execute(
+            "SELECT 1 FROM relations WHERE source_id = ?", (new,),
+        ).fetchall()
+        assert rows == []  # no dangling relation
+        assert any("no such document exists" in r.message for r in caplog.records)
+
+    def test_prose_supersedes_warns_on_autolink(self, store, caplog):
+        prior = store.save(title="P", content="p")
+        with caplog.at_level("WARNING", logger="mnemon.store"):
+            store.save(title="N", content=f"supersedes id {prior}")
+        assert any("auto-detected supersession" in r.message for r in caplog.records)
+
+    def test_prose_supersedes_skips_capture_attention(self, store, monkeypatch):
+        # Resolving to correction_of must inherit its capture-attention skip.
+        from mnemon import config
+        monkeypatch.setattr(config, "CAPTURE_ATTENTION_ENABLED", True)
+        prior = store.save(title="P", content="payload")
+        with patch.object(store, "apply_capture_attention") as mock_apply:
+            store.save(title="N", content=f"new payload, supersedes id {prior}")
+        mock_apply.assert_not_called()
+
+
 class TestFindClusters:
     """Phase C — vector-similarity cluster discovery for operator-
     reviewed consolidation. Embedding-only, no LLM dep."""
