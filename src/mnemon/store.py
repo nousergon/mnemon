@@ -8,7 +8,9 @@ Vectors stored in a companion .npz file (brute-force cosine search).
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import re
 import sqlite3
 import time
 import uuid
@@ -149,8 +151,42 @@ class RelatedDocument(Document):
     weight: float = 0.0
 
 
+logger = logging.getLogger("mnemon.store")
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+# Prose-detected supersession: recognise an EXPLICIT "supersedes … id N"
+# / "supersedes #N" (also "superseded …") in saved content so the chain
+# can be recorded even when the caller forgot the correction_of param.
+# This is the non-LLM analogue of Mem0's UPDATE intent-detection (an LLM
+# intent classifier could be a future opt-in, composing with the
+# --judge anthropic pattern). See ROADMAP "memory_save auto-`supersedes`
+# from prose".
+#
+# The motivating real case had words between the verb and the id
+# ("Supersedes the partial financial framings in id 2402"), so the gap is
+# allowed — but bounded (≤50 chars) and clause-local: the gap excludes
+# sentence/clause punctuation (.;:) so "supersedes the old way; see id 5"
+# does NOT link to id 5. Either an "[words] id [#]N" gap or a direct "#N"
+# is accepted. Precision-first: when in doubt it does nothing (the caller
+# can always pass correction_of explicitly).
+_PROSE_SUPERSEDES_RE = re.compile(
+    r"\bsupersede(?:s|d)?\s+(?:[^.;:\n]{0,50}?\bid\s+#?|#)(\d+)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_prose_supersedes(content: str) -> int | None:
+    """Return the first explicitly-named superseded doc id, or None.
+
+    Returns the first match; multiple targets aren't expressible via the
+    single-valued ``correction_of`` param.
+    """
+    m = _PROSE_SUPERSEDES_RE.search(content)
+    return int(m.group(1)) if m else None
 
 
 def _row_to_document(row: sqlite3.Row) -> Document:
@@ -467,6 +503,12 @@ class Store:
         an operator may legitimately mark a new memory as superseding
         an already-forgotten one to record the chain. The relation is
         the audit trail.
+
+        If ``correction_of`` is omitted but ``content`` explicitly states
+        ``supersedes id N`` / ``supersedes #N``, it is auto-resolved to
+        ``correction_of`` (with a WARN, and tolerating a non-existent id
+        rather than raising). Pass ``correction_of`` explicitly to opt out
+        of the prose scan.
         """
         content_hash = _sha256(content)
         ct = ContentType(content_type)
@@ -474,6 +516,39 @@ class Store:
         conf = confidence if confidence is not None else DEFAULT_CONFIDENCE[ct]
         if source_client in HOOK_SOURCE_CLIENTS:
             conf = min(conf, HOOK_SOURCE_CONFIDENCE_CEILING)
+
+        # Prose-detected supersession (additive, non-breaking). When the
+        # caller did NOT pass correction_of but the content explicitly says
+        # "supersedes id N" / "supersedes #N", resolve it to correction_of
+        # so the chain is recorded — flowing through the same machinery
+        # below (relation insert + capture-attention skip). Two deliberate
+        # departures from the explicit param: (1) WARN (never silent), so
+        # the auto-link is visible per [[feedback_no_silent_fails]] — this
+        # is what makes prose-detection safe vs the rejected "hidden
+        # auto-insert"; (2) do NOT hard-fail on a non-existent id — the
+        # caller didn't request it, so a stray prose mention must not break
+        # an otherwise-valid save (the explicit param still raises below).
+        if correction_of is None:
+            detected = _detect_prose_supersedes(content)
+            if detected is not None:
+                target_exists = self.db.execute(
+                    "SELECT 1 FROM documents WHERE id = ?", (detected,),
+                ).fetchone()
+                if target_exists is not None:
+                    correction_of = detected
+                    logger.warning(
+                        "save: auto-detected supersession of id %d from "
+                        "content prose; recording a 'supersedes' relation. "
+                        "Pass correction_of=%d explicitly to silence this.",
+                        detected, detected,
+                    )
+                else:
+                    logger.warning(
+                        "save: content prose claims it supersedes id %d, but "
+                        "no such document exists — NOT recording a relation "
+                        "(the save proceeds normally).",
+                        detected,
+                    )
 
         # Validate correction_of target exists before we commit anything.
         # Fail loud rather than insert a dangling relation downstream.
@@ -626,8 +701,7 @@ class Store:
                     source_client=source_client,
                 )
             except CaptureAttentionUnavailableError as exc:
-                import logging
-                logging.getLogger("mnemon.store").warning(
+                logger.warning(
                     "save: capture-attention skipped for doc_id=%d (%s); "
                     "memory is saved but recurrence-boost was not applied",
                     doc_id, exc,

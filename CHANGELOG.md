@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.7.7] - 2026-06-11
+
+### Added
+- **`memory_save` auto-detects prose supersession.** When `correction_of`
+  is omitted but the saved content explicitly states it supersedes a
+  specific id (`supersedes id N` / `supersedes #N`, including the
+  motivating "Supersedes the partial financial framings in id 2402"
+  form), the `'supersedes'` relation is now recorded automatically. It is
+  additive and safe: it WARNs (never silent), tolerates a non-existent id
+  (the save still succeeds, unlike the explicit param which raises), and
+  the detection is clause-local + bounded so cross-clause mentions
+  ("supersedes the old way; see id 5") don't false-link. Pass
+  `correction_of` explicitly to opt out of the scan. (The explicit param
+  always takes precedence.)
+
+### Fixed
+- **`examples/quickstart.py` and `bench/search_stress.py` run again on a
+  machine with a remote vault configured.** Both create an isolated
+  throwaway local vault but predated the remote-mode `Store` guard, so
+  they crashed with `LocalVaultInaccessibleError` whenever a remote was
+  set (i.e. on any dev machine that had run `mnemon upgrade web`). They
+  now set `MNEMON_ALLOW_LOCAL_STORE=1` — the sanctioned escape hatch for
+  a deliberately-isolated local vault. Fresh users (no remote) were
+  unaffected.
+
 ## [0.7.6] - 2026-06-11
 
 ### Fixed

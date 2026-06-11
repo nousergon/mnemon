@@ -30,6 +30,10 @@ from pathlib import Path
 # before importing Store.
 EXAMPLE_VAULT = Path(tempfile.mkdtemp(prefix="mnemon-bench-"))
 os.environ["MNEMON_VAULT_DIR"] = str(EXAMPLE_VAULT)
+# A configured remote vault otherwise makes Store refuse to open ANY local
+# vault (the fail-loud remote-mode guard). This script deliberately uses an
+# isolated throwaway local vault — the sanctioned use of the escape hatch.
+os.environ["MNEMON_ALLOW_LOCAL_STORE"] = "1"
 
 from mnemon.search import search  # noqa: E402
 from mnemon.store import Store, _sha256  # noqa: E402
