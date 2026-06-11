@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.7.5] - 2026-06-11
+
+### Fixed
+- **Session prune now fires on a wall-clock cadence, so it survives the
+  suspend-on-idle Fly machine (regression from 0.7.4).** The expired-MCP-
+  session prune was driven solely by an event-loop interval timer
+  (`await anyio.sleep(6h)` in `_run_periodic_expire`). When 0.7.4 switched
+  the idle machine to `auto_stop_machines = "suspend"`, that clock began
+  freezing during suspension: on a `min_machines_running = 0` deploy the
+  machine is suspended most of the day, so the 6h timer only advanced
+  during *awake* time and `expire_old()` fired far less often than every
+  6h of wall-clock. Rows survived past the 7-day TTL and
+  `oldest_session_age_seconds` climbed 1:1 with real time — the
+  health-monitor's prune-health check (added 0.7.1) caught it and went
+  red (issue #215). Added a request-path prune (`_maybe_prune`, called at
+  the top of `_handle_stateful_request`) gated on `time.time()` plus an
+  in-memory `_last_prune_ts` — both of which survive a RAM snapshot — so
+  the first request after the expire interval has elapsed prunes once,
+  bounding the oldest row near the TTL on every machine wake regardless of
+  how long it was suspended. The periodic timer is retained for long warm
+  uptimes and now stamps `_last_prune_ts` to coordinate with the
+  request-path prune. The prune is a single indexed `DELETE`, gated to at
+  most once per `expire_interval_seconds`, and its failures are logged and
+  swallowed so a transient SQLite hiccup can't fail the client request it
+  rides on.
+
 ## [0.7.4] - 2026-06-10
 
 ### Fixed
