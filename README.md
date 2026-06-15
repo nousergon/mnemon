@@ -106,16 +106,21 @@ mnemon upgrade web --app-name my-mnemon
 
 > **Upgrading from a pre-0.7.0rc10 deployment? Re-auth your browser connectors once.** Apps deployed before the OAuth Authorization Server was auto-provisioned only ever had the headless bearer token. The first `upgrade web` on such an app **provisions a brand-new OAuth passphrase** (and enables the AS) — so your existing claude.ai / Desktop / mobile connector login stops working until you re-authenticate. Grab the new passphrase from the deploy summary or `~/.mnemon/as_passphrase` and re-enter it on the connector's login page. This is a **one-time** transition: once the passphrase exists, every later redeploy leaves it untouched (it is never rotated). Headless clients (Claude Code, Cursor) are unaffected — they keep their bearer token.
 
-#### Optional: one-click redeploy from CI
+#### Optional: deploy from CI
 
-The commands above are the **supported, fully-capable** way to deploy — for self-hosting and for testing a change before trusting automation. If you maintain your own fork and want to roll merged changes without running `flyctl` locally, the repo ships an optional **`Deploy to Fly`** GitHub Actions workflow (`.github/workflows/deploy-fly.yml`). It only wraps the same `flyctl deploy` — it can't do anything you can't do by hand.
+The commands above are the **supported, fully-capable** way to deploy — for self-hosting and for testing a change before trusting automation. The repo also ships an optional **`Deploy to Fly`** GitHub Actions workflow (`.github/workflows/deploy-fly.yml`) so you can roll merged changes without running `flyctl` locally. It only wraps the same `flyctl deploy` — it can't do anything you can't do by hand.
 
-It's a manual trigger (`workflow_dispatch`), never runs on push, and is keyed to *your* deployment, so it's inert in a fresh fork until you wire two things:
+It's keyed to *your* deployment, so it's inert in a fresh fork until you wire two things:
 
-1. **`FLY_API_TOKEN`** repo secret — `fly tokens create deploy` (Settings → Secrets → Actions).
-2. **`FLY_APP`** repo variable — your Fly app name (Settings → Variables → Actions). Or pass it as the `app` input when you trigger the run.
+1. **`FLY_API_TOKEN`** repo secret — `fly tokens create deploy -a <your-app>` (Settings → Secrets and variables → Actions → **Secrets**).
+2. **`FLY_APP`** repo variable — your Fly app name (same page → **Variables**). Or pass it as the `app` input on a manual run.
 
-Then trigger it from the **Actions** tab (or `gh workflow run "Deploy to Fly"`). It renders `fly.toml` from `fly.toml.example` for your app, runs `flyctl deploy --remote-only` (builds on Fly's builders), and fails the run unless `/health` reports `status=ok` afterward. A redeploy preserves your vault volume and secrets (including the OAuth passphrase, never rotated) — same as `upgrade web`'s redeploy path.
+Once wired, it runs two ways:
+
+- **Automatically on every push to `main`** (e.g. a merged PR) — zero clicks. This auto-deploy fires **only on the canonical, non-forked repo**, so forking the project never gives you red CI on merges.
+- **Manually** — from the **Actions** tab, or `gh workflow run "Deploy to Fly"` (this path works on forks too).
+
+Either way it renders `fly.toml` from `fly.toml.example` for your app, runs `flyctl deploy --remote-only` (builds on Fly's builders), and fails the run unless `/health` reports `status=ok` afterward. A redeploy preserves your vault volume and secrets (including the OAuth passphrase, never rotated) — same as `upgrade web`'s redeploy path. Don't want auto-deploy? Remove the `push:` trigger from the workflow and it reverts to manual-only.
 
 ### Downgrade back to local
 
