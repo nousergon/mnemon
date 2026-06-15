@@ -1,27 +1,34 @@
 name: Deploy to Fly
 
-# OPTIONAL convenience for the repo owner — NOT a replacement for the
-# manual path. `mnemon upgrade web` (and a plain `flyctl deploy`) remain
-# the supported, fully-capable way to deploy mnemon for self-hosting and
-# for testing; see the "Self-host on Fly.io" section of README.md.
+# Deploys mnemon to its Fly app. NOT a replacement for the manual path:
+# `mnemon upgrade web` (and a plain `flyctl deploy`) remain the supported,
+# fully-capable way to deploy for self-hosting and for testing; see the
+# "Self-host on Fly.io" section of README.md.
 #
-# This workflow just wraps the same `flyctl deploy` so the owner can roll
-# a merged change to their own Fly app with one click, no laptop/flyctl
-# needed. It is keyed entirely to the OWNER's deployment:
-#   - the target app comes from the `FLY_APP` repo variable (or the
-#     workflow_dispatch `app` input) — nothing is hardcoded, so a fork
-#     points it at its own app;
-#   - it authenticates with the `FLY_API_TOKEN` repo secret.
-# A fork that has set neither simply can't run it (manual dispatch only,
-# and the steps below fail loud if the app/token aren't wired). It never
-# runs on push, so forks' CI is untouched.
+# Triggers:
+#   - push to main  → AUTO-DEPLOY every merge (the owner wants zero clicks),
+#                     but ONLY on the canonical (non-fork) repo, so a fork's
+#                     CI is never touched by a push.
+#   - workflow_dispatch → manual one-click, available to anyone (incl. forks)
+#                     who has wired their own app + token.
 #
-# Safe to run on every release: a redeploy preserves the Fly volume
-# (vault data) and existing Fly secrets — including the OAuth AS
-# passphrase, which is never rotated (the 0.7.3 fail-closed guard). It is
-# a pure image swap, the same as `mnemon upgrade web`'s redeploy path.
+# Keyed entirely to the OWNER's deployment — nothing hardcoded:
+#   - target app from the `FLY_APP` repo variable (or the dispatch `app`
+#     input), so a fork points it at its own app;
+#   - authenticates with the `FLY_API_TOKEN` repo secret.
+# A fork without those can still dispatch it, and the steps fail loud if the
+# app/token aren't wired. The job is guarded so push-triggered runs skip
+# cleanly on forks (no red CI).
+#
+# Safe to run on every release: a redeploy preserves the Fly volume (vault
+# data) and existing Fly secrets — including the OAuth AS passphrase, which
+# is never rotated (the 0.7.3 fail-closed guard). It is a pure image swap,
+# the same as `mnemon upgrade web`'s redeploy path. The post-deploy /health
+# gate fails the run (red main) if a release comes up unhealthy.
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       app:
@@ -30,6 +37,8 @@ on:
         type: string
 
 concurrency:
+  # Serialize deploys; let an in-flight deploy finish rather than cancel it
+  # mid-`flyctl deploy`. Back-to-back merges queue and each rolls out.
   group: fly-deploy
   cancel-in-progress: false
 
@@ -39,6 +48,10 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Auto-deploy on push only on the canonical repo; a fork's pushes skip
+    # (so forks get no red CI). Manual dispatch is always allowed — that's
+    # how a fork deploys its own app.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.repository.fork == false }}
     steps:
       - uses: actions/checkout@v4
 
