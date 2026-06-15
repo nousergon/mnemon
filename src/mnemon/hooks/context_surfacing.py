@@ -12,9 +12,12 @@ Pipeline:
   4. Write the context to stdout for Claude Code to inject
 
 On any network/auth/timeout/config error the hook degrades gracefully:
-logs to stderr and exits 0 without emitting context. It never crashes
-Claude Code — the hook is best-effort augmentation, not a load-bearing
-data path.
+it logs to stderr AND emits a visible ``<mnemon-context>`` warning banner
+(``⚠ mnemon unavailable: …`` / ``⚠ mnemon config error: …``) so the
+unreachable state is surfaced on every affected prompt — never a silent
+empty/missing block indistinguishable from "no relevant memories". It
+always exits 0 and never crashes Claude Code — the hook is best-effort
+augmentation, not a load-bearing data path.
 
 Phase 3 unification: this hook no longer touches the local SQLite vault.
 All memory reads flow to the Fly vault via :mod:`mnemon.hooks._remote_client`.
