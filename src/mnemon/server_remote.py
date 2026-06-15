@@ -225,6 +225,9 @@ def run_remote() -> None:
         mcp_app,
         config,
         as_config=as_config,
-        metrics_provider=mcp._session_manager.metrics,
+        # health_snapshot (not metrics) so the hourly /health probe
+        # triggers the gated request-path prune and reports a post-prune
+        # oldest_session_age_seconds — see PersistentSessionManager.health_snapshot.
+        metrics_provider=mcp._session_manager.health_snapshot,
     )
     uvicorn.run(wrapped, host="0.0.0.0", port=PORT, log_level="info")
