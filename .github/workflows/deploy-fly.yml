@@ -92,7 +92,36 @@ jobs:
         # --remote-only builds on Fly's builders (no Docker-in-CI). The
         # deploy attaches to the existing volume + secrets; it does not
         # set or rotate them.
-        run: flyctl deploy --config fly.toml --app "$APP" --remote-only
+        #
+        # Retry with backoff: `flyctl deploy` occasionally fails on a
+        # transient Fly-side hiccup — e.g. a token-verify timeout
+        # ("token validation error: ... context deadline exceeded", seen
+        # on the first auto-deploy 2026-06-15) — unrelated to the image or
+        # config. The deploy is idempotent (reconciles the app to the
+        # target image), so retrying is safe; a genuine failure (bad token,
+        # broken build) just exhausts the attempts and reds the run, as it
+        # should. Without this, a flaky Fly timeout reds `main` on an
+        # otherwise-good merge.
+        run: |
+          set +e
+          attempts=3
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::flyctl deploy (attempt $i/$attempts)"
+            flyctl deploy --config fly.toml --app "$APP" --remote-only
+            code=$?
+            echo "::endgroup::"
+            if [ "$code" -eq 0 ]; then
+              exit 0
+            fi
+            echo "deploy attempt $i failed (exit $code)"
+            if [ "$i" -lt "$attempts" ]; then
+              backoff=$((i * 20))
+              echo "retrying in ${backoff}s..."
+              sleep "$backoff"
+            fi
+          done
+          echo "::error::flyctl deploy failed after ${attempts} attempts."
+          exit 1
 
       - name: Post-deploy health gate
         env:
