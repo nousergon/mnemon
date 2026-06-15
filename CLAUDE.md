@@ -21,8 +21,12 @@ open work + the pre-deploy ritual.
    bump "Last verified". Confirmed milestones only, no speculation.
 3. **Memories** — save durable cross-session facts/decisions/feedback.
 
-`private/` is gitignored — these doc edits are local-only (no commit);
-the git history of code + `CHANGELOG.md` is the durable audit trail.
+`private/` is gitignored from THIS repo but is its own nested git repo
+(`private/.git`) pushed to `cipher813/mnemon-ops` (private). So the
+wind-down doc edits above MUST be committed + pushed there — they are
+NOT local-only: `cd private && git add -A && git commit && git push
+origin main` (no PR). The mnemon code repo's git history + `CHANGELOG.md`
+remain the durable audit trail for the package itself.
 
 ## Stack
 
