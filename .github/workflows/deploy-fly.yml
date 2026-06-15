@@ -1,0 +1,103 @@
+name: Deploy to Fly
+
+# OPTIONAL convenience for the repo owner — NOT a replacement for the
+# manual path. `mnemon upgrade web` (and a plain `flyctl deploy`) remain
+# the supported, fully-capable way to deploy mnemon for self-hosting and
+# for testing; see the "Self-host on Fly.io" section of README.md.
+#
+# This workflow just wraps the same `flyctl deploy` so the owner can roll
+# a merged change to their own Fly app with one click, no laptop/flyctl
+# needed. It is keyed entirely to the OWNER's deployment:
+#   - the target app comes from the `FLY_APP` repo variable (or the
+#     workflow_dispatch `app` input) — nothing is hardcoded, so a fork
+#     points it at its own app;
+#   - it authenticates with the `FLY_API_TOKEN` repo secret.
+# A fork that has set neither simply can't run it (manual dispatch only,
+# and the steps below fail loud if the app/token aren't wired). It never
+# runs on push, so forks' CI is untouched.
+#
+# Safe to run on every release: a redeploy preserves the Fly volume
+# (vault data) and existing Fly secrets — including the OAuth AS
+# passphrase, which is never rotated (the 0.7.3 fail-closed guard). It is
+# a pure image swap, the same as `mnemon upgrade web`'s redeploy path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Fly app name (overrides the FLY_APP repo variable)"
+        required: false
+        type: string
+
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve app name + require token
+        id: cfg
+        env:
+          INPUT_APP: ${{ inputs.app }}
+          VAR_APP: ${{ vars.FLY_APP }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          APP="${INPUT_APP:-$VAR_APP}"
+          if [ -z "$APP" ]; then
+            echo "::error::No Fly app name. Set the FLY_APP repo variable or pass the 'app' input. (Manual 'mnemon upgrade web' remains available — see README.)"
+            exit 1
+          fi
+          if [ -z "$FLY_API_TOKEN" ]; then
+            echo "::error::FLY_API_TOKEN secret is not set. Wire it in repo settings to enable CI deploys; the manual path needs no secret."
+            exit 1
+          fi
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+
+      - name: Render fly.toml from the committed template
+        env:
+          APP: ${{ steps.cfg.outputs.app }}
+        run: |
+          # fly.toml is .gitignored (per-deploy); render it from the
+          # vendor-neutral fly.toml.example by filling in the app name.
+          sed "s/REPLACE_ME_fly_app_name/${APP}/g" fly.toml.example > fly.toml
+          echo "--- rendered fly.toml ---"
+          cat fly.toml
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          APP: ${{ steps.cfg.outputs.app }}
+        # --remote-only builds on Fly's builders (no Docker-in-CI). The
+        # deploy attaches to the existing volume + secrets; it does not
+        # set or rotate them.
+        run: flyctl deploy --config fly.toml --app "$APP" --remote-only
+
+      - name: Post-deploy health gate
+        env:
+          APP: ${{ steps.cfg.outputs.app }}
+        # Fail the run unless /health reports status=ok after the deploy,
+        # so a broken release surfaces here instead of silently going live.
+        # Generous retries cover the first-request FastEmbed model load.
+        run: |
+          URL="https://${APP}.fly.dev/health"
+          for i in $(seq 1 18); do
+            STATUS=$(curl -sf --max-time 35 -H "User-Agent: mnemon-ci-deploy/1" "$URL" \
+              | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)
+            if [ "$STATUS" = "ok" ]; then
+              echo "/health reported status=ok after deploy."
+              exit 0
+            fi
+            echo "waiting for /health (attempt $i/18)..."
+            sleep 10
+          done
+          echo "::error::/health did not report status=ok within the timeout after deploy."
+          exit 1
