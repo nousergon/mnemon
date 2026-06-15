@@ -106,6 +106,17 @@ mnemon upgrade web --app-name my-mnemon
 
 > **Upgrading from a pre-0.7.0rc10 deployment? Re-auth your browser connectors once.** Apps deployed before the OAuth Authorization Server was auto-provisioned only ever had the headless bearer token. The first `upgrade web` on such an app **provisions a brand-new OAuth passphrase** (and enables the AS) — so your existing claude.ai / Desktop / mobile connector login stops working until you re-authenticate. Grab the new passphrase from the deploy summary or `~/.mnemon/as_passphrase` and re-enter it on the connector's login page. This is a **one-time** transition: once the passphrase exists, every later redeploy leaves it untouched (it is never rotated). Headless clients (Claude Code, Cursor) are unaffected — they keep their bearer token.
 
+#### Optional: one-click redeploy from CI
+
+The commands above are the **supported, fully-capable** way to deploy — for self-hosting and for testing a change before trusting automation. If you maintain your own fork and want to roll merged changes without running `flyctl` locally, the repo ships an optional **`Deploy to Fly`** GitHub Actions workflow (`.github/workflows/deploy-fly.yml`). It only wraps the same `flyctl deploy` — it can't do anything you can't do by hand.
+
+It's a manual trigger (`workflow_dispatch`), never runs on push, and is keyed to *your* deployment, so it's inert in a fresh fork until you wire two things:
+
+1. **`FLY_API_TOKEN`** repo secret — `fly tokens create deploy` (Settings → Secrets → Actions).
+2. **`FLY_APP`** repo variable — your Fly app name (Settings → Variables → Actions). Or pass it as the `app` input when you trigger the run.
+
+Then trigger it from the **Actions** tab (or `gh workflow run "Deploy to Fly"`). It renders `fly.toml` from `fly.toml.example` for your app, runs `flyctl deploy --remote-only` (builds on Fly's builders), and fails the run unless `/health` reports `status=ok` afterward. A redeploy preserves your vault volume and secrets (including the OAuth passphrase, never rotated) — same as `upgrade web`'s redeploy path.
+
 ### Downgrade back to local
 
 ```bash
@@ -226,7 +237,7 @@ The extractor and handoff generator use LLM-based extraction when `mnemon[llm]` 
 
 ### Why a warm-keeper if Fly auto-stops?
 
-A self-hosted mnemon Fly app with `auto_stop_machines = "stop"` (the default in `fly.toml.example`) will autostop after a few minutes of idle. The warm-keeper resets Fly's idle timer on every prompt, so the machine stays warm during an active Claude Code session and only autostops once you've been idle for a while. Cost stays the same — Fly bills only running time — but you get reliable mid-session access without paying for an always-on machine. The `|| true` ensures a slow Fly cold-start never blocks your prompt.
+A self-hosted mnemon Fly app with autostop enabled (`fly.toml.example` defaults to `auto_stop_machines = "suspend"` — RAM-snapshot/resume in ~1s, so the OAuth token refresh on wake stays under the connector timeout) will idle the machine after a few minutes. The warm-keeper resets Fly's idle timer on every prompt, so the machine stays warm during an active Claude Code session and only autostops once you've been idle for a while. Cost stays the same — Fly bills only running time — but you get reliable mid-session access without paying for an always-on machine. The `|| true` ensures a slow Fly cold-start never blocks your prompt.
 
 ### What if a cold-stop happens anyway?
 
