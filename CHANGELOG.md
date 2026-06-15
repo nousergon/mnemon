@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.8] - 2026-06-15
+
+### Fixed
+- **`/health` no longer false-warns on an idle suspend-on-idle deploy.** The
+  request-path prune (`_maybe_prune`) only runs on real MCP traffic, but
+  `/health` is served by the auth middleware and bypasses that path — so on a
+  low-traffic Fly deploy the only guaranteed hourly request (the health probe
+  itself) never bounded the metric it reports. `oldest_session_age_seconds`
+  drifted past the TTL between real requests overnight, soft-tripping
+  `check_health.py`'s prune-health warn (exit 2 → red run + tracker issue)
+  even though the prune was perfectly healthy and self-heals the instant any
+  real request arrives. The endpoint now reads through a new
+  `PersistentSessionManager.health_snapshot()` that triggers the gated,
+  cheap, error-swallowing prune before snapshotting: the hourly probe now
+  guarantees a prune-trigger ≤ one expire interval, bounding
+  `oldest_session_age_seconds` at TTL + interval, and the reported value is
+  post-prune (`/health` never advertises a session the server would already
+  have removed). `metrics()` itself stays a pure read for every other caller.
+
 ## [0.7.7] - 2026-06-11
 
 ### Added

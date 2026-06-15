@@ -327,6 +327,32 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
             m["seconds_since_last_decay"] = int(time.time() - self._last_decay_ts)
         return m
 
+    def health_snapshot(self) -> dict[str, int]:
+        """``metrics()`` for the /health endpoint, with a prune triggered first.
+
+        The request-path prune (:meth:`_maybe_prune`) only runs inside
+        ``_handle_stateful_request`` — i.e. on real MCP traffic. ``/health``
+        is served by the auth middleware and bypasses that path, so on a
+        low-traffic suspend-on-idle deploy the only guaranteed hourly
+        request (the health probe itself) never bounded the very metric it
+        reports. ``oldest_session_age_seconds`` then drifted up past the TTL
+        between real requests overnight, false-tripping check_health.py's
+        soft warn even though the prune was perfectly healthy (it self-heals
+        the instant any real request arrives).
+
+        Reading the snapshot through a prune fixes that structurally: the
+        hourly probe now guarantees a prune-trigger ≤ one interval, bounding
+        ``oldest_session_age_seconds`` at TTL + interval, and the reported
+        value is post-prune — /health never advertises a session the server
+        would already have removed. The prune is the same gated, cheap,
+        error-swallowing DELETE the request path uses (≤ once per
+        ``expire_interval_seconds``), so it is safe to ride on the liveness
+        endpoint. ``metrics()`` itself stays a pure read for every other
+        caller.
+        """
+        self._maybe_prune()
+        return self.metrics()
+
     @contextlib.asynccontextmanager
     async def run(self) -> AsyncIterator[None]:
         """Lifespan wrapper that adds a periodic ``expire_old()`` task.

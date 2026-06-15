@@ -684,6 +684,51 @@ class TestRequestPathPrune:
 
 
 # ---------------------------------------------------------------------------
+# health_snapshot() — the /health entry point. Triggers the gated
+# request-path prune BEFORE snapshotting so the hourly probe bounds
+# oldest_session_age_seconds even with no real MCP traffic (the false-warn
+# fixed here). metrics() itself stays a pure read.
+# ---------------------------------------------------------------------------
+
+
+class TestHealthSnapshot:
+    @staticmethod
+    def _make_manager(tmp_path, *, ttl_seconds=1, expire_interval_seconds=3600):
+        store = SessionStore(tmp_path / "sessions.sqlite", ttl_seconds=ttl_seconds)
+        return PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            expire_interval_seconds=expire_interval_seconds,
+        )
+
+    def test_health_snapshot_prunes_overdue_row_without_real_traffic(self, tmp_path):
+        """The reported failure: an idle suspend-on-idle deploy where the only
+        hourly request is the /health probe. health_snapshot() must prune the
+        overdue row so oldest_session_age_seconds reads bounded (0 here)."""
+        manager = self._make_manager(tmp_path)
+        manager._session_store.register("overdue")
+        time.sleep(1.1)  # age past the 1s TTL
+        assert manager._session_store.oldest_age_seconds() > 1.0  # not yet pruned
+        snap = manager.health_snapshot()
+        assert snap["oldest_session_age_seconds"] == 0  # pruned during the probe
+
+    def test_metrics_stays_a_pure_read(self, tmp_path):
+        """metrics() must NOT prune — only health_snapshot() does. Guards the
+        separation so non-/health callers keep a side-effect-free snapshot."""
+        manager = self._make_manager(tmp_path)
+        manager._session_store.register("overdue")
+        time.sleep(1.1)
+        assert manager.metrics()["oldest_session_age_seconds"] >= 1  # untouched
+        assert manager._session_store.oldest_age_seconds() > 1.0  # still present
+
+    def test_health_snapshot_returns_same_keys_as_metrics(self, tmp_path):
+        """health_snapshot is metrics-after-prune — identical schema, so
+        check_health.py reads the same fields regardless of which is wired."""
+        manager = self._make_manager(tmp_path)
+        assert set(manager.health_snapshot()) == set(manager.metrics())
+
+
+# ---------------------------------------------------------------------------
 # Periodic memory-decay sweep — wired alongside the prune task in run().
 # Runs apply_confidence_decay() on the vault every decay_interval_seconds
 # in a worker thread. Failures swallowed; counts logged when nonzero.
