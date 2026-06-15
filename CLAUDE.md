@@ -9,16 +9,30 @@ first** — the living buildout snapshot (version, deploy, architecture,
 security posture, in-flight/deferred, known gotchas). It supersedes the
 one-time `private/mnemon-system-audit-260412.md`. Honor its "Last
 verified" date: if older than ~1 week, re-verify the Current State /
-Deploy blocks before trusting specifics. `ROADMAP.md` (same dir) holds
-open work + the pre-deploy ritual.
+Deploy blocks before trusting specifics.
+
+**The backlog lives in GitHub Issues on `cipher813/mnemon-ops`** (board:
+https://github.com/users/cipher813/projects/3), migrated from
+`private/ROADMAP.md` 2026-06-15 — same pattern as alpha-engine-config and
+metron-ops. `private/ROADMAP.md` is now a TOMBSTONE that retains only two
+reference sections (release rituals + operational watch list) plus standing
+decisions; it is no longer the work list. Query with `gh issue list --repo
+cipher813/mnemon-ops` (or `gh auth token` + curl — `gh` is proxy-blocked).
+Labels: `P1`–`P3`, `deferred`, `speculative`, `area:*`.
 
 **When closing/wrapping a session,** run the wind-down before ending:
 
-1. **`private/ROADMAP.md`** — refresh every task state touched (mark
-   shipped/merged, annotate awaiting-merge, add new items surfaced).
+1. **Issue-hygiene sweep on `cipher813/mnemon-ops`** — for every item
+   touched: work merged/shipped → CLOSE the issue (one-line comment naming
+   the PR); advanced-but-open → COMMENT the delta; new follow-ups / audit
+   findings → FILE a new issue (priority label + gate + re-exam trigger +
+   closes-when) and add it to the board (projects/3). `ROADMAP.md` itself
+   changes only when a reference section (release rituals / ops watch list)
+   or a standing decision changes.
 2. **`private/SYSTEM_STATE.md`** — overwrite the Current State snapshot
-   in place for any changed facts; append a dated Recent Changes line;
-   bump "Last verified". Confirmed milestones only, no speculation.
+   in place for any changed facts; append a dated Recent Changes line (or
+   to `SYSTEM_STATE_changelog.md`); bump "Last verified". Confirmed
+   milestones only, no speculation.
 3. **Memories** — save durable cross-session facts/decisions/feedback.
 
 `private/` is gitignored from THIS repo but is its own nested git repo
