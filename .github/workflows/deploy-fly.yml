@@ -83,7 +83,26 @@ jobs:
           echo "--- rendered fly.toml ---"
           cat fly.toml
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Install flyctl (retried)
+        # Replaces `superfly/flyctl-actions/setup-flyctl@master`: that action
+        # downloads the flyctl binary from a GitHub/Fly CDN, which 503'd on a
+        # transient hiccup 2026-06-15 — and a `uses:` step can't be retried.
+        # Installing via the official script in a retry loop hardens that
+        # transient-download failure mode (companion to the deploy retry
+        # below). A genuine failure still exhausts the attempts and reds.
+        run: |
+          set +e
+          for i in 1 2 3; do
+            curl -fsSL https://fly.io/install.sh | sh && break
+            echo "flyctl install attempt $i failed; retrying in $((i * 10))s..."
+            sleep $((i * 10))
+          done
+          if [ ! -x "$HOME/.fly/bin/flyctl" ]; then
+            echo "::error::flyctl install failed after 3 attempts."
+            exit 1
+          fi
+          echo "$HOME/.fly/bin" >> "$GITHUB_PATH"
+          "$HOME/.fly/bin/flyctl" version
 
       - name: Deploy
         env:
