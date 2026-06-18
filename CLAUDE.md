@@ -11,18 +11,25 @@ one-time `private/mnemon-system-audit-260412.md`. Honor its "Last
 verified" date: if older than ~1 week, re-verify the Current State /
 Deploy blocks before trusting specifics.
 
-**The backlog lives in GitHub Issues on `cipher813/mnemon-ops`** (board:
-https://github.com/users/cipher813/projects/3), migrated from
-`private/ROADMAP.md` 2026-06-15 — same pattern as alpha-engine-config and
-metron-ops. `private/ROADMAP.md` is now a TOMBSTONE that retains only two
-reference sections (release rituals + operational watch list) plus standing
-decisions; it is no longer the work list. Query with `gh issue list --repo
-cipher813/mnemon-ops` (or `gh auth token` + curl — `gh` is proxy-blocked).
-Labels: `P1`–`P3`, `deferred`, `speculative`, `area:*`.
+**The backlog lives in PUBLIC GitHub Issues on `nousergon/mnemon`** (board:
+https://github.com/orgs/nousergon/projects/3) — mnemon is MIT/OSS, so its
+backlog is public (issues live with the code; `help wanted` / `good first
+issue` recruit contributors). Migrated `private/ROADMAP.md` → `mnemon-ops`
+Issues 2026-06-15, then moved to the public repo 2026-06-18. This DIFFERS
+from alpha-engine-config/metron-ops, which stay private because their backlog
+leaks alpha/edge — that rationale does not apply to an OSS tool.
+`private/ROADMAP.md` is now a TOMBSTONE that retains only two reference
+sections (release rituals + operational watch list) plus standing decisions;
+it is no longer the work list. Query with `gh issue list --repo
+nousergon/mnemon` (or `gh auth token` + curl — `gh` is proxy-blocked).
+Labels: `P0`–`P3`, `deferred`, `speculative`, `area:*`.
+**Monetization / business items stay PRIVATE on `nousergon/mnemon-ops`**
+(e.g. Hosted SaaS, `mnemon-ops#22`) — file those there, not on the public repo.
 
 **When closing/wrapping a session,** run the wind-down before ending:
 
-1. **Issue-hygiene sweep on `cipher813/mnemon-ops`** — for every item
+1. **Issue-hygiene sweep on `nousergon/mnemon`** (public; monetization/business
+   items on `nousergon/mnemon-ops` instead) — for every item
    touched: work merged/shipped → CLOSE the issue (one-line comment naming
    the PR); advanced-but-open → COMMENT the delta; new follow-ups / audit
    findings → FILE a new issue (priority label + gate + re-exam trigger +
