@@ -66,6 +66,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gitleaks-action@v2 requires a paid GITLEAKS_LICENSE for GitHub *org*
+      # repos (free only for user repos). The cipher813 -> nousergon org
+      # transfer broke this check, so use the free raw gitleaks binary instead
+      # — same scan engine, no license. (see nousergon/mnemon#258)
+      - name: Install gitleaks
+        run: |
+          VERSION=8.18.4
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Scan git history for secrets
+        run: gitleaks detect --source . --redact --no-banner --verbose
