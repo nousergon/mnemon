@@ -72,7 +72,7 @@ jobs:
       # — same scan engine, no license. (see nousergon/mnemon#258)
       - name: Install gitleaks
         run: |
-          VERSION=8.18.4
+          VERSION=8.30.1
           curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" -o /tmp/gitleaks.tar.gz
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
