@@ -593,7 +593,7 @@ class TestSpotlightEnvelope:
 
 class TestContextSurfacingMain:
     def test_full_pipeline_calls_remote_and_emits_context(self):
-        from mnemon.hooks.context_surfacing import main
+        from mnemon.hooks.context_surfacing import SEARCH_LIMIT, main
 
         raw_tool_output = json.dumps([{
             "doc_id": 42, "title": "Pipeline",
@@ -627,7 +627,7 @@ class TestContextSurfacingMain:
         assert call_args[0][0] == "memory_search"
         assert call_args[0][1] == {
             "query": "how does the pipeline work?",
-            "limit": 8,
+            "limit": SEARCH_LIMIT,
         }
         # Client label makes attribution possible in server-side logs.
         assert call_args.kwargs.get("client_label") == "claude-code-context-surfacing"
