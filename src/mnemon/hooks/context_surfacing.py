@@ -44,7 +44,12 @@ CHAR_BUDGET = HOOK_CHAR_BUDGET
 SLOW_THRESHOLD_SEC = HOOK_SLOW_THRESHOLD_SEC
 
 CLIENT_LABEL = "claude-code-context-surfacing"
-SEARCH_LIMIT = 8
+# Situational-recall breadth per prompt. Raised 8→12 (2026-06-22): the Claude
+# Code file-memory index (MEMORY.md) is now deliberately lean (current-state +
+# standing rules only, ~20KB), with the long tail de-indexed to MEMORY_ARCHIVE
+# and left to mnemon recall — so wider per-prompt recall is the intended
+# compensation. Standing-tier breadth is governed separately (capped ~15).
+SEARCH_LIMIT = 12
 
 # Snippet size injected per result — matches the pre-0.5.0 server-side
 # truncation so context block size stays bounded independent of vault
