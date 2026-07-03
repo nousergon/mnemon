@@ -190,10 +190,23 @@ HARD_CEILING = 20  # plan invariant: never exceed 20
 VAULT_EXEMPLAR_DEFAULT_COUNT = 15
 VAULT_POSITIVE_CONFIDENCE_FLOOR = 0.80
 
-# LLM-judge constants (added 2026-05-27 per ROADMAP P2 follow-up).
-# Opt-in via --judge anthropic + ANTHROPIC_API_KEY env var. Default
-# remains the embedding scorer (zero new deps, public-release-friendly).
-JUDGE_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+# LLM-judge constants (added 2026-05-27 per ROADMAP P2 follow-up;
+# provider-agnostic via krepis 2026-07-03). Opt-in via --judge llm (or the
+# back-compat --judge anthropic). Default remains the embedding scorer
+# (zero new deps, public-release-friendly).
+#
+# The judge model is CONFIG, not code: MNEMON_JUDGE_LLM env accepts
+# "provider:model" or a krepis ModelSpec JSON. Defaults: --judge llm runs
+# an open-weight model via OpenRouter (cheap, ~$0.10/$0.18 per MTok);
+# --judge anthropic keeps the original Haiku judge. Either way the flip
+# is an env-var edit, never a code change.
+JUDGE_LLM_ENV = "MNEMON_JUDGE_LLM"
+JUDGE_LLM_DEFAULT_SPEC = "openrouter:deepseek/deepseek-v4-flash:floor"
+JUDGE_LLM_ANTHROPIC_SPEC = "anthropic:claude-haiku-4-5-20251001"
+JUDGE_MAX_TOKENS = 300
+# SFT trace sink for the distillation corpus (rows written only when
+# LLM_SFT_CAPTURE_ENABLED / ALPHA_ENGINE_DECISION_CAPTURE_ENABLED is set).
+JUDGE_SFT_SINK_ENV = "MNEMON_JUDGE_SFT_SINK"
 JUDGE_RUBRIC_DIMENSIONS = ("generality", "durability", "imperative_shape", "cross_domain")
 JUDGE_RUBRIC_PROMPT = """\
 You are scoring a memory's fit for a "standing context" tier — a capped
@@ -321,63 +334,84 @@ def _sample_vault_exemplars(
     return [_fmt(r) for r in pos_rows], [_fmt(r) for r in neg_rows]
 
 
-def _score_via_anthropic_judge(docs: list[dict]) -> dict[int, float]:
-    """Score each memory's 'constraint-ness' via Anthropic Haiku rubric.
+def _score_via_llm_judge(docs: list[dict], *, default_spec: str) -> dict[int, float]:
+    """Score each memory's 'constraint-ness' via an LLM rubric judge.
 
     Returns {doc_id: score_in_0_to_1} — rubric mean over the 4
     JUDGE_RUBRIC_DIMENSIONS normalized to [0.2, 1.0] (raw range
     1-5 / 5 = 0.2-1.0).
 
+    Provider-agnostic via the krepis adapter: the judge model resolves
+    from the ``MNEMON_JUDGE_LLM`` env var ("provider:model" or a
+    ModelSpec JSON), falling back to ``default_spec`` (``--judge llm`` →
+    an open-weight model via OpenRouter; ``--judge anthropic`` → the
+    original Haiku judge). Swapping providers is an env edit, never code.
+
     Per-memory rationale is printed to stderr for audit; the existing
     scoring pipeline downstream only consumes the scalar score, so the
-    rationale is observability not a return value.
+    rationale is observability not a return value. When SFT capture is
+    enabled (``LLM_SFT_CAPTURE_ENABLED=1``), every judge call is also
+    staged to the distillation corpus sink (``MNEMON_JUDGE_SFT_SINK``,
+    default ``~/.mnemon/sft/judge.jsonl``).
 
     Activation requirements:
-      - ``ANTHROPIC_API_KEY`` env var must be set.
-      - ``anthropic`` SDK must be importable (operator-side install:
-        ``pip install anthropic``).
+      - ``krepis`` must be importable (operator-side install:
+        ``pip install 'mnemon-memory[judge]'`` or
+        ``pip install 'krepis[anthropic,openai]'``).
+      - The resolved provider's API key env var must be set
+        (``OPENROUTER_API_KEY`` for the default; ``ANTHROPIC_API_KEY``
+        for --judge anthropic).
 
     Raises ``RuntimeError`` with operator-facing instructions if either
     requirement is missing — fail loud per the no-silent-fail rule.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "--judge anthropic requires ANTHROPIC_API_KEY env var. "
-            "Set it or use --judge embedding (default)."
-        )
     try:
-        import anthropic
+        from krepis.llm import LLMClient
+        from krepis.llm_capture import capture_llm_call
+        from krepis.llm_config import parse_model_spec
     except ImportError as e:
         raise RuntimeError(
-            "--judge anthropic requires the `anthropic` SDK. "
-            "Install via `pip install anthropic`, or use --judge embedding."
+            "--judge llm requires the `krepis` adapter. Install via "
+            "`pip install 'mnemon-memory[judge]'`, or use --judge "
+            "embedding (default)."
         ) from e
 
-    client = anthropic.Anthropic(api_key=api_key)
+    spec_value = os.environ.get(JUDGE_LLM_ENV) or default_spec
+    spec = parse_model_spec(spec_value, source=f"env {JUDGE_LLM_ENV} / default")
+    key_env = spec.resolved_api_key_env()
+    if not os.environ.get(key_env):
+        raise RuntimeError(
+            f"--judge llm resolved to {spec.provider}:{spec.model}, which "
+            f"requires the {key_env} env var. Set it, point "
+            f"{JUDGE_LLM_ENV} at a provider you have a key for, or use "
+            f"--judge embedding (default)."
+        )
+
+    client = LLMClient(spec)
+    sft_sink = os.environ.get(JUDGE_SFT_SINK_ENV) or str(
+        Path.home() / ".mnemon" / "sft" / "judge.jsonl"
+    )
     scores: dict[int, float] = {}
 
     print(
-        f"# LLM-judge scoring {len(docs)} memories via {JUDGE_ANTHROPIC_MODEL} ...",
+        f"# LLM-judge scoring {len(docs)} memories via "
+        f"{spec.provider}:{spec.model} ...",
         file=sys.stderr,
     )
     for d in docs:
-        prompt = (
-            f"{JUDGE_RUBRIC_PROMPT}\n\n"
+        user_block = (
             f"Memory title: {d['title'] or '(no title)'}\n"
             f"Content type: {d['content_type']}\n"
             f"Content: {(d['content'] or '')[:1500]}"
         )
+        result = None
         try:
-            msg = client.messages.create(
-                model=JUDGE_ANTHROPIC_MODEL,
-                max_tokens=300,
-                messages=[{"role": "user", "content": prompt}],
+            result = client.complete(
+                system=JUDGE_RUBRIC_PROMPT,
+                user_content=user_block,
+                max_tokens=JUDGE_MAX_TOKENS,
             )
-            text = "".join(
-                block.text for block in msg.content
-                if getattr(block, "type", None) == "text"
-            )
+            text = result.text
             parsed = _parse_judge_response(text)
             dim_values = [parsed.get(k, 3) for k in JUDGE_RUBRIC_DIMENSIONS]
             mean_raw = sum(dim_values) / len(dim_values)
@@ -399,6 +433,23 @@ def _score_via_anthropic_judge(docs: list[dict]) -> dict[int, float]:
                 file=sys.stderr,
             )
             scores[d["id"]] = 0.0
+
+        # Distillation capture — OUTSIDE the best-effort block above: a
+        # capture failure with the flag enabled must abort loudly (per
+        # krepis SftCaptureWriteError semantics), never silently zero a
+        # valid score or silently drop training data. No-op when the
+        # capture flag is off.
+        if result is not None:
+            capture_llm_call(
+                result,
+                producer="mnemon_judge",
+                sink_path=sft_sink,
+                meta={
+                    "memory_id": d["id"],
+                    "content_type": d["content_type"],
+                    "score": scores.get(d["id"]),
+                },
+            )
 
     return scores
 
@@ -571,12 +622,16 @@ def main() -> int:
                     help=f"how many vault exemplars to sample per class (positive + negative) "
                          f"when --exemplar-source ∈ {{hybrid, vault}} (default: "
                          f"{VAULT_EXEMPLAR_DEFAULT_COUNT})")
-    ap.add_argument("--judge", choices=("embedding", "anthropic"),
+    ap.add_argument("--judge", choices=("embedding", "llm", "anthropic"),
                     default="embedding",
                     help="constraint-score backend: 'embedding' (default, no deps — "
-                         "max cosine vs exemplars) or 'anthropic' (opt-in higher-fidelity "
-                         "Haiku rubric scoring; requires ANTHROPIC_API_KEY env var + "
-                         "`pip install anthropic`). LLM-judge replaces the embedding "
+                         "max cosine vs exemplars) or 'llm' (opt-in higher-fidelity "
+                         "rubric scoring via the krepis adapter; model from the "
+                         f"{JUDGE_LLM_ENV} env var, default {JUDGE_LLM_DEFAULT_SPEC}; "
+                         "requires `pip install 'mnemon-memory[judge]'` + the resolved "
+                         "provider's API key env var). 'anthropic' is the back-compat "
+                         "alias that defaults the judge to the original Haiku model. "
+                         "LLM-judge replaces the embedding "
                          "constraint signal only; correction/contradiction/breadth/time "
                          "signals remain.")
     args = ap.parse_args()
@@ -705,11 +760,17 @@ def main() -> int:
     embedded_ids, memory_vecs = _load_vectors_for_docs(vecstore_path, docs)
     time_raw = dict(zip(embedded_ids, _cosine_max(memory_vecs, time_emb).tolist()))
 
-    # Constraint signal: --judge picks embedding (default) or anthropic.
-    # Falls back to embedding scoring if LLM-judge errors out at activation.
-    if args.judge == "anthropic":
+    # Constraint signal: --judge picks embedding (default) or an LLM judge
+    # ('llm' = provider-agnostic via krepis, default open-weight model on
+    # OpenRouter; 'anthropic' = back-compat alias for the original Haiku
+    # judge). Aborts with instructions if LLM-judge activation fails.
+    if args.judge in ("llm", "anthropic"):
+        default_spec = (
+            JUDGE_LLM_ANTHROPIC_SPEC if args.judge == "anthropic"
+            else JUDGE_LLM_DEFAULT_SPEC
+        )
         try:
-            constraint_raw = _score_via_anthropic_judge(docs)
+            constraint_raw = _score_via_llm_judge(docs, default_spec=default_spec)
         except RuntimeError as exc:
             print(f"# ERROR: {exc}", file=sys.stderr)
             return 2
