@@ -39,6 +39,11 @@ llm = [
     "llama-cpp-python>=0.3",
     "huggingface-hub>=0.20",
 ]
+# Operator-side LLM-judge backend for scripts/build_standing_set.py
+# (--judge llm). krepis is the provider-agnostic adapter: the judge model
+# is config (MNEMON_JUDGE_LLM env, "provider:model"), defaulting to an
+# open-weight model via OpenRouter with Anthropic as a config flip.
+judge = ["krepis[anthropic,openai]>=0.9.0"]
 ui = [
     "streamlit>=1.30",
     "plotly>=5.18",

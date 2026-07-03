@@ -184,106 +184,181 @@ class TestParseJudgeResponse:
         assert parsed == {"a": {"b": 1}, "c": 2}
 
 
-class TestScoreViaAnthropicJudge:
-    """Tests for the LLM-judge backend (opt-in --judge anthropic).
-    All Anthropic API calls are mocked — no real API key needed."""
+class TestScoreViaLlmJudge:
+    """Tests for the LLM-judge backend (opt-in --judge llm / anthropic).
+    The krepis adapter is faked in sys.modules — no real key, SDK, or
+    network needed (krepis is an operator-side opt-in install)."""
 
-    def test_missing_api_key_raises_runtime_error(self, bss, monkeypatch):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        import pytest as _p
-        with _p.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
-            bss._score_via_anthropic_judge([{"id": 1, "title": "T", "content": "C", "content_type": "preference"}])
+    DOC = {"id": 1, "title": "T", "content": "C", "content_type": "preference"}
+    RUBRIC_08 = (
+        '{"generality": 4, "durability": 4, "imperative_shape": 4, '
+        '"cross_domain": 4, "rationale": "solid"}'
+    )
 
-    def test_missing_sdk_raises_runtime_error(self, bss, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
-        # Simulate `anthropic` SDK absence by injecting None into sys.modules
-        # AND patching the import mechanism.
-        import sys as _sys
-        sentinel = object()
-        # Save + clear
-        prior = _sys.modules.get("anthropic", sentinel)
-        _sys.modules["anthropic"] = None  # makes `import anthropic` raise ImportError
-        try:
-            import pytest as _p
-            with _p.raises(RuntimeError, match="pip install anthropic"):
-                bss._score_via_anthropic_judge([{"id": 1, "title": "T", "content": "C", "content_type": "preference"}])
-        finally:
-            if prior is sentinel:
-                del _sys.modules["anthropic"]
-            else:
-                _sys.modules["anthropic"] = prior
-
-    def _inject_fake_anthropic(self, monkeypatch, mock_client):
-        """Inject a fake ``anthropic`` module into sys.modules so the
-        script's lazy ``import anthropic`` resolves to our stub. The
-        SDK isn't a hard dependency of mnemon-memory (operator-side
-        opt-in), so tests can't rely on it being installed."""
+    def _inject_fake_krepis(self, monkeypatch, complete_fn, captured=None):
+        """Register fake krepis.{llm,llm_capture,llm_config} modules so
+        the script's lazy imports resolve to stubs."""
         import sys as _sys
         import types as _types
 
-        fake_module = _types.ModuleType("anthropic")
-        # The script does `anthropic.Anthropic(api_key=...)`. Make the
-        # class a no-arg factory that ignores kwargs and returns the
-        # mock client.
-        fake_module.Anthropic = lambda *a, **kw: mock_client
-        monkeypatch.setitem(_sys.modules, "anthropic", fake_module)
+        key_envs = {
+            "openrouter": "OPENROUTER_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+        }
+
+        constructed = []
+
+        class FakeClient:
+            def __init__(self, spec, **kw):
+                self.spec = spec
+                constructed.append(spec)
+
+            def complete(self, **kw):
+                return complete_fn(**kw)
+
+        def parse_model_spec(value, source=""):
+            provider, model = value.split(":", 1)
+            return _types.SimpleNamespace(
+                provider=provider,
+                model=model,
+                resolved_api_key_env=lambda p=provider: key_envs[p],
+            )
+
+        def capture_llm_call(result, **kw):
+            if captured is not None:
+                captured.append((result, kw))
+            return captured is not None
+
+        pkg = _types.ModuleType("krepis")
+        llm_mod = _types.ModuleType("krepis.llm")
+        llm_mod.LLMClient = FakeClient
+        cap_mod = _types.ModuleType("krepis.llm_capture")
+        cap_mod.capture_llm_call = capture_llm_call
+        cfg_mod = _types.ModuleType("krepis.llm_config")
+        cfg_mod.parse_model_spec = parse_model_spec
+        pkg.llm, pkg.llm_capture, pkg.llm_config = llm_mod, cap_mod, cfg_mod
+
+        monkeypatch.setitem(_sys.modules, "krepis", pkg)
+        monkeypatch.setitem(_sys.modules, "krepis.llm", llm_mod)
+        monkeypatch.setitem(_sys.modules, "krepis.llm_capture", cap_mod)
+        monkeypatch.setitem(_sys.modules, "krepis.llm_config", cfg_mod)
+        return constructed
+
+    def _result(self, text):
+        import types as _types
+
+        return _types.SimpleNamespace(text=text, raw_request={}, raw_response=None)
+
+    def test_missing_krepis_raises_runtime_error(self, bss, monkeypatch):
+        import sys as _sys
+
+        monkeypatch.setitem(_sys.modules, "krepis", None)
+        monkeypatch.setitem(_sys.modules, "krepis.llm", None)
+        import pytest as _p
+        with _p.raises(RuntimeError, match=r"mnemon-memory\[judge\]"):
+            bss._score_via_llm_judge(
+                [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
+            )
+
+    def test_missing_api_key_raises_runtime_error(self, bss, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
+        self._inject_fake_krepis(monkeypatch, lambda **kw: self._result("{}"))
+        import pytest as _p
+        with _p.raises(RuntimeError, match="OPENROUTER_API_KEY"):
+            bss._score_via_llm_judge(
+                [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
+            )
+
+    def test_anthropic_alias_requires_anthropic_key(self, bss, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
+        self._inject_fake_krepis(monkeypatch, lambda **kw: self._result("{}"))
+        import pytest as _p
+        with _p.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+            bss._score_via_llm_judge(
+                [dict(self.DOC)], default_spec=bss.JUDGE_LLM_ANTHROPIC_SPEC
+            )
 
     def test_happy_path_scores_each_doc(self, bss, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
-        from unittest.mock import MagicMock
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
+        seen_calls = []
 
-        # Mock the Anthropic client end-to-end. Each messages.create
-        # returns a fixed rubric — score = mean(4,4,4,4)/5 = 0.8
-        mock_block = MagicMock()
-        mock_block.type = "text"
-        mock_block.text = (
-            '{"generality": 4, "durability": 4, "imperative_shape": 4, '
-            '"cross_domain": 4, "rationale": "solid"}'
+        def complete(**kw):
+            seen_calls.append(kw)
+            return self._result(self.RUBRIC_08)
+
+        constructed = self._inject_fake_krepis(monkeypatch, complete)
+        scores = bss._score_via_llm_judge(
+            [
+                {"id": 1, "title": "A", "content": "first", "content_type": "preference"},
+                {"id": 2, "title": "B", "content": "second", "content_type": "decision"},
+            ],
+            default_spec=bss.JUDGE_LLM_DEFAULT_SPEC,
         )
-        mock_response = MagicMock()
-        mock_response.content = [mock_block]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
-        self._inject_fake_anthropic(monkeypatch, mock_client)
-
-        scores = bss._score_via_anthropic_judge([
-            {"id": 1, "title": "A", "content": "first", "content_type": "preference"},
-            {"id": 2, "title": "B", "content": "second", "content_type": "decision"},
-        ])
-
         assert scores[1] == pytest.approx(0.8)
         assert scores[2] == pytest.approx(0.8)
-        assert mock_client.messages.create.call_count == 2
+        assert len(seen_calls) == 2
+        # rubric rides the system prompt; the memory rides user_content
+        assert seen_calls[0]["system"] == bss.JUDGE_RUBRIC_PROMPT
+        assert "first" in seen_calls[0]["user_content"]
+        assert seen_calls[0]["max_tokens"] == bss.JUDGE_MAX_TOKENS
+        # default spec resolved to the open-weight OpenRouter judge
+        assert constructed[0].provider == "openrouter"
+
+    def test_env_override_wins(self, bss, monkeypatch):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
+        monkeypatch.setenv(bss.JUDGE_LLM_ENV, "anthropic:claude-haiku-4-5")
+        constructed = self._inject_fake_krepis(
+            monkeypatch, lambda **kw: self._result(self.RUBRIC_08)
+        )
+        bss._score_via_llm_judge(
+            [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
+        )
+        assert constructed[0].provider == "anthropic"
 
     def test_classify_failure_falls_back_to_zero(self, bss, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
-        from unittest.mock import MagicMock
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
 
-        mock_client = MagicMock()
-        mock_client.messages.create.side_effect = RuntimeError("rate limit")
-        self._inject_fake_anthropic(monkeypatch, mock_client)
+        def complete(**kw):
+            raise RuntimeError("rate limit")
 
-        scores = bss._score_via_anthropic_judge([
-            {"id": 1, "title": "A", "content": "x", "content_type": "preference"},
-        ])
+        self._inject_fake_krepis(monkeypatch, complete)
+        scores = bss._score_via_llm_judge(
+            [{"id": 1, "title": "A", "content": "x", "content_type": "preference"}],
+            default_spec=bss.JUDGE_LLM_DEFAULT_SPEC,
+        )
         assert scores[1] == 0.0  # fallback, doesn't crash the run
 
     def test_missing_dims_default_to_neutral(self, bss, monkeypatch):
         """When the rubric JSON is missing a dimension, the caller
         defaults it to 3 (neutral). Score = (5 + 1 + 3 + 3) / 4 / 5 = 0.6"""
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-real")
-        from unittest.mock import MagicMock
-
-        mock_block = MagicMock()
-        mock_block.type = "text"
-        mock_block.text = '{"generality": 5, "durability": 1}'
-        mock_response = MagicMock()
-        mock_response.content = [mock_block]
-        mock_client = MagicMock()
-        mock_client.messages.create.return_value = mock_response
-        self._inject_fake_anthropic(monkeypatch, mock_client)
-
-        scores = bss._score_via_anthropic_judge([
-            {"id": 1, "title": "T", "content": "C", "content_type": "preference"},
-        ])
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
+        self._inject_fake_krepis(
+            monkeypatch,
+            lambda **kw: self._result('{"generality": 5, "durability": 1}'),
+        )
+        scores = bss._score_via_llm_judge(
+            [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
+        )
         assert scores[1] == pytest.approx(0.6)
+
+    def test_sft_capture_invoked_per_call(self, bss, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-not-real")
+        monkeypatch.delenv(bss.JUDGE_LLM_ENV, raising=False)
+        captured = []
+        self._inject_fake_krepis(
+            monkeypatch, lambda **kw: self._result(self.RUBRIC_08),
+            captured=captured,
+        )
+        bss._score_via_llm_judge(
+            [dict(self.DOC)], default_spec=bss.JUDGE_LLM_DEFAULT_SPEC
+        )
+        assert len(captured) == 1
+        _result_obj, kw = captured[0]
+        assert kw["producer"] == "mnemon_judge"
+        assert kw["meta"]["memory_id"] == 1
+        assert kw["meta"]["score"] == pytest.approx(0.8)
