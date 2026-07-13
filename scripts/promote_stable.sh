@@ -684,7 +684,7 @@ PY
     echo_step "PUBLISH COMPLETE — $TARGET_VERSION live on PyPI + Fly"
     echo ""
     echo "  PyPI:    https://pypi.org/project/mnemon-memory/$TARGET_VERSION/"
-    echo "  Release: https://github.com/cipher813/mnemon/releases/tag/v$TARGET_VERSION"
+    echo "  Release: https://github.com/nousergon/mnemon/releases/tag/v$TARGET_VERSION"
     echo "  Fly:     https://mnemon-memory.fly.dev/health"
     echo ""
     echo "  Don't forget to update private/SYSTEM_STATE.md (Recent Changes + Current State + Last verified)."

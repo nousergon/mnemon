@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.7.9] - 2026-07-13
+
+External-readiness audit — no behavior changes, packaging/docs only. Bumped
+specifically because `publish.yml` is `skip-existing`, so the `pyproject.toml`
+metadata fixes below would never actually reach PyPI without a version bump.
+
+### Fixed
+- **PyPI project-urls pointed at the pre-transfer `cipher813` org.** All four
+  `pyproject.toml` `urls.*` fields (Homepage/Repository/Issues/Changelog) —
+  the "Project links" sidebar every visitor to the PyPI page sees — still
+  said `cipher813/mnemon` after the org moved to `nousergon`. Same fix applied
+  everywhere else the stale org leaked: `README.md`, `SECURITY.md`,
+  `CONTRIBUTING.md`, `CLAUDE.md` (`mnemon-ops` reference), the CLI's own
+  `--help` docs line, the OAuth AS discovery document and the Protected
+  Resource Metadata document (both served live to real OAuth clients), and
+  `scripts/promote_stable.sh`'s release-URL echo.
+- **Both README screenshots were broken on the PyPI page.** `docs/images/*.png`
+  were referenced as relative paths, which don't resolve against PyPI's
+  long-description renderer (no repo base to resolve against) — GitHub
+  rendered them fine, PyPI showed two broken-image icons. Switched to
+  absolute `raw.githubusercontent.com` URLs, which render correctly on both.
+- **MCP tool count under-reported as 17 in five places** — `README.md`'s tools
+  table, `CLAUDE.md`, `CONTRIBUTING.md`, `ARCHITECTURE.md`, and the feature-
+  request issue template. Actual count is 19; the README table was missing
+  `memory_export_coords` and `memory_export_relations` entirely. Added the two
+  missing rows and corrected the count everywhere.
+- **`changelog.yml`'s reusable-action reference was doubly stale**
+  (`cipher813/alpha-engine-docs` → `nousergon/nousergon-docs`, both the org
+  and the repo renamed). Also added a `github.repository ==
+  'nousergon/mnemon'` guard — this job assumes an AWS OIDC role in the
+  maintainer's account, so an external fork pushing to its own `main` was
+  getting a spurious red run with no way to satisfy it.
+- CONTRIBUTING.md's "~1010 tests" quick-start claim had drifted to ~1160.
+
 ## [0.7.8] - 2026-06-15
 
 ### Fixed

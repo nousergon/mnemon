@@ -12,10 +12,10 @@ requires-python = ">=3.10"
 authors = [
     { name = "Brian McMahon", email = "cipher813@gmail.com" },
 ]
-urls.Homepage = "https://github.com/cipher813/mnemon"
-urls.Repository = "https://github.com/cipher813/mnemon"
-urls.Issues = "https://github.com/cipher813/mnemon/issues"
-urls.Changelog = "https://github.com/cipher813/mnemon/blob/main/CHANGELOG.md"
+urls.Homepage = "https://github.com/nousergon/mnemon"
+urls.Repository = "https://github.com/nousergon/mnemon"
+urls.Issues = "https://github.com/nousergon/mnemon/issues"
+urls.Changelog = "https://github.com/nousergon/mnemon/blob/main/CHANGELOG.md"
 keywords = ["mcp", "memory", "ai", "agents", "llm", "sqlite", "vector-search"]
 classifiers = [
     "Development Status :: 3 - Alpha",

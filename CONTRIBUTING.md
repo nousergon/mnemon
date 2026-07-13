@@ -5,20 +5,20 @@ mnemon is in alpha. Bug reports, PRs, and design discussion are all welcome. Iss
 ## Quick start
 
 ```bash
-git clone https://github.com/cipher813/mnemon.git
+git clone https://github.com/nousergon/mnemon.git
 cd mnemon
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest -m "not integration"
 ```
 
-You should see ~1010 tests pass in a few seconds. The 4 integration tests are excluded from this run because they bind a local socket — run them separately with `pytest -m integration` if you're touching `serve-remote` or auth.
+You should see ~1160 tests pass in a few seconds. The 4 integration tests are excluded from this run because they bind a local socket — run them separately with `pytest -m integration` if you're touching `serve-remote` or auth.
 
 ## What to work on
 
-- **Roadmap / open scope:** see [`README.md`](README.md) for the user-facing pitch and the public roadmap; design discussions happen in [GitHub Issues](https://github.com/cipher813/mnemon/issues).
-- **Good first issues:** anything tagged [`good first issue`](https://github.com/cipher813/mnemon/labels/good%20first%20issue) — usually doc fixes, test coverage, or minor CLI polish.
-- **New features:** open an issue first to align on shape before writing code. mnemon's interface is intentionally narrow (17 MCP tools) and adding to it has compounding cost.
+- **Roadmap / open scope:** see [`README.md`](README.md) for the user-facing pitch and the public roadmap; design discussions happen in [GitHub Issues](https://github.com/nousergon/mnemon/issues).
+- **Good first issues:** anything tagged [`good first issue`](https://github.com/nousergon/mnemon/labels/good%20first%20issue) — usually doc fixes, test coverage, or minor CLI polish.
+- **New features:** open an issue first to align on shape before writing code. mnemon's interface is intentionally narrow (19 MCP tools) and adding to it has compounding cost.
 
 ## Style
 
@@ -37,7 +37,7 @@ You should see ~1010 tests pass in a few seconds. The 4 integration tests are ex
 
 ## Reporting bugs
 
-Open a [GitHub Issue](https://github.com/cipher813/mnemon/issues/new) with:
+Open a [GitHub Issue](https://github.com/nousergon/mnemon/issues/new) with:
 - The exact command you ran
 - The output of `mnemon --version` and `mnemon doctor`
 - Your OS + Python version

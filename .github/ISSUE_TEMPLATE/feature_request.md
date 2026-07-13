@@ -16,4 +16,4 @@ What you'd like to see.
 Other approaches you've thought about.
 
 **Scope note**
-mnemon's interface is intentionally narrow (17 MCP tools) and adding to it has compounding cost — please open this issue to align on shape before writing code. See `CONTRIBUTING.md`.
+mnemon's interface is intentionally narrow (19 MCP tools) and adding to it has compounding cost — please open this issue to align on shape before writing code. See `CONTRIBUTING.md`.

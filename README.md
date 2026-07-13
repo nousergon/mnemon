@@ -1,15 +1,15 @@
 # mnemon
 
-[![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
-[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)]()
+[![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/nousergon/mnemon/issues)
+[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/pypi/v/mnemon-memory.svg)](https://pypi.org/project/mnemon-memory/)
-[![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)]()
+[![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](https://github.com/nousergon/mnemon/actions/workflows/ci.yml)
 
 > One memory vault. Every MCP client. Self-hosted.
 >
-> **Status:** alpha — interfaces may change. [Issues](https://github.com/cipher813/mnemon/issues) and PRs welcome.
+> **Status:** alpha — interfaces may change. [Issues](https://github.com/nousergon/mnemon/issues) and PRs welcome.
 
 Claude Code, Cursor, claude.ai web/mobile/desktop, Claude Desktop, Gemini CLI — one vault shared across all of them.
 
@@ -52,7 +52,7 @@ Optional: `pip install "mnemon-memory[ui]"` for the Streamlit dashboard, or `[ll
 **From source** (e.g. to try unreleased fixes on `main`):
 
 ```bash
-git clone https://github.com/cipher813/mnemon.git
+git clone https://github.com/nousergon/mnemon.git
 cd mnemon
 pip install -e .
 ```
@@ -139,11 +139,11 @@ mnemon dashboard
 
 Streamlit UI at `http://localhost:8503` — vault health, search, timeline, an interactive graph view, and your profile. Works against both local and remote vaults.
 
-![mnemon dashboard — Vault Health](docs/images/dashboard.png)
+![mnemon dashboard — Vault Health](https://raw.githubusercontent.com/nousergon/mnemon/main/docs/images/dashboard.png)
 
 The graph view projects your embedding space to 2-D — UMAP for local vaults, and PCA computed server-side for remote vaults so it scales to thousands of memories without shipping every vector over the wire.
 
-![mnemon Memory Graph — 2-D projection of the embedding space, colored by memory type](docs/images/graph.png)
+![mnemon Memory Graph — 2-D projection of the embedding space, colored by memory type](https://raw.githubusercontent.com/nousergon/mnemon/main/docs/images/graph.png)
 
 ### Use it
 
@@ -200,6 +200,8 @@ mnemon verify-sharing    # prove multiple clients share one vault (web mode)
 | `memory_sweep` | Archive stale memories past their half-life (dry-run by default) |
 | `memory_rebuild` | Re-embed all documents (use after upgrading embedding model) |
 | `memory_export_vectors` | Export stored embeddings (e.g. for analysis or visualization) |
+| `memory_export_coords` | Export a 2-D PCA projection of the vault's embeddings — the dashboard Graph page's scalable path for large remote vaults |
+| `memory_export_relations` | Export every relation edge between live documents in one call, for the Graph page's edge overlay |
 
 ### Intelligence
 

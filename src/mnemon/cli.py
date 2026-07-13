@@ -1178,7 +1178,7 @@ Env vars:
   MNEMON_S3_BUCKET    S3 bucket for vault sync
   PORT                Remote server port (default: 8502)
 
-Docs: https://github.com/cipher813/mnemon""")
+Docs: https://github.com/nousergon/mnemon""")
 
 
 if __name__ == "__main__":
