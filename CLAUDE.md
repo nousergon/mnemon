@@ -43,7 +43,7 @@ Labels: `P0`–`P3`, `deferred`, `speculative`, `area:*`.
 3. **Memories** — save durable cross-session facts/decisions/feedback.
 
 `private/` is gitignored from THIS repo but is its own nested git repo
-(`private/.git`) pushed to `cipher813/mnemon-ops` (private). So the
+(`private/.git`) pushed to `nousergon/mnemon-ops` (private). So the
 wind-down doc edits above MUST be committed + pushed there — they are
 NOT local-only: `cd private && git add -A && git commit && git push
 origin main` (no PR). The mnemon code repo's git history + `CHANGELOG.md`
@@ -69,7 +69,7 @@ src/mnemon/
   llm.py                # QMD-1.7B via llama-cpp-python (optional)
   contradiction.py      # Contradiction detection + confidence decay
   config.py             # Content types, half-lives, scoring constants
-  server.py             # MCP server (stdio) — 17 tools
+  server.py             # MCP server (stdio) — 19 tools
   server_remote.py      # Remote HTTP server (Streamable HTTP)
   sync.py               # S3 vault sync (push/pull via AWS CLI)
   setup.py              # Auto-configure Claude Code, Cursor, Gemini

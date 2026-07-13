@@ -253,7 +253,7 @@ def authorization_server_metadata(config: AuthorizationServerConfig) -> dict[str
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],  # PKCE-only, no client secrets
         "scopes_supported": ["mcp"],
-        "service_documentation": "https://github.com/cipher813/mnemon",
+        "service_documentation": "https://github.com/nousergon/mnemon",
     }
 
 

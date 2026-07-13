@@ -34,7 +34,7 @@ The memory engine. A local-only user exercises exactly this set.
 | `safety.py` | Stored-injection defense — `defang_control_markup` (recall boundary) + `contains_control_markup` (capture-boundary reject). See `SECURITY.md` / the 5-layer model. |
 | `contradiction.py` + `nli.py` | Contradiction detection via NLI (`cross-encoder/nli-deberta-v3-xsmall`) + confidence decay. |
 | `llm.py` | **Optional** (`[llm]` extra) — QMD-1.7B GGUF via llama-cpp-python, used by `search.py` for query expansion. Not required. |
-| `server.py` | The MCP server (stdio) — registers the **17 tools**. Imports only `store`, `search`, `safety`. This is the local entry point. |
+| `server.py` | The MCP server (stdio) — registers the **19 tools**. Imports only `store`, `search`, `safety`. This is the local entry point. |
 | `api.py` | In-process tool surface (same shapes as `server.py`) so local hooks / `doctor` / setup work without any HTTP endpoint. |
 | `server_proxy.py` | When a remote vault is configured, `mnemon serve` forwards stdio → remote (fail-loud, never opens local). |
 | `cli.py` | CLI dispatcher (`serve`, `status`, `search`, `save`, `setup`, `sync`, `standing`, …). |

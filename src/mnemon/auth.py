@@ -283,7 +283,7 @@ class OAuthMiddleware:
             "resource": f"{issuer}/mcp",
             "authorization_servers": [issuer],
             "bearer_methods_supported": ["header"],
-            "resource_documentation": "https://github.com/cipher813/mnemon",
+            "resource_documentation": "https://github.com/nousergon/mnemon",
         }
 
     def _resource_metadata_url(self) -> str:

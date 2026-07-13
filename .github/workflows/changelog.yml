@@ -1,7 +1,12 @@
 name: System-wide deploy changelog
 
 # Emits one JSON entry to s3://alpha-engine-research/changelog/ on every
-# push-to-main. See alpha-engine-docs/.github/actions/append-changelog/README.md.
+# push-to-main. See nousergon-docs/.github/actions/append-changelog/README.md.
+#
+# Internal-only: assumes an AWS OIDC role in the maintainer's account, so
+# it's guarded to the canonical repo — an external fork's push to its own
+# main would otherwise get a spurious red "System-wide deploy changelog"
+# run with no AWS access to satisfy it.
 
 on:
   push:
@@ -18,6 +23,7 @@ permissions:
 
 jobs:
   append:
+    if: github.repository == 'nousergon/mnemon'
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -34,7 +40,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Append to system-wide deploy changelog
-        uses: cipher813/alpha-engine-docs/.github/actions/append-changelog@main
+        uses: nousergon/nousergon-docs/.github/actions/append-changelog@main
         with:
           deploy_status: merged
           deploy_workflow: changelog.yml
