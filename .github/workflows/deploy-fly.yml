@@ -53,7 +53,7 @@ jobs:
     # how a fork deploys its own app.
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.repository.fork == false }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve app name + require token
         id: cfg
