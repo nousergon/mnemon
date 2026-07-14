@@ -8,8 +8,9 @@ user's prompt.
 Pipeline:
   1. Skip noise (slash commands, greetings, short prompts, duplicates)
   2. Call ``memory_search`` on the Fly-hosted vault via _remote_client
-  3. Wrap the server's formatted response in ``<mnemon-context>`` tags
-  4. Write the context to stdout for Claude Code to inject
+  3. Drop situational results below the vector-similarity relevance floor
+  4. Wrap the server's formatted response in ``<mnemon-context>`` tags
+  5. Write the context to stdout for Claude Code to inject
 
 On any network/auth/timeout/config error the hook degrades gracefully:
 it logs to stderr AND emits a visible ``<mnemon-context>`` warning banner
@@ -33,6 +34,7 @@ import sys
 from ..config import (
     HOOK_CHAR_BUDGET,
     HOOK_CHARS_PER_TOKEN,
+    HOOK_SITUATIONAL_MIN_VECTOR_SIMILARITY,
     HOOK_SLOW_THRESHOLD_SEC,
     HOOK_TOKEN_BUDGET,
 )
@@ -42,6 +44,7 @@ TOKEN_BUDGET = HOOK_TOKEN_BUDGET
 CHARS_PER_TOKEN = HOOK_CHARS_PER_TOKEN
 CHAR_BUDGET = HOOK_CHAR_BUDGET
 SLOW_THRESHOLD_SEC = HOOK_SLOW_THRESHOLD_SEC
+SITUATIONAL_MIN_VECTOR_SIMILARITY = HOOK_SITUATIONAL_MIN_VECTOR_SIMILARITY
 
 CLIENT_LABEL = "claude-code-context-surfacing"
 # Situational-recall breadth per prompt. Raised 8→12 (2026-06-22): the Claude
@@ -258,6 +261,22 @@ def _fetch_standing_block(ids: list[int]) -> str:
     return "\n\n".join(lines)
 
 
+def _filter_by_relevance(results: list[dict]) -> list[dict]:
+    """Drop situational-recall results below the vector-similarity floor.
+
+    ``vector_similarity`` is the raw cosine similarity (None for BM25-only
+    matches); unlike ``composite_score`` it isn't inflated by recency or
+    confidence weighting, so it's the right signal for "is this actually
+    on-topic" rather than "is this a recent, trusted memory." See
+    ``HOOK_SITUATIONAL_MIN_VECTOR_SIMILARITY`` for full rationale.
+    """
+    return [
+        r for r in results
+        if isinstance(r.get("vector_similarity"), (int, float))
+        and r["vector_similarity"] >= SITUATIONAL_MIN_VECTOR_SIMILARITY
+    ]
+
+
 def _format_results(results: list[dict]) -> str:
     """Render a memory_search JSON response as a markdown list for prompt
     injection. Mirrors the pre-0.5.0 server-side prose format so the
@@ -332,6 +351,8 @@ def build_context(raw_text: str, *, prefix: str = "") -> str:
         if trimmed:
             try:
                 results = json.loads(trimmed)
+                if isinstance(results, list) and results:
+                    results = _filter_by_relevance(results)
                 if isinstance(results, list) and results:
                     situational_rendered = _format_results(results)
                     if len(situational_rendered) > CHAR_BUDGET:
