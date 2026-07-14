@@ -156,6 +156,22 @@ HOOK_TOKEN_BUDGET = 800          # approx tokens injected per prompt
 HOOK_CHARS_PER_TOKEN = 4         # rough conversion factor
 HOOK_CHAR_BUDGET = HOOK_TOKEN_BUDGET * HOOK_CHARS_PER_TOKEN
 
+# HOOK_SITUATIONAL_MIN_VECTOR_SIMILARITY — relevance floor for unprompted
+# situational-recall injection. SEARCH_LIMIT (context_surfacing.py) always
+# fetches up to 12 candidates regardless of how relevant they are, so a
+# query with no genuinely on-topic memory (e.g. one that happens to share a
+# BM25-heavy keyword with many past session titles) previously injected all
+# 12 as noise. composite_score is NOT the right gate here — same rationale
+# as HOOK_DEDUP_SIMILARITY_THRESHOLD above: it's a rank-fusion score
+# dominated by recency/confidence weight (COMPOSITE_WEIGHTS), not a
+# similarity metric, so a recent high-confidence but topically unrelated
+# memory can still score moderately high. vector_similarity (raw cosine,
+# None for BM25-only matches) is the true relevance signal. Results below
+# this floor, or with no vector match at all, are dropped before
+# injection — the standing tier (always-on by design) is unaffected.
+# First-pass heuristic for bge-small-en-v1.5; data-tune post-soak.
+HOOK_SITUATIONAL_MIN_VECTOR_SIMILARITY = 0.35
+
 # HOOK_SLOW_THRESHOLD_SEC — elapsed time above which a successful
 # context_surfacing call prefixes a ⚠ slow warning. Lets the user see
 # latency degradation in the prompt itself without watching logs.
