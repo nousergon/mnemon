@@ -362,11 +362,17 @@ class TestReadTranscript:
 
 class TestBuildContext:
     def _json_result(self, **overrides):
-        """Build a memory_search JSON object (single result) for tests."""
+        """Build a memory_search JSON object (single result) for tests.
+
+        vector_similarity defaults above the relevance floor so these
+        fixtures exercise envelope/formatting/truncation behavior
+        independent of the floor — TestSituationalRelevanceFilter below
+        covers the floor itself.
+        """
         defaults = {
             "doc_id": 1, "title": "Title", "content": "content here",
             "content_type": "note", "confidence": 0.8,
-            "composite_score": 0.8, "vector_similarity": None,
+            "composite_score": 0.8, "vector_similarity": 0.8,
             "created_at": "2026-04-08",
         }
         defaults.update(overrides)
@@ -472,6 +478,105 @@ class TestBuildContext:
         assert "[truncated]" not in ctx
 
 
+class TestSituationalRelevanceFilter:
+    """A result whose vector_similarity is below
+    HOOK_SITUATIONAL_MIN_VECTOR_SIMILARITY (or missing — BM25-only match)
+    must not be injected, even though it still counted toward
+    SEARCH_LIMIT server-side. composite_score is deliberately not the
+    gate — see config.py's HOOK_SITUATIONAL_MIN_VECTOR_SIMILARITY
+    docstring for why (rank-fusion score, dominated by recency/
+    confidence, not a similarity metric)."""
+
+    def _json_result(self, **overrides):
+        defaults = {
+            "doc_id": 1, "title": "Title", "content": "content here",
+            "content_type": "note", "confidence": 0.8,
+            "composite_score": 0.8, "vector_similarity": 0.8,
+            "created_at": "2026-04-08",
+        }
+        defaults.update(overrides)
+        return defaults
+
+    def test_below_floor_result_is_dropped(self):
+        from mnemon.hooks.context_surfacing import (
+            SITUATIONAL_MIN_VECTOR_SIMILARITY,
+            build_context,
+        )
+
+        raw = json.dumps([self._json_result(
+            title="Barely related",
+            vector_similarity=SITUATIONAL_MIN_VECTOR_SIMILARITY - 0.01,
+        )])
+        assert build_context(raw) == ""
+
+    def test_at_floor_result_is_kept(self):
+        from mnemon.hooks.context_surfacing import (
+            SITUATIONAL_MIN_VECTOR_SIMILARITY,
+            build_context,
+        )
+
+        raw = json.dumps([self._json_result(
+            title="Right at the line",
+            vector_similarity=SITUATIONAL_MIN_VECTOR_SIMILARITY,
+        )])
+        assert "Right at the line" in build_context(raw)
+
+    def test_above_floor_result_is_kept(self):
+        from mnemon.hooks.context_surfacing import build_context
+
+        raw = json.dumps([self._json_result(
+            title="Clearly relevant", vector_similarity=0.9,
+        )])
+        assert "Clearly relevant" in build_context(raw)
+
+    def test_null_vector_similarity_bm25_only_is_dropped(self):
+        """A BM25-only keyword match (no vector corroboration) is exactly
+        the shape of noise this floor targets — e.g. many unrelated past
+        sessions sharing one literal word with the current prompt."""
+        from mnemon.hooks.context_surfacing import build_context
+
+        raw = json.dumps([self._json_result(
+            title="Keyword collision only",
+            composite_score=0.9,  # even a high composite_score...
+            vector_similarity=None,  # ...doesn't save a BM25-only match
+        )])
+        assert build_context(raw) == ""
+
+    def test_mixed_list_keeps_only_relevant_results(self):
+        from mnemon.hooks.context_surfacing import build_context
+
+        raw = json.dumps([
+            self._json_result(doc_id=1, title="Relevant", vector_similarity=0.9),
+            self._json_result(doc_id=2, title="Noise", vector_similarity=0.1),
+            self._json_result(doc_id=3, title="Also BM25 only", vector_similarity=None),
+        ])
+        ctx = build_context(raw)
+        assert "Relevant" in ctx
+        assert "Noise" not in ctx
+        assert "Also BM25 only" not in ctx
+        assert "_id: 1" in ctx
+        assert "_id: 2" not in ctx
+        assert "_id: 3" not in ctx
+
+    def test_standing_block_survives_all_situational_filtered_out(self):
+        """The always-on standing tier is a separate, deliberately
+        query-agnostic path — it must still render even when every
+        situational result is filtered below the relevance floor."""
+        from mnemon.hooks.context_surfacing import build_context
+
+        raw = json.dumps([self._json_result(vector_similarity=0.0)])
+        with patch(
+            "mnemon.hooks.context_surfacing._standing_tier_enabled",
+            return_value=False,
+        ), patch(
+            "mnemon.hooks.context_surfacing._read_rendered_cache",
+            return_value="- [preference] **Runway** (id=1)\n  Standing fact.",
+        ):
+            ctx = build_context(raw)
+        assert "Standing fact" in ctx
+        assert "content here" not in ctx
+
+
 class TestBoldBalance:
     """Regression for the </n> rendering artifact: 300-char truncation
     can land mid-**bold**, leaving a dangling ** that downstream
@@ -519,7 +624,7 @@ class TestSpotlightEnvelope:
         defaults = {
             "doc_id": 1, "title": "Title", "content": "content here",
             "content_type": "note", "confidence": 0.8,
-            "composite_score": 0.8, "vector_similarity": None,
+            "composite_score": 0.8, "vector_similarity": 0.8,
             "created_at": "2026-04-08",
         }
         defaults.update(overrides)
@@ -599,7 +704,7 @@ class TestContextSurfacingMain:
             "doc_id": 42, "title": "Pipeline",
             "content": "It works via Step Functions",
             "content_type": "note", "confidence": 0.80,
-            "composite_score": 0.750, "vector_similarity": None,
+            "composite_score": 0.750, "vector_similarity": 0.8,
             "created_at": "2026-04-08",
         }])
         with patch(
@@ -820,7 +925,7 @@ class TestContextSurfacingMain:
         raw_tool_output = json.dumps([{
             "doc_id": 1, "title": "Thing", "content": "Some content",
             "content_type": "note", "confidence": 0.80,
-            "composite_score": 0.80, "vector_similarity": None,
+            "composite_score": 0.80, "vector_similarity": 0.8,
             "created_at": "2026-04-11",
         }])
         slow_elapsed = SLOW_THRESHOLD_SEC + 1.0
@@ -858,7 +963,7 @@ class TestContextSurfacingMain:
         raw_tool_output = json.dumps([{
             "doc_id": 2, "title": "Fast", "content": "Quick response",
             "content_type": "note", "confidence": 0.90,
-            "composite_score": 0.90, "vector_similarity": None,
+            "composite_score": 0.90, "vector_similarity": 0.8,
             "created_at": "2026-04-11",
         }])
         fast_elapsed = SLOW_THRESHOLD_SEC - 0.5
