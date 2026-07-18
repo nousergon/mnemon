@@ -252,15 +252,17 @@ The server persists every issued MCP session ID to `<vault_dir>/mcp_sessions.sql
 
 ## Claude Desktop and other MCP clients
 
-The Claude Code hook above gives **unconditional pre-LLM retrieval** — every prompt triggers a `memory_search` *before* the model sees the question, and the results are injected into context. **No other MCP client supports this flow today**, including Claude Desktop, claude.ai web, the Claude mobile app, Cursor, and Gemini CLI.
+The Claude Code hooks above give **unconditional pre-LLM retrieval** — every prompt triggers a `memory_search` *before* the model sees the question, and the results are injected into context — and **unconditional session capture**: the `Stop`-event hooks (`session_extractor`, `handoff_generator`) write observations and a session handoff to the vault without the model having to decide anything. **No other MCP client supports either flow today**, including Claude Desktop, claude.ai web, the Claude mobile app, Cursor, and Gemini CLI. The write gap is easy to miss: on every non-Code client, a substantive session produces **zero** saved memories unless the model chooses to call `memory_save` or you ask it to.
 
-Why: the hook works because Claude Code exposes a `UserPromptSubmit` lifecycle event that runs a subprocess between the user pressing Enter and the model being invoked. Desktop and the other clients only expose the standard MCP surfaces — **tools** (model-decided), **prompts** (user-invoked via slash menu), and **resources** (client-pulled). None of these fire automatically on every prompt, so there is no architectural place for an MCP server to insert "always-on" recall. Aggressively rewriting the `memory_search` tool description to coerce the model into calling it first is rejected by design — it pollutes the tool surface for every other consumer and is still model-decided.
+Why: the hooks work because Claude Code exposes lifecycle events (`UserPromptSubmit`, `Stop`) that run a subprocess around the model invocation. Desktop and the other clients only expose the standard MCP surfaces — **tools** (model-decided), **prompts** (user-invoked via slash menu), and **resources** (client-pulled). None of these fire automatically on every prompt or at session end, so there is no architectural place for an MCP server to insert "always-on" recall or capture. Aggressively rewriting the `memory_search`/`memory_save` tool descriptions to coerce the model into calling them is rejected by design — it pollutes the tool surface for every other consumer and is still model-decided.
 
 ### Closest practical workaround
 
 Same snippet for every non-Code client — paste it into whichever custom-instructions / rules / memory surface that client exposes:
 
 > Before responding to any of my prompts, call the `memory_search` tool from the mnemon MCP server using relevant terms from my question. Use the returned memories to inform your response. If `memory_search` returns nothing useful, proceed without it.
+>
+> When a conversation reaches a durable outcome — a decision made, a diagnosis reached, a purchase, a preference stated, or any result I'd want a future session to know — call the `memory_save` tool from the mnemon MCP server with a concise title and content, `content_type` set to `decision`, `preference`, or `handoff` as appropriate, and `source_client` set to the name of this client (e.g. `"claude-ai"`). Do not save small talk or ephemeral Q&A.
 
 | Client | Need custom instructions? | Where to paste |
 |---|---|---|
@@ -271,11 +273,11 @@ Same snippet for every non-Code client — paste it into whichever custom-instru
 | **Cursor** | Yes | Settings → Rules → **User Rules** (global) or a `.cursor/rules/*.mdc` file in the project (workspace-scoped). |
 | **Gemini CLI** | Yes | `~/.gemini/GEMINI.md` (global) or a project-rooted `GEMINI.md`. |
 
-In every non-Code client the call is still model-decided — it will skip on short prompts, follow-ups, or when distracted. Not a substitute for a real lifecycle hook.
+In every non-Code client both calls are still model-decided — it will skip the search on short prompts or follow-ups, and it will sometimes end a session without saving anything. Not a substitute for real lifecycle hooks; it converts "never" into "usually," which is the best any MCP-only client can offer today.
 
 ### When the true fix lands
 
-Anthropic would need to add a pre-prompt lifecycle hook to Claude Desktop — the Desktop-side equivalent of Claude Code's `UserPromptSubmit`. Once that surface exists, mnemon's existing `context_surfacing` hook can be wired to it directly. Until then, Claude Code is the only client with guaranteed pre-LLM injection; everywhere else, retrieval is model-decided.
+Anthropic would need to add pre-prompt and session-end lifecycle hooks to Claude Desktop — the Desktop-side equivalents of Claude Code's `UserPromptSubmit` and `Stop`. Once those surfaces exist, mnemon's existing `context_surfacing`, `session_extractor`, and `handoff_generator` hooks can be wired to them directly. Until then, Claude Code is the only client with guaranteed pre-LLM injection and guaranteed session capture; everywhere else, both retrieval and saving are model-decided.
 
 ## Uninstall
 
