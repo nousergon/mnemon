@@ -110,8 +110,8 @@ markers = [
 ]
 
 # Coverage configuration (used when pytest is invoked with --cov).
-# CI runs `pytest --cov=src/mnemon --cov-fail-under=80` so a regression
-# below the 80% floor fails the build. Excluded modules below are
+# CI runs `pytest --cov=src/mnemon --cov-fail-under=90` so a regression
+# below the 90% floor fails the build. Excluded modules below are
 # under-testable-by-design — keeping them in the coverage denominator
 # would force fake/superficial tests that don't actually exercise the
 # code (Streamlit dashboard, entry-point shim, release-engineering
@@ -144,7 +144,12 @@ omit = [
 # upgrade 86→93, + upgrade/downgrade un-omitted). The gate locks in that
 # coverage so it can't silently regress — keeps the manual-test surface
 # small for long-term maintenance.
-fail_under = 88
+#
+# Raised 88 → 90 on 2026-09-10 (repository-baseline-policy.md §4.2 C3
+# ratchet) against a measured 90.18% — the README badge was a hand-set
+# `coverage-90%` literal that happened to match this run's figure by
+# coincidence, not derivation; it was never generated from this gate.
+fail_under = 90
 show_missing = true
 skip_empty = true
 exclude_lines = [
