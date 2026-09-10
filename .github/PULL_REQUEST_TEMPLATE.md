@@ -5,7 +5,7 @@
 ## Checklist
 
 - [ ] Tests added/updated for the behavior change
-- [ ] `pytest` passes locally and coverage stays ≥ 80%
+- [ ] `pytest` passes locally — the coverage floor in `pyproject.toml` is a ratchet, raised as coverage improves and never lowered to make a change pass
 - [ ] `ruff check src/ tests/` is clean for files I touched
 - [ ] `CHANGELOG.md` updated (under `[Unreleased]`)
 - [ ] Schema changes (if any) are **additive** — new nullable columns + migration, never rename/drop

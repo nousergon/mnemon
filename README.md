@@ -1,11 +1,11 @@
 # mnemon
 
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](https://github.com/nousergon/mnemon/issues)
-[![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/pypi/pyversions/mnemon-memory)](https://pypi.org/project/mnemon-memory/)
+[![License](https://img.shields.io/github/license/nousergon/mnemon)](LICENSE)
 [![MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 [![PyPI](https://img.shields.io/pypi/v/mnemon-memory.svg)](https://pypi.org/project/mnemon-memory/)
-[![Coverage](https://img.shields.io/badge/coverage-90%25-brightgreen.svg)](https://github.com/nousergon/mnemon/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/nousergon/mnemon/badges/coverage.json)](https://github.com/nousergon/mnemon/actions/workflows/ci.yml)
 
 > One memory vault. Every MCP client. Self-hosted.
 >
