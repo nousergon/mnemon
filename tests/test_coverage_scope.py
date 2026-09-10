@@ -26,8 +26,13 @@ So these tests assert what a passing suite cannot otherwise notice:
 from __future__ import annotations
 
 import re
-import tomllib
 from pathlib import Path
+
+try:  # Python 3.11+
+    import tomllib
+except ModuleNotFoundError:  # 3.10 — mnemon supports it, and this guard
+    import tomli as tomllib  # must run on EVERY matrix leg. A scope guard
+    # that skips on one interpreter is indistinguishable from one that passed.
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
