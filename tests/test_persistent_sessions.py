@@ -728,6 +728,45 @@ class TestHealthSnapshot:
         assert set(manager.health_snapshot()) == set(manager.metrics())
 
 
+class TestHealthSnapshotTriggersDecay:
+    """health_snapshot() must also fire the gated request-path decay, or the
+    hourly /health probe on an idle deploy never bounds
+    seconds_since_last_decay (check_health.py soft-warn every hour)."""
+
+    @staticmethod
+    def _make_manager(tmp_path, *, decay_fn=lambda: 0, decay_interval_seconds=3600):
+        store = SessionStore(tmp_path / "sessions.sqlite")
+        return PersistentSessionManager(
+            app=MagicMock(name="mcp_server"),
+            session_store=store,
+            decay_fn=decay_fn,
+            decay_interval_seconds=decay_interval_seconds,
+        )
+
+    def test_health_snapshot_fires_overdue_decay_and_resets_age(self, tmp_path):
+        manager = self._make_manager(tmp_path)
+        manager._task_group = MagicMock(name="task_group")
+        manager._last_decay_ts = time.time() - 200_000  # ~55h, past the warn line
+        snap = manager.health_snapshot()
+        manager._task_group.start_soon.assert_called_once_with(
+            manager._run_request_path_decay
+        )
+        assert snap["seconds_since_last_decay"] < 60
+
+    def test_health_snapshot_does_not_fire_decay_within_interval(self, tmp_path):
+        manager = self._make_manager(tmp_path)
+        manager._task_group = MagicMock(name="task_group")
+        manager.health_snapshot()
+        manager._task_group.start_soon.assert_not_called()
+
+    def test_metrics_does_not_fire_decay(self, tmp_path):
+        manager = self._make_manager(tmp_path)
+        manager._task_group = MagicMock(name="task_group")
+        manager._last_decay_ts = 0.0
+        manager.metrics()
+        manager._task_group.start_soon.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Periodic memory-decay sweep — wired alongside the prune task in run().
 # Runs apply_confidence_decay() on the vault every decay_interval_seconds

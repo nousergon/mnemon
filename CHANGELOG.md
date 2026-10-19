@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Fixed
+- **`/health` probe now triggers the gated decay sweep, not just the prune.**
+  `health_snapshot()` fired `_maybe_prune()` but not `_maybe_decay()`, so on an
+  idle suspend-on-idle deploy (no MCP traffic; the periodic timer frozen by
+  suspend) `seconds_since_last_decay` climbed past the 36h warn threshold and the
+  hourly Health Monitor run exited 2 (red) every hour from 2026-10-10 (7 of 65
+  runs failed, alpha-engine-config-I12423). The probe now fires the same gated,
+  off-loop sweep the request path uses.
 - **The README's `coverage-90%` badge was hand-set** — it happened to match
   this run's measured figure by coincidence, but was never derived from CI:
   the enforced floor in `pyproject.toml` was 88%, twelve points below what

@@ -334,7 +334,7 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         return m
 
     def health_snapshot(self) -> dict[str, int]:
-        """``metrics()`` for the /health endpoint, with a prune triggered first.
+        """``metrics()`` for the /health endpoint, with a prune and decay triggered first.
 
         The request-path prune (:meth:`_maybe_prune`) only runs inside
         ``_handle_stateful_request`` — i.e. on real MCP traffic. ``/health``
@@ -355,8 +355,17 @@ class PersistentSessionManager(StreamableHTTPSessionManager):
         ``expire_interval_seconds``), so it is safe to ride on the liveness
         endpoint. ``metrics()`` itself stays a pure read for every other
         caller.
+
+        The decay sweep has the identical hazard and gets the identical
+        fix: :meth:`_maybe_decay` also only ran inside
+        ``_handle_stateful_request``, so on an idle deploy (no MCP traffic,
+        periodic timer frozen by suspend) ``seconds_since_last_decay`` climbed
+        without bound and check_health.py soft-warned (exit 2) every hour
+        from 2026-10-10 even though nothing was broken beyond the missing
+        trigger. The hourly probe now fires the same gated, off-loop sweep.
         """
         self._maybe_prune()
+        self._maybe_decay()
         return self.metrics()
 
     @contextlib.asynccontextmanager
