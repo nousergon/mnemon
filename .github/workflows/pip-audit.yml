@@ -56,7 +56,7 @@ jobs:
         # ruling 2026-10-21 23:12Z "Accept, dated", extended by Brian,
         # Director thread decision card, 2026-10-22 15:36Z: "Extend"):
         #
-        #   pillow 12.3.0 — 24 advisories, all fixed only in pillow 13.0.0.
+        #   pillow 12.3.0 — 35 advisories, all fixed only in pillow 13.0.0.
         #   pillow reaches mnemon only through fastembed (`fastembed>=0.3`),
         #   and every fastembed release from 0.3.0 to 0.9.0 (latest on PyPI
         #   as of 2026-10-22) caps `pillow<13`, so no resolvable fix exists.
@@ -71,7 +71,13 @@ jobs:
         # allows pillow>=13, whichever comes first. Same mechanism and expiry
         # as nousergon/vires's pip-audit.yml.
         #
-        # Exactly these 24 IDs; every other advisory stays enforced.
+        # EXTENDED AGAIN 2026-10-23 (alpha-engine-config-I12541; PENDING
+        # Brian's red-line-3 merge): 11 more pillow 12.3.0 advisories published
+        # after the 2026-10-22 extension (CVE-2026-96636..96644, CVE-2026-96778,
+        # GHSA-78g4-xqwv-q3g8). Same cause, same fix version (13.0.0), SAME
+        # expiry — all 35 lapse together on 2026-11-05.
+        #
+        # Exactly these 35 IDs; every other advisory stays enforced.
         env:
           PILLOW_IGNORE_EXPIRES: "2026-11-04"
           PILLOW_IGNORE_IDS: >-
@@ -99,6 +105,17 @@ jobs:
             CVE-2026-112894
             CVE-2026-112900
             CVE-2026-112901
+            CVE-2026-96636
+            CVE-2026-96637
+            CVE-2026-96638
+            CVE-2026-96639
+            CVE-2026-96640
+            CVE-2026-96641
+            CVE-2026-96642
+            CVE-2026-96643
+            CVE-2026-96644
+            CVE-2026-96778
+            GHSA-78g4-xqwv-q3g8
         run: |
           set -euo pipefail
           IGNORE_ARGS=(--ignore-vuln PYSEC-2025-183)
