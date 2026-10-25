@@ -38,7 +38,11 @@ dependencies = [
     # the next major.
     "mcp>=2.0,<3",
     "numpy>=1.24",
-    "fastembed>=0.3",
+    "fastembed>=0.9.1",
+    # Transitive via fastembed; floored so the pillow 12.3.0 advisories fixed
+    # in 13.0.0 cannot resolve back in (alpha-engine-config-I12480).
+    # fastembed 0.9.1 is the first release whose cap (pillow<14) allows it.
+    "pillow>=13.0.0",
     "httpx[socks]>=0.25",
 ]
 

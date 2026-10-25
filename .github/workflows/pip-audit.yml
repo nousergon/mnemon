@@ -49,96 +49,13 @@ jobs:
         # `src/mnemon/oauth_as.py`, which signs/verifies with RS256
         # against a 2048-bit RSA keypair (algorithm hard-locked, no
         # HS-allowance). The advisory describes no condition that
-        # applies to this usage. (Permanent; not subject to the dated
-        # expiry below.)
+        # applies to this usage. (Permanent.)
         #
-        # DATED, SELF-EXPIRING IGNORES (alpha-engine-config-I12480; Brian's
-        # ruling 2026-10-21 23:12Z "Accept, dated", extended by Brian,
-        # Director thread decision card, 2026-10-22 15:36Z: "Extend"):
-        #
-        #   pillow 12.3.0 — 37 advisories, all fixed only in pillow 13.0.0.
-        #   pillow reaches mnemon only through fastembed (`fastembed>=0.3`),
-        #   and every fastembed release from 0.3.0 to 0.9.0 (latest on PyPI
-        #   as of 2026-10-22) caps `pillow<13`, so no resolvable fix exists.
-        #   mnemon uses fastembed's TextEmbedding only and src/ never imports
-        #   PIL, so no untrusted image is decoded.
-        #
-        # EXPIRY IS MACHINE-ENFORCED: the pillow IDs are passed only while
-        # today (UTC) is on or before PILLOW_IGNORE_EXPIRES. From 2026-11-05
-        # they lapse on their own and this gate goes red again — on the daily
-        # cron as well as on pushes — until the pin is fixed or a new ruling
-        # re-dates them. Remove the whole block as soon as a fastembed release
-        # allows pillow>=13, whichever comes first. Same mechanism and expiry
-        # as nousergon/vires's pip-audit.yml.
-        #
-        # EXTENDED AGAIN 2026-10-23 (alpha-engine-config-I12541; PENDING
-        # Brian's red-line-3 merge): 11 more pillow 12.3.0 advisories published
-        # after the 2026-10-22 extension (CVE-2026-96636..96644, CVE-2026-96778,
-        # GHSA-78g4-xqwv-q3g8). Same cause, same fix version (13.0.0), SAME
-        # expiry — all 35 lapse together on 2026-11-05.
-        #
-        # EXTENDED 2026-10-24 (alpha-engine-config-I12480; PENDING Brian's
-        # red-line-3 merge): 2 more pillow 12.3.0 advisories that PyPI now
-        # lists for 12.3.0 (CVE-2026-114501 / GHSA-654x-cwwv-5j9c,
-        # CVE-2026-112398 / GHSA-5x8w-8jj5-q52h). Same cause, same fix
-        # version (13.0.0), SAME expiry — all 37 lapse together on 2026-11-05.
-        #
-        # Exactly these 37 IDs; every other advisory stays enforced.
-        env:
-          PILLOW_IGNORE_EXPIRES: "2026-11-04"
-          PILLOW_IGNORE_IDS: >-
-            CVE-2026-112395
-            CVE-2026-112397
-            CVE-2026-112400
-            CVE-2026-112404
-            CVE-2026-112895
-            CVE-2026-112896
-            CVE-2026-112897
-            CVE-2026-112899
-            CVE-2026-112390
-            CVE-2026-112391
-            CVE-2026-112392
-            CVE-2026-112393
-            CVE-2026-112396
-            CVE-2026-112399
-            CVE-2026-112401
-            CVE-2026-112402
-            CVE-2026-112405
-            CVE-2026-112406
-            CVE-2026-112891
-            CVE-2026-112892
-            CVE-2026-112893
-            CVE-2026-112894
-            CVE-2026-112900
-            CVE-2026-112901
-            CVE-2026-96636
-            CVE-2026-96637
-            CVE-2026-96638
-            CVE-2026-96639
-            CVE-2026-96640
-            CVE-2026-96641
-            CVE-2026-96642
-            CVE-2026-96643
-            CVE-2026-96644
-            CVE-2026-96778
-            GHSA-78g4-xqwv-q3g8
-            CVE-2026-114501
-            CVE-2026-112398
-        run: |
-          set -euo pipefail
-          IGNORE_ARGS=(--ignore-vuln PYSEC-2025-183)
-          TODAY="$(date -u +%F)"
-          if [[ ! "$TODAY" > "$PILLOW_IGNORE_EXPIRES" ]]; then
-            n=0
-            for id in $PILLOW_IGNORE_IDS; do
-              IGNORE_ARGS+=(--ignore-vuln "$id")
-              n=$((n + 1))
-            done
-            echo "::warning::pip-audit ignoring ${n} pillow advisories until ${PILLOW_IGNORE_EXPIRES} (alpha-engine-config-I12480: fastembed caps pillow<13)"
-          else
-            echo "::error::pillow ignores expired on ${PILLOW_IGNORE_EXPIRES} (alpha-engine-config-I12480) — bump fastembed/pillow or get the ruling re-dated"
-          fi
-          pip-audit --strict "${IGNORE_ARGS[@]}" .
+        # The dated pillow ignores (alpha-engine-config-I12480, expiry
+        # 2026-11-04) are REMOVED: fastembed 0.9.1 (PyPI 2026-10-24) widened
+        # its cap to pillow<14, so pyproject now floors fastembed>=0.9.1 and
+        # pillow>=13.0.0 and those advisories are fixed rather than ignored.
+        run: pip-audit --strict --ignore-vuln PYSEC-2025-183 .
 
   # Alert (Telegram) ONLY on genuine post-merge breakage of the default
   # branch. PR-branch reds (mid-fix commits, cross-repo lib-tag merge-order
