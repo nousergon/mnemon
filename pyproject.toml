@@ -42,7 +42,11 @@ dependencies = [
     # Transitive via fastembed; floored so the pillow 12.3.0 advisories fixed
     # in 13.0.0 cannot resolve back in (alpha-engine-config-I12480).
     # fastembed 0.9.1 is the first release whose cap (pillow<14) allows it.
-    "pillow>=13.0.0",
+    # pillow 13 requires Python >=3.11, so the floor applies there only: on
+    # 3.10 (still in the CI matrix and requires-python) no advisory-free
+    # pillow exists, and fastembed resolves the newest 12.x. That residual
+    # ends when 3.10 support is dropped (CPython 3.10 is EOL 2026-10).
+    "pillow>=13.0.0; python_version >= '3.11'",
     "httpx[socks]>=0.25",
 ]
 
