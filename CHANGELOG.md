@@ -57,6 +57,19 @@
   FastMCP lazy path that no longer exists. The `mcp>=1.27,<3` upper bound
   (relaxed from `<2`) lets the dependency resolver pick 2.x.
 
+### Removed
+- **Python 3.10 support (breaking for 3.10 installs).** `requires-python` is
+  now `>=3.11`; CPython 3.10 reaches end of life in October 2026 (PEP 619).
+  pillow 13.0.0, which fixes the advisories present in pillow 12.x, requires
+  Python 3.11+, so on 3.10 the `pillow>=13.0.0` floor could only apply behind a
+  `python_version >= '3.11'` marker and a 3.10 install resolved a vulnerable
+  pillow 12.3.0 that the 3.13 pip-audit job never saw. The floor now carries no
+  marker and applies on every supported interpreter. The CI and install-test
+  matrices move from 3.10/3.12/3.13 to 3.11/3.12/3.13, the 3.10 classifier is
+  replaced by 3.11, and the 3.10-only `tomli` dev dependency is gone. Users on
+  3.10 stay on the last release that supports it, and pip will not offer them
+  this release (alpha-engine-config-I12649).
+
 ## [0.7.9] - 2026-07-13
 
 External-readiness audit — no behavior changes, packaging/docs only. Bumped
