@@ -33,7 +33,7 @@ You should see ~1160 tests pass in a few seconds. The 4 integration tests are ex
 2. Open the PR early (draft is fine) and push commits as you go.
 3. PR title matches Conventional Commits style: `feat(...)`, `fix(...)`, `chore(...)`, `docs(...)`, `ci(...)`, `refactor(...)`. CI uses this for changelog suggestions.
 4. **Bump the version** (`pyproject.toml` + `src/mnemon/__init__.py`) for any non-trivial change. We avoid the "merged seven PRs without a version bump" problem that bit us in 2026-04-21 — see `CHANGELOG.md` and the release-discipline note in `README.md`.
-5. CI must be green before merge. The matrix runs Python 3.10 / 3.12 / 3.13.
+5. CI must be green before merge. The matrix runs Python 3.11 / 3.12 / 3.13 (3.11 is the `requires-python` floor).
 
 ## Reporting bugs
 

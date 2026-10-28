@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
         # macOS is the primary dev platform — validate it on one Python
         # version to catch Mac-specific regressions without a full
         # cross-product of CI minutes. Windows is scoped out: mnemon's
