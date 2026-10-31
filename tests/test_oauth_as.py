@@ -818,6 +818,7 @@ class TestServeTokenRefreshGrant:
         refresh_form = urlencode({
             "grant_type": "refresh_token",
             "refresh_token": first["refresh_token"],
+            "client_id": params["client_id"],
         }).encode()
         status, _, body2 = await _run_asgi(
             serve_token, as_config, method="POST", body=refresh_form
@@ -864,6 +865,7 @@ class TestServeTokenRefreshGrant:
         refresh_form = urlencode({
             "grant_type": "refresh_token",
             "refresh_token": first["refresh_token"],
+            "client_id": params["client_id"],
         }).encode()
         _, _, body2 = await _run_asgi(serve_token, as_config, method="POST", body=refresh_form)
         rotated_pair = json.loads(body2)
@@ -902,6 +904,7 @@ class TestServeTokenRefreshGrant:
         refresh_form = urlencode({
             "grant_type": "refresh_token",
             "refresh_token": first["refresh_token"],
+            "client_id": params["client_id"],
         }).encode()
         await _run_asgi(serve_token, as_config, method="POST", body=refresh_form)
 
@@ -948,6 +951,7 @@ class TestServeTokenRefreshGrant:
         refresh_form = urlencode({
             "grant_type": "refresh_token",
             "refresh_token": first["refresh_token"],
+            "client_id": params["client_id"],
         }).encode()
         _, _, body2 = await _run_asgi(serve_token, as_config, method="POST", body=refresh_form)
         rotated_pair = json.loads(body2)
@@ -966,10 +970,13 @@ class TestServeTokenRefreshGrant:
         assert json.loads(body) == rotated_pair
 
     @pytest.mark.asyncio
-    async def test_unknown_refresh_token_rejected(self, as_config):
+    async def test_unknown_refresh_token_rejected(self, as_config, registered_client):
         from mnemon.oauth_as import serve_token
 
-        form = b"grant_type=refresh_token&refresh_token=nope"
+        form = (
+            "grant_type=refresh_token&refresh_token=nope&client_id="
+            + registered_client["client_id"]
+        ).encode()
         status, _, body = await _run_asgi(
             serve_token, as_config, method="POST", body=form
         )
@@ -1347,6 +1354,141 @@ class TestVerifySelfHostedToken:
 # ── Volume-backed persistence of auth codes + refresh tokens ────────────────
 
 
+class TestRefreshClientBinding:
+    """A refresh token is redeemable only by the client it was issued to
+    (alpha-engine-config-I12900). Every check runs before the token is
+    consumed, on the first rotation and on a grace-window retry alike."""
+
+    @staticmethod
+    def _other_client(as_config):
+        from mnemon.oauth_as import register_client
+
+        return register_client(as_config, {
+            "redirect_uris": ["https://other/cb"],
+            "client_name": "Other Client",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        })
+
+    @staticmethod
+    async def _refresh(as_config, refresh_token, client_id=None):
+        from urllib.parse import urlencode
+
+        from mnemon.oauth_as import serve_token
+
+        form = {"grant_type": "refresh_token", "refresh_token": refresh_token}
+        if client_id is not None:
+            form["client_id"] = client_id
+        status, _, body = await _run_asgi(
+            serve_token, as_config, method="POST", body=urlencode(form).encode()
+        )
+        return status, json.loads(body)
+
+    @staticmethod
+    def _issue(as_config, client_id):
+        from mnemon.oauth_as import _issue_token_pair
+
+        return _issue_token_pair(as_config, subject="owner", scope="mcp", client_id=client_id)
+
+    @pytest.mark.asyncio
+    async def test_wrong_client_is_rejected_and_cannot_consume_the_token(
+        self, as_config, registered_client
+    ):
+        other = self._other_client(as_config)
+        issued = self._issue(as_config, registered_client["client_id"])
+
+        status, body = await self._refresh(as_config, issued["refresh_token"], other["client_id"])
+        assert status == 400
+        assert body["error"] == "invalid_grant"
+        # Generic: indistinguishable from an unknown token.
+        status_u, body_u = await self._refresh(as_config, "nope", other["client_id"])
+        assert (status_u, body_u) == (status, body)
+
+        # The legitimate client's token survived the attempt.
+        status, body = await self._refresh(
+            as_config, issued["refresh_token"], registered_client["client_id"]
+        )
+        assert status == 200
+        assert body["refresh_token"] != issued["refresh_token"]
+
+    @pytest.mark.asyncio
+    async def test_missing_client_id_is_rejected_without_consuming(
+        self, as_config, registered_client
+    ):
+        issued = self._issue(as_config, registered_client["client_id"])
+        status, body = await self._refresh(as_config, issued["refresh_token"])
+        assert status == 400
+        assert body == {"error": "invalid_request", "error_description": "missing client_id"}
+        status, _ = await self._refresh(
+            as_config, issued["refresh_token"], registered_client["client_id"]
+        )
+        assert status == 200
+
+    @pytest.mark.asyncio
+    async def test_unknown_client_id_is_rejected_without_consuming(
+        self, as_config, registered_client
+    ):
+        issued = self._issue(as_config, registered_client["client_id"])
+        status, body = await self._refresh(as_config, issued["refresh_token"], "unregistered")
+        assert status == 401
+        assert body["error"] == "invalid_client"
+        status, _ = await self._refresh(
+            as_config, issued["refresh_token"], registered_client["client_id"]
+        )
+        assert status == 200
+
+    @pytest.mark.asyncio
+    async def test_grace_window_retry_enforces_the_original_client(
+        self, as_config, registered_client
+    ):
+        other = self._other_client(as_config)
+        issued = self._issue(as_config, registered_client["client_id"])
+        rt = issued["refresh_token"]
+        status, rotated = await self._refresh(as_config, rt, registered_client["client_id"])
+        assert status == 200
+
+        status, body = await self._refresh(as_config, rt, other["client_id"])
+        assert status == 400 and body["error"] == "invalid_grant"
+        assert "access_token" not in body
+
+        # The original client's retry still gets the identical pair.
+        status, body = await self._refresh(as_config, rt, registered_client["client_id"])
+        assert status == 200 and body == rotated
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_rotation_entry_without_a_client_is_refused(
+        self, as_config, registered_client
+    ):
+        """Entries written before the binding carry no client_id. They expire
+        within the 60 s grace window; until then they are refused, not trusted."""
+        from mnemon.oauth_as import _REFRESH_TOKEN_GRACE_SEC, _now, _save_rotated_tokens
+
+        _save_rotated_tokens(as_config, {
+            "old-rt": {"response": {"access_token": "x"},
+                       "expires_at": _now() + _REFRESH_TOKEN_GRACE_SEC},
+        })
+        status, body = await self._refresh(as_config, "old-rt", registered_client["client_id"])
+        assert status == 400 and body["error"] == "invalid_grant"
+
+    @pytest.mark.asyncio
+    async def test_correct_client_refresh_works_across_restart(
+        self, as_config, registered_client
+    ):
+        import importlib
+
+        import mnemon.oauth_as as as_mod
+
+        other = self._other_client(as_config)
+        issued = self._issue(as_config, registered_client["client_id"])
+        importlib.reload(as_mod)
+
+        status, _ = await self._refresh(as_config, issued["refresh_token"], other["client_id"])
+        assert status == 400
+        status, body = await self._refresh(
+            as_config, issued["refresh_token"], registered_client["client_id"]
+        )
+        assert status == 200 and body["refresh_token"] != issued["refresh_token"]
+
 class TestStatePersistence:
     """Auth codes and refresh tokens must survive process restarts so
     Fly autostop wake doesn't force every claude.ai client to re-enter
@@ -1378,6 +1520,7 @@ class TestStatePersistence:
 
         body = (
             f"grant_type=refresh_token&refresh_token={refresh_token}"
+            f"&client_id={registered_client['client_id']}"
         ).encode()
         status, _, resp_body = await _run_asgi(
             as_mod.serve_token, as_config, method="POST", body=body
