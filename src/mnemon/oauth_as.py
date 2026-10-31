@@ -1019,41 +1019,75 @@ async def _token_authorization_code(
     await _send_json(send, 200, tokens)
 
 
+#: The one response for every refresh token this client may not redeem:
+#: unknown, expired, already rotated, or issued to a DIFFERENT client. A
+#: distinct "client_id mismatch" would confirm to a holder of someone else's
+#: token that the token is live (RFC 6749 §5.2 invalid_grant).
+_INVALID_REFRESH_GRANT = {
+    "error": "invalid_grant",
+    "error_description": "unknown, expired, or already-rotated refresh token",
+}
+
+
 async def _token_refresh(
     config: AuthorizationServerConfig, params: dict[str, str], send
 ) -> None:
+    """refresh_token grant, bound to the client the token was issued to.
+
+    Public-client contract (OAuth 2.1 §4.3.1; every client here registers
+    with ``token_endpoint_auth_method="none"``): the request MUST carry
+    ``client_id``; it must name a registered client; and it must equal the
+    ``client_id`` stored with the refresh token — on the first rotation AND
+    on a grace-window retry. Every check runs BEFORE anything is consumed, so
+    a request from the wrong client cannot burn the legitimate client's
+    token (alpha-engine-config-I12900).
+    """
     from .auth import _send_json
 
     refresh_token = params.get("refresh_token", "")
-    if not refresh_token:
-        await _send_json(send, 400, {
-            "error": "invalid_request",
-            "error_description": "missing refresh_token",
+    client_id = params.get("client_id", "")
+    for name, value in (("refresh_token", refresh_token), ("client_id", client_id)):
+        if not value:
+            await _send_json(send, 400, {
+                "error": "invalid_request",
+                "error_description": f"missing {name}",
+            })
+            return
+    if get_client(config, client_id) is None:
+        await _send_json(send, 401, {
+            "error": "invalid_client",
+            "error_description": (
+                "unknown client_id; clients must register via /oauth/register"
+            ),
         })
         return
 
-    # Rotation: consume the old refresh token regardless of outcome so a
-    # leaked token can only be used once. A small grace window (see
-    # _REFRESH_TOKEN_GRACE_SEC) lets a retried refresh of an already-
-    # rotated RT return the same new pair — without it, a network blip
-    # between the token endpoint and the client (claude.ai's mcp-proxy,
-    # in particular) silently bricks the connector.
+    # Rotation: consume the old refresh token once it is proven to belong to
+    # this client, so a leaked token can only be used once. A small grace
+    # window (see _REFRESH_TOKEN_GRACE_SEC) lets a retried refresh of an
+    # already-rotated RT return the same new pair — without it, a network
+    # blip between the token endpoint and the client (claude.ai's
+    # mcp-proxy, in particular) silently bricks the connector.
     tokens = _load_refresh_tokens(config)
-    record = tokens.pop(refresh_token, None)
+    record = tokens.get(refresh_token)
     if record is None:
         # Not in the live set. Check the rotated-RT cache: if this RT was
-        # rotated within the grace window, return the same pair we
-        # issued then (idempotent retry).
+        # rotated within the grace window FOR THIS CLIENT, return the same
+        # pair we issued then (idempotent retry). An entry with no stored
+        # client_id predates the binding and is refused, not trusted.
         rotated = _load_rotated_tokens(config)
         cached = rotated.get(refresh_token)
-        if cached is not None:
+        if cached is not None and cached.get("client_id") == client_id:
             await _send_json(send, 200, cached["response"])
             return
-        await _send_json(send, 400, {
-            "error": "invalid_grant",
-            "error_description": "unknown, expired, or already-rotated refresh token",
-        })
+        await _send_json(send, 400, _INVALID_REFRESH_GRANT)
         return
+    if record.get("client_id") != client_id:
+        # Not consumed: the token stays redeemable by the client it belongs to.
+        logger.warning("oauth_as: refresh_token presented by a client it was not issued to")
+        await _send_json(send, 400, _INVALID_REFRESH_GRANT)
+        return
+    del tokens[refresh_token]
     _save_refresh_tokens(config, tokens)
     if record["expires_at"] < _now():
         await _send_json(send, 400, {
@@ -1070,11 +1104,13 @@ async def _token_refresh(
     )
 
     # Cache the response keyed by the *old* RT so a retried request with
-    # that RT gets the same pair back. expires_at drives the prune in
-    # _load_token_file, so the entry self-cleans after the grace window.
+    # that RT gets the same pair back — for the same client only.
+    # expires_at drives the prune in _load_token_file, so the entry
+    # self-cleans after the grace window.
     rotated = _load_rotated_tokens(config)
     rotated[refresh_token] = {
         "response": new_pair,
+        "client_id": record["client_id"],
         "expires_at": _now() + _REFRESH_TOKEN_GRACE_SEC,
     }
     _save_rotated_tokens(config, rotated)

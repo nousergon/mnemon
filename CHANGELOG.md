@@ -3,6 +3,17 @@
 ## [Unreleased]
 
 ### Fixed
+- **A refresh token could be redeemed by a client it was not issued to**
+  (alpha-engine-config-I12900, audit 2026-10-30 PLAT-06). The refresh records
+  stored `client_id`, but `_token_refresh` never required or compared it, and
+  the grace-window retry cache returned its stored pair to any caller. The
+  refresh grant now follows the OAuth 2.1 public-client contract: `client_id`
+  is required (`invalid_request`), must be registered (`invalid_client`, 401)
+  and must equal the token's stored client, on the first rotation and on a
+  grace-window retry. A mismatch returns the same `invalid_grant` as an unknown
+  token and does not consume it, so the rightful client can still refresh.
+  Rotation-cache entries now store their client; an entry written before this
+  change is refused for its remaining seconds of grace.
 - **`/health` probe now triggers the gated decay sweep, not just the prune.**
   `health_snapshot()` fired `_maybe_prune()` but not `_maybe_decay()`, so on an
   idle suspend-on-idle deploy (no MCP traffic; the periodic timer frozen by
